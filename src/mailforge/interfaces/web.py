@@ -51,6 +51,7 @@ from mailforge.application.local_application import (
 )
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
+from mailforge.application.programmable_operations import ProgrammableOperationsService
 from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
 from mailforge.application.reporting import ReportFilters, ReportingError, ReportingService
@@ -120,6 +121,23 @@ class DataConnectionHandoffInput(BaseModel):
 class DataStudioRevisionInput(BaseModel):
     definition: dict[str, Any]
     expected_revision_id: str | None = None
+
+
+class ProgrammableFunctionInput(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    version: str = Field(default="1.0", min_length=1, max_length=32)
+    definition: dict[str, Any]
+
+
+class ProgrammablePreviewInput(BaseModel):
+    records: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    revision_id: str | None = None
+
+
+class ProgrammableRevisionInput(BaseModel):
+    version: str | None = Field(default=None, max_length=32)
+    definition: dict[str, Any]
 
 
 class DataStudioContactImportInput(BaseModel):
@@ -640,7 +658,10 @@ class WebRuntime:
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
-        self.data_studio = DataStudioService(self.store)
+        self.programmable = ProgrammableOperationsService(
+            self.store, extension_root=self.data_directory.root / "extensions"
+        )
+        self.data_studio = DataStudioService(self.store, programmable=self.programmable)
         self.data_connections = DataConnectionsService(
             self.store,
             root=self.data_directory.artifacts / "data-connections",
@@ -651,6 +672,7 @@ class WebRuntime:
             outbound=self.outbound,
             segmentation=self.segmentation,
             data_studio=self.data_studio,
+            programmable=self.programmable,
         )
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
@@ -676,8 +698,11 @@ class WebRuntime:
             campaigns=self.campaigns,
             message_studio=self.message_studio,
             data_studio=self.data_studio,
+            programmable=self.programmable,
         )
-        self.inbound_operations = InboundOperations(self.store, message_studio=self.message_studio)
+        self.inbound_operations = InboundOperations(
+            self.store, message_studio=self.message_studio, programmable=self.programmable
+        )
         self.inbound.set_operations(self.inbound_operations)
         self.automation_workers = AutomationWorkerSupervisor(self.automation)
         self.automation_runtime = AutomationRuntimeSupervisor(
@@ -2284,6 +2309,71 @@ def create_app(
             return _error(
                 404 if error.code == "extension_not_found" else 400, error.code, str(error)
             )
+
+    @app.get(f"{API_PREFIX}/functions")
+    async def programmable_functions():
+        return {"items": runtime.programmable.list_functions()}
+
+    @app.post(f"{API_PREFIX}/functions")
+    async def create_programmable_function(payload: ProgrammableFunctionInput):
+        try:
+            return runtime.programmable.create_function(
+                payload.name, payload.definition, version=payload.version
+            )
+        except Exception as error:
+            return _error(400, getattr(error, "code", "function_invalid"), str(error))
+
+    @app.post(f"{API_PREFIX}/functions/{{name}}/preview")
+    async def preview_programmable_function(name: str, payload: ProgrammablePreviewInput):
+        try:
+            result = runtime.programmable.execute(
+                name,
+                payload.records,
+                revision_id=payload.revision_id,
+                parameters=payload.parameters,
+                context="data_studio",
+                correlation_id=f"preview:{uuid.uuid4()}",
+            )
+            result.pop("execution_id", None)
+            return result
+        except Exception as error:
+            return _error(400, getattr(error, "code", "function_invalid"), str(error))
+
+    @app.get(f"{API_PREFIX}/functions/{{name}}/revisions")
+    async def programmable_function_revisions(name: str):
+        try:
+            return {"items": runtime.programmable.list_revisions(name)}
+        except Exception as error:
+            code = getattr(error, "code", "function_invalid")
+            return _error(404 if code == "function_not_found" else 400, code, str(error))
+
+    @app.post(f"{API_PREFIX}/functions/{{name}}/revisions")
+    async def create_programmable_revision(name: str, payload: ProgrammableRevisionInput):
+        try:
+            return runtime.programmable.create_revision(
+                name, payload.definition, version=payload.version
+            )
+        except Exception as error:
+            code = getattr(error, "code", "function_invalid")
+            return _error(404 if code == "function_not_found" else 400, code, str(error))
+
+    @app.get(f"{API_PREFIX}/functions/{{name}}/history")
+    async def programmable_function_history(name: str, limit: int = 100):
+        try:
+            return {"items": runtime.programmable.list_executions(name, limit=limit)}
+        except Exception as error:
+            code = getattr(error, "code", "function_invalid")
+            return _error(404 if code == "function_not_found" else 400, code, str(error))
+
+    @app.post(f"{API_PREFIX}/functions/{{name}}/{{action}}")
+    async def programmable_function_action(name: str, action: str):
+        if action not in {"enable", "disable"}:
+            return _error(400, "action_invalid", "unsupported function action")
+        try:
+            return runtime.programmable.set_enabled(name, action == "enable")
+        except Exception as error:
+            code = getattr(error, "code", "function_invalid")
+            return _error(404 if code == "function_not_found" else 400, code, str(error))
 
     @app.get(f"{API_PREFIX}/campaigns")
     async def campaigns(limit: int = 100, offset: int = 0):

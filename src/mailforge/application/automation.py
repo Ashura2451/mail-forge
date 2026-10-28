@@ -14,6 +14,10 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mailforge.application.campaigns import CampaignService
+from mailforge.application.programmable_operations import (
+    ProgrammableOperationsError,
+    ProgrammableOperationsService,
+)
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.domain.campaign import utc_now
 from mailforge.domain.outbound import SenderPolicy
@@ -49,9 +53,10 @@ NODE_KINDS = {
     "PREPARE_CAMPAIGN",
     "NOTE",
     "RUN_DATA_STUDIO",
+    "FUNCTION",
     "END",
 }
-ACTION_KINDS = {"ADD_TO_LIST", "REMOVE_FROM_LIST", "PREPARE_CAMPAIGN", "NOTE", "RUN_DATA_STUDIO"}
+ACTION_KINDS = {"ADD_TO_LIST", "REMOVE_FROM_LIST", "PREPARE_CAMPAIGN", "NOTE", "RUN_DATA_STUDIO", "FUNCTION"}
 AUTOMATION_LEASE_SECONDS = 60
 MAX_GRAPH_BYTES = 64 * 1024
 MAX_NODES = 100
@@ -116,11 +121,13 @@ class AutomationService:
         campaigns: CampaignService | None = None,
         message_studio=None,
         data_studio=None,
+        programmable=None,
     ):
         self.store = store
         self.campaigns = campaigns or CampaignService(store)
         self.message_studio = message_studio
         self.data_studio = data_studio
+        self.programmable = programmable or getattr(data_studio, "programmable", None) or ProgrammableOperationsService(store)
         self.segmentation = SegmentationService(store)
         self._event_lock = threading.Lock()
 
@@ -246,6 +253,16 @@ class AutomationService:
                         errors.append(f"data studio action {node_id} requires {key}")
                 if config.get("destination", "artifact") not in {"artifact"}:
                     errors.append(f"data studio action {node_id} has an unsupported destination")
+            if kind == "FUNCTION":
+                config = node.get("config", {})
+                if not config.get("function_id"):
+                    errors.append(f"function action {node_id} requires function_id")
+                if not config.get("revision_id"):
+                    errors.append(f"function action {node_id} requires revision_id")
+                if not config.get("content_hash"):
+                    errors.append(f"function action {node_id} requires content_hash")
+                if not isinstance(config.get("input_mapping", {}), dict):
+                    errors.append(f"function action {node_id} input_mapping must be an object")
             if kind == "NOTE" and len(str(node.get("config", {}).get("note", ""))) > 1000:
                 errors.append(f"note node {node_id} exceeds the 1000 character limit")
             if kind in ACTION_KINDS and node.get("config", {}).get("action") not in {
@@ -714,6 +731,18 @@ class AutomationService:
                             "data studio action references an unavailable source artifact",
                             "reference_not_found",
                         ) from error
+                if node["kind"] == "FUNCTION":
+                    config = node.get("config", {})
+                    try:
+                        function = self.programmable.get_function(config["function_id"])
+                        if config.get("revision_id"):
+                            revision = self.programmable.get_revision(config["revision_id"])
+                            if revision["function_id"] != function["id"]:
+                                raise AutomationError("function revision does not belong to function", "reference_not_found")
+                            if revision["content_hash"] != config.get("content_hash"):
+                                raise AutomationError("function revision content hash does not match", "reference_not_found")
+                    except ProgrammableOperationsError as error:
+                        raise AutomationError(str(error), "reference_not_found") from error
                 if node["kind"] == "CONDITION" and config.get("segment_id"):
                     try:
                         self.segmentation.get_segment(
@@ -1412,6 +1441,7 @@ class AutomationService:
     def _action(self, run, node):
         config = node.get("config", {})
         key = f"automation:{run['id']}:{node['id']}"
+        idempotency_key = key
         with self.store.connect() as connection:
             enrollment = connection.execute(
                 "SELECT * FROM automation_enrollments WHERE id = (SELECT enrollment_id FROM automation_runs WHERE id = ?)",
@@ -1476,6 +1506,38 @@ class AutomationService:
                     {"note": str(config.get("note", ""))[:1000], "node": node["id"]},
                 )
             output = {"note_recorded": True}
+        elif node["kind"] == "FUNCTION":
+            contact = self.store.get_contact(enrollment["contact_id"]) if enrollment["contact_id"] else {}
+            metadata = json.loads(contact.get("metadata_json") or "{}") if contact else {}
+            context = {
+                "email": contact.get("normalized_email", "") if contact else "",
+                "name": contact.get("display_name", "") if contact else "",
+                "contact": metadata,
+                **metadata,
+            }
+            inputs = {}
+            for input_name, source in config.get("input_mapping", {}).items():
+                value: Any = context
+                for part in str(source).split("."):
+                    value = value.get(part) if isinstance(value, dict) else None
+                inputs[input_name] = value
+            try:
+                result = self.programmable.execute(
+                    config["function_id"],
+                    inputs,
+                    revision_id=config.get("revision_id"),
+                    parameters=config.get("parameters", {}),
+                    context="automation",
+                    correlation_id=idempotency_key,
+                )
+            except ProgrammableOperationsError as error:
+                raise AutomationError(str(error), error.code) from error
+            output = {
+                "function_id": config["function_id"],
+                "revision_id": result.get("revision_id"),
+                "execution_id": result.get("execution_id"),
+                "records": result.get("records", []),
+            }
         else:
             campaign_id = config.get("campaign_id")
             if not campaign_id:

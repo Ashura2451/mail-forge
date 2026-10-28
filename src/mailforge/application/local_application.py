@@ -289,7 +289,7 @@ def create_backup(data: DataDirectory, destination: str | Path | None = None) ->
                         "sha256": _sha256(data.config),
                     }
                 )
-            for source_root in (data.artifacts, data.root / "list-tools"):
+            for source_root in (data.artifacts, data.root / "extensions", data.root / "list-tools"):
                 if not source_root.is_dir():
                     continue
                 for source in sorted(source_root.rglob("*")):

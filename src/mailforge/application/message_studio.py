@@ -16,6 +16,10 @@ from pathlib import PurePath
 from typing import Any
 
 from mailforge.application.composition import ResolvedAttachment
+from mailforge.application.programmable_operations import (
+    ProgrammableOperationsError,
+    ProgrammableOperationsService,
+)
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.application.templates import SafeTemplateRenderer
 from mailforge.domain.email import normalize_email, validate_email
@@ -37,6 +41,7 @@ ALLOWED_BLOCKS = {
     "spacer",
     "columns",
     "conditional",
+    "function",
 }
 ALLOWED_MEDIA = {
     "image/png",
@@ -108,12 +113,14 @@ class MessageStudioService:
         outbound=None,
         segmentation=None,
         data_studio=None,
+        programmable: ProgrammableOperationsService | None = None,
         now_fn=None,
     ):
         self.store = store
         self.outbound = outbound
         self.segmentation = segmentation or SegmentationService(store)
         self.data_studio = data_studio
+        self.programmable = programmable or ProgrammableOperationsService(store)
         self.renderer = SafeTemplateRenderer()
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
 
@@ -239,6 +246,31 @@ class MessageStudioService:
                     raise MessageStudioError("conditional branch is invalid")
                 for child in branch:
                     self._validate_block(child, depth=depth + 1)
+        elif kind == "function":
+            if not isinstance(block.get("function_id"), str) or not block["function_id"]:
+                raise MessageStudioError("function blocks require function_id", "function_invalid")
+            if not isinstance(block.get("revision_id"), str) or not block["revision_id"]:
+                raise MessageStudioError("function blocks require a pinned revision_id", "function_invalid")
+            if not isinstance(block.get("content_hash"), str) or not block["content_hash"]:
+                raise MessageStudioError("function blocks require content_hash", "function_invalid")
+            mapping = block.get("input_mapping", {})
+            if not isinstance(mapping, Mapping) or len(mapping) > 20:
+                raise MessageStudioError("function input_mapping is invalid", "function_invalid")
+            for key, value in mapping.items():
+                if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(key)) or not re.fullmatch(
+                    r"(?:email|name|contact\.[a-z][a-z0-9_]{0,63})", str(value)
+                ):
+                    raise MessageStudioError("function input_mapping contains an unsafe field", "function_invalid")
+            if not isinstance(block.get("parameters", {}), Mapping):
+                raise MessageStudioError("function parameters must be an object", "function_invalid")
+            try:
+                revision = self.programmable.get_revision(block["revision_id"]) if block.get("revision_id") else self.programmable.get_function(block["function_id"])
+            except ProgrammableOperationsError as error:
+                raise MessageStudioError(str(error), error.code) from error
+            if block.get("revision_id") and revision.get("function_id") != self.programmable.get_function(block["function_id"])["id"]:
+                raise MessageStudioError("function revision does not belong to function", "function_invalid")
+            if revision.get("content_hash") != block["content_hash"]:
+                raise MessageStudioError("function revision content hash does not match", "function_invalid")
 
     def _validate_attachment_ref(self, attachment: Any) -> None:
         if not isinstance(attachment, Mapping) or not isinstance(attachment.get("asset_id"), str):
@@ -653,6 +685,7 @@ class MessageStudioService:
         warnings: list[str],
         attachments: list[ResolvedAttachment],
         text: list[str],
+        context: Mapping[str, Any],
     ) -> str:
         html_parts: list[str] = []
         for block in blocks:
@@ -710,6 +743,30 @@ class MessageStudioService:
                 html_parts.append(
                     f'<div aria-hidden="true" style="height:{height}px;line-height:{height}px">&nbsp;</div>'
                 )
+            elif kind == "function":
+                inputs = {}
+                for key, source in block.get("input_mapping", {}).items():
+                    value: Any = context
+                    for part in source.split("."):
+                        value = value.get(part) if isinstance(value, Mapping) else None
+                    inputs[key] = value
+                try:
+                    execution = self.programmable.execute(
+                        block["function_id"],
+                        inputs,
+                        revision_id=block.get("revision_id"),
+                        parameters=block.get("parameters", {}),
+                        context="message_studio",
+                        correlation_id=f"message-render:{_hash({'block': dict(block), 'inputs': inputs})}",
+                    )
+                except ProgrammableOperationsError as error:
+                    raise MessageStudioError(str(error), error.code) from error
+                output = execution["records"][0] if execution["records"] else {}
+                field = str(block.get("output_field", "value"))
+                value = output.get(field, output.get("personalization_label", output.get("email_domain", "")))
+                value = str(value or "")[:10_000]
+                html_parts.append(f"<p style=\"margin:0 0 16px;line-height:1.6\">{html.escape(value)}</p>")
+                text.append(value)
             elif kind == "columns":
                 cells = []
                 for column in block["columns"]:
@@ -723,6 +780,7 @@ class MessageStudioService:
                             warnings=warnings,
                             attachments=attachments,
                             text=child_text,
+                            context=context,
                         )
                     )
                     text.extend(child_text)
@@ -745,6 +803,7 @@ class MessageStudioService:
                         warnings=warnings,
                         attachments=attachments,
                         text=text,
+                        context=context,
                     )
                 )
                 warnings.append(
@@ -776,6 +835,7 @@ class MessageStudioService:
             warnings=warnings,
             attachments=attachments,
             text=text_parts,
+            context=context,
         )
         text_template = source.get("plain_text_override") or "\n\n".join(text_parts)
         preheader = source.get("preheader", "")
@@ -1093,6 +1153,7 @@ class MessageStudioService:
             "recipe_revision_id": recipe_revision_id,
             "message_revision_id": revision_id,
             "message_content_hash": revision["content_hash"],
+            "function_references": self._function_references(document.get("blocks", [])),
             "field_mapping": dict(field_mapping),
             "recipients": recipients,
         }
@@ -1164,6 +1225,38 @@ class MessageStudioService:
 
         visit(blocks)
         return modes
+
+    def _function_references(self, blocks: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+        references: list[dict[str, str]] = []
+
+        def visit(items: Sequence[Mapping[str, Any]]) -> None:
+            for block in items:
+                if block.get("type") == "function":
+                    try:
+                        function = self.programmable.get_function(block["function_id"])
+                        revision = (
+                            self.programmable.get_revision(block["revision_id"])
+                            if block.get("revision_id")
+                            else self.programmable.list_revisions(function["id"])[0]
+                        )
+                    except (ProgrammableOperationsError, IndexError) as error:
+                        raise MessageStudioError(str(error), "function_invalid") from error
+                    references.append(
+                        {
+                            "function_id": function["id"],
+                            "revision_id": revision["id"],
+                            "content_hash": revision["content_hash"],
+                        }
+                    )
+                if block.get("type") == "columns":
+                    for column in block.get("columns", []):
+                        visit(column)
+                if block.get("type") == "conditional":
+                    visit(block.get("if_true", []))
+                    visit(block.get("if_false", []))
+
+        visit(blocks)
+        return references
 
     def get_data_studio_snapshot(self, snapshot_id: str) -> dict[str, Any]:
         with self.store.connect() as connection:

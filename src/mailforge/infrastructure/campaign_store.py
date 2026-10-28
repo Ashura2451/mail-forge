@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 20
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1289,6 +1289,64 @@ CREATE INDEX IF NOT EXISTS idx_data_connection_events_snapshot
 ON data_connection_events(snapshot_id, created_at DESC);
 """
 
+MIGRATION_19_SQL = """
+CREATE TABLE IF NOT EXISTS programmable_functions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK(kind IN ('declarative', 'python')),
+    version TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+    trusted INTEGER NOT NULL DEFAULT 0 CHECK(trusted IN (0, 1)),
+    source_path TEXT,
+    source_sha256 TEXT,
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS programmable_function_revisions (
+    id TEXT PRIMARY KEY,
+    function_id TEXT NOT NULL REFERENCES programmable_functions(id) ON DELETE RESTRICT,
+    revision_number INTEGER NOT NULL,
+    definition_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'local-operator',
+    UNIQUE(function_id, revision_number),
+    UNIQUE(function_id, content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_programmable_function_revisions
+ON programmable_function_revisions(function_id, revision_number DESC);
+CREATE TABLE IF NOT EXISTS programmable_executions (
+    id TEXT PRIMARY KEY,
+    function_id TEXT NOT NULL REFERENCES programmable_functions(id) ON DELETE RESTRICT,
+    revision_id TEXT NOT NULL REFERENCES programmable_function_revisions(id) ON DELETE RESTRICT,
+    correlation_id TEXT NOT NULL UNIQUE,
+    context TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed', 'canceled')),
+    input_count INTEGER NOT NULL DEFAULT 0,
+    output_count INTEGER NOT NULL DEFAULT 0,
+    output_json TEXT NOT NULL DEFAULT '[]',
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_programmable_executions_function
+ON programmable_executions(function_id, started_at DESC);
+"""
+
+MIGRATION_20_SQL = """
+ALTER TABLE programmable_function_revisions ADD COLUMN source_path TEXT;
+ALTER TABLE programmable_function_revisions ADD COLUMN source_sha256 TEXT;
+ALTER TABLE programmable_function_revisions ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}';
+UPDATE programmable_function_revisions
+SET source_path = (SELECT source_path FROM programmable_functions WHERE id = programmable_function_revisions.function_id),
+    source_sha256 = (SELECT source_sha256 FROM programmable_functions WHERE id = programmable_function_revisions.function_id),
+    manifest_json = (SELECT manifest_json FROM programmable_functions WHERE id = programmable_function_revisions.function_id)
+WHERE source_path IS NULL;
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1583,6 +1641,20 @@ class CampaignStore:
                     (18, utc_now()),
                 )
                 current = 18
+            if current < 19:
+                self._apply_migration_19(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (19, utc_now()),
+                )
+                current = 19
+            if current < 20:
+                self._apply_migration_20(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (20, utc_now()),
+                )
+                current = 20
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1706,6 +1778,20 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_18(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_18_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_19(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_19_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_20(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_20_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

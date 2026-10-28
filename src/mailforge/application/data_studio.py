@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from mailforge.application.programmable_operations import (
+    ProgrammableOperationsError,
+    ProgrammableOperationsService,
+)
 from mailforge.domain.email import classify_address, normalize_email
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.infrastructure.providers import ProviderCatalog
@@ -400,10 +404,17 @@ def _safe_export_value(value: Any, specification: dict[str, Any]) -> Any:
 class DataStudioService:
     """Owns recipes, previews, jobs, and safe artifact publication."""
 
-    def __init__(self, store: CampaignStore, root: str | Path | None = None):
+    def __init__(
+        self,
+        store: CampaignStore,
+        root: str | Path | None = None,
+        *,
+        programmable: ProgrammableOperationsService | None = None,
+    ):
         self.store = store
         self.root = Path(root or self.store.path.parent / "data-studio")
         self.root.mkdir(parents=True, exist_ok=True)
+        self.programmable = programmable or ProgrammableOperationsService(store)
         self._operation_lock_path = self.root.with_name(f".{self.root.name}.lock")
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mailforge-data")
         self._running: set[str] = set()
@@ -717,6 +728,7 @@ class DataStudioService:
         if not name or len(name) > 160:
             raise DataStudioError("recipe name is required", "recipe_invalid")
         definition = self.validate_definition(definition or {"steps": []})
+        self._validate_function_references(definition)
         recipe_id, revision_id = str(uuid.uuid4()), str(uuid.uuid4())
         now, digest = _now(), hashlib.sha256(_json(definition).encode()).hexdigest()
         try:
@@ -771,6 +783,7 @@ class DataStudioService:
         if expected_revision_id and expected_revision_id != current["current_revision_id"]:
             raise DataStudioError("recipe changed; reload before saving", "revision_conflict")
         definition = self.validate_definition(definition)
+        self._validate_function_references(definition)
         now, revision_id = _now(), str(uuid.uuid4())
         digest = hashlib.sha256(_json(definition).encode()).hexdigest()
         with self.store.transaction(immediate=True) as connection:
@@ -817,18 +830,19 @@ class DataStudioService:
             "provider_classify",
             "aggregate",
             "extension",
+            "function",
         }
         for step in definition["steps"]:
             if not isinstance(step, dict) or step.get("type") not in allowed:
                 raise DataStudioError("recipe contains an unsupported step", "recipe_invalid")
-            if (
-                step.get("type") == "extension"
-                and step.get("extension_id") != "email_domain_normalizer"
-            ):
-                raise DataStudioError(
-                    "only the registered email_domain_normalizer extension is available",
-                    "extension_invalid",
-                )
+            if step.get("type") == "extension" and not step.get("extension_id"):
+                raise DataStudioError("extension_id is required", "extension_invalid")
+            if step.get("type") == "function" and not step.get("function_id"):
+                raise DataStudioError("function_id is required", "function_invalid")
+            if step.get("type") == "function" and not step.get("revision_id"):
+                raise DataStudioError("function revision_id is required", "function_invalid")
+            if step.get("type") == "function" and not step.get("content_hash"):
+                raise DataStudioError("function content_hash is required", "function_invalid")
         aggregate_positions = [
             index for index, step in enumerate(definition["steps"]) if step["type"] == "aggregate"
         ]
@@ -869,10 +883,40 @@ class DataStudioService:
             raise DataStudioError("output format is invalid", "output_invalid")
         return json.loads(_json(definition))
 
+    def _validate_function_references(self, definition: dict[str, Any]) -> None:
+        for step in definition.get("steps", []):
+            if step["type"] == "extension":
+                function_id = step.get("extension_id")
+                revision_id = None
+            elif step["type"] == "function":
+                function_id = step.get("function_id")
+                revision_id = step.get("revision_id")
+            else:
+                continue
+            try:
+                function = self.programmable.get_function(function_id)
+                revision = (
+                    self.programmable.get_revision(revision_id)
+                    if revision_id
+                    else self.programmable.list_revisions(function["id"])[0]
+                )
+            except (ProgrammableOperationsError, IndexError) as error:
+                raise DataStudioError(str(error), "function_invalid") from error
+            if (
+                revision["function_id"] != function["id"]
+                or "data_studio" not in revision["definition"].get("contexts", [])
+                or (
+                    step["type"] == "function"
+                    and revision["content_hash"] != step.get("content_hash")
+                )
+            ):
+                raise DataStudioError("function revision is not valid for Data Studio", "function_invalid")
+
     def preview(
         self, source_path: str | Path, definition: dict[str, Any], *, limit: int = 50
     ) -> dict[str, Any]:
         definition = self.validate_definition(definition)
+        self._validate_function_references(definition)
         rows = []
         for row in iter_source_records(source_path):
             rows.append(row)
@@ -889,6 +933,7 @@ class DataStudioService:
         limit: int = 50,
     ) -> dict[str, Any]:
         definition = self.validate_definition(definition)
+        self._validate_function_references(definition)
         rows: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix="mailforge-data-preview-") as directory:
             manifest = Path(directory) / "sources.json"
@@ -1058,7 +1103,7 @@ class DataStudioService:
         return self.get_job(job_id)
 
     def register_extension(self, name: str = "email_domain_normalizer") -> dict[str, Any]:
-        if name != "email_domain_normalizer":
+        if name not in {"email_domain_normalizer", "structured_label_normalizer"}:
             raise DataStudioError(
                 "extension is not in the trusted local registry", "extension_invalid"
             )
@@ -1088,6 +1133,10 @@ class DataStudioService:
                     now,
                 ),
             )
+        try:
+            self.programmable.set_enabled(name, False)
+        except ProgrammableOperationsError as error:
+            raise DataStudioError(str(error), error.code) from error
         return self.get_extension(name)
 
     def get_extension(self, name: str) -> dict[str, Any]:
@@ -1104,6 +1153,10 @@ class DataStudioService:
 
     def set_extension_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
         self.get_extension(name)
+        try:
+            self.programmable.set_enabled(name, enabled)
+        except ProgrammableOperationsError as error:
+            raise DataStudioError(str(error), error.code) from error
         with self.store.transaction(immediate=True) as connection:
             changed = connection.execute(
                 "UPDATE data_studio_extensions SET enabled=?,updated_at=? WHERE name=?",
@@ -1397,7 +1450,23 @@ class DataStudioService:
             output = attempt_dir / "output.rows.jsonl.tmp"
             errors = attempt_dir / "errors.jsonl.tmp"
             count = rejected = processed = 0
-            summary = {"removed": 0, "changed_fields": [], "validation_errors": 0}
+            summary = {
+                "removed": 0,
+                "changed_fields": [],
+                "validation_errors": 0,
+                "function_references": [],
+            }
+
+            def record_function_references(result: dict[str, Any]) -> None:
+                existing = {
+                    (item["function_id"], item["revision_id"])
+                    for item in summary["function_references"]
+                }
+                for item in result.get("function_references", []):
+                    key = (item["function_id"], item["revision_id"])
+                    if key not in existing:
+                        summary["function_references"].append(item)
+                        existing.add(key)
             dedupe_seen: dict[tuple[str, ...], set[tuple[Any, ...]]] = {}
             with (
                 output.open("w", encoding="utf-8") as out,
@@ -1425,6 +1494,7 @@ class DataStudioService:
                             rejected += 1
                         summary["removed"] += result["removed"]
                         summary["validation_errors"] += len(result["errors"])
+                        record_function_references(result)
                         batch.clear()
                         self._progress(job_id, processed, count, rejected, worker_token)
                         self._assert_worker_owns(job_id, worker_token)
@@ -1445,6 +1515,7 @@ class DataStudioService:
                         rejected += 1
                     summary["removed"] += result["removed"]
                     summary["validation_errors"] += len(result["errors"])
+                    record_function_references(result)
                 if aggregate_state is not None:
                     for aggregate_row in self._finalize_aggregate(aggregate_state):
                         out.write(_json(aggregate_row) + "\n")
@@ -1722,6 +1793,7 @@ class DataStudioService:
         working = [dict(row) for row in rows]
         errors: list[dict[str, Any]] = []
         removed = 0
+        function_references: list[dict[str, str]] = []
         for step in definition.get("steps", []):
             kind = step["type"]
             if kind == "select":
@@ -1846,13 +1918,52 @@ class DataStudioService:
                     raise DataStudioError(
                         f"trusted extension is disabled: {extension_id}", "extension_disabled"
                     )
-                for row in working:
-                    source_field = step.get("field", "email")
-                    output_field = step.get("output_field", "email_domain")
-                    row[output_field] = _text(row.get(source_field)).rsplit("@", 1)[-1].lower()
+                try:
+                    execution = self.programmable.execute(
+                        extension_id,
+                        working,
+                        parameters={
+                            "field": step.get("field", "email"),
+                            "output_field": step.get("output_field", "email_domain"),
+                        },
+                        context="data_studio",
+                    )
+                    working = execution["records"]
+                    function_references.append(
+                        {
+                            "function_id": execution["function_id"],
+                            "revision_id": execution["revision_id"],
+                            "content_hash": execution["content_hash"],
+                        }
+                    )
+                except ProgrammableOperationsError as error:
+                    raise DataStudioError(str(error), error.code) from error
+            elif kind == "function":
+                try:
+                    execution = self.programmable.execute(
+                        step["function_id"],
+                        working,
+                        revision_id=step.get("revision_id"),
+                        parameters=step.get("parameters", {}),
+                        context="data_studio",
+                        correlation_id=step.get("correlation_id"),
+                    )
+                    working = execution["records"]
+                    function_references.append(
+                        {
+                            "function_id": execution["function_id"],
+                            "revision_id": execution["revision_id"],
+                            "content_hash": execution["content_hash"],
+                        }
+                    )
+                except ProgrammableOperationsError as error:
+                    raise DataStudioError(str(error), error.code) from error
         return {
             "rows": working[:MAX_PREVIEW_ROWS] if preview else working,
             "errors": errors,
+            "function_references": list({
+                (item["function_id"], item["revision_id"]): item for item in function_references
+            }.values()),
             "removed": removed,
             "counts": {
                 "input": len(rows),
