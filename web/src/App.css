@@ -7,6 +7,11 @@
 .preview-json { max-height:220px; overflow:auto; margin:15px 0 0; padding:12px; border-radius:6px; background:#f0f3ef; color:var(--navy); font:10px/1.5 var(--mono); white-space:pre-wrap; }
 .campaign-layout { display:grid; grid-template-columns:minmax(280px,.8fr) minmax(0,1.8fr); gap:18px; }
 .legacy-campaign-actions { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.campaign-preview-panel { margin-top:18px; }
+.message-preview-card { border-top:1px solid var(--line); padding:12px 0; }
+.message-preview-card strong,.message-preview-card small { display:block; }
+.message-preview-card small { color:var(--muted); margin-top:4px; }
+.message-preview-card p { white-space:pre-wrap; font-size:13px; line-height:1.5; margin:8px 0 0; }
 .campaign-editor,.campaign-queue { min-width:0; }
 .workspace-card { margin-top:18px; border-top:1px solid var(--line); padding-top:18px; }
 .workspace-card .panel-head { margin-bottom:14px; }
