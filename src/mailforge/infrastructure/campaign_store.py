@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -353,7 +353,7 @@ CREATE TABLE IF NOT EXISTS inbound_actions (
     target TEXT,
     status TEXT NOT NULL,
     reason TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL UNIQUE,
+    idempotency_key TEXT NOT NULL,
     proposed_at TEXT NOT NULL,
     applied_at TEXT,
     decided_at TEXT,
@@ -1231,6 +1231,64 @@ MIGRATION_17_SQL = """
 ALTER TABLE data_studio_jobs ADD COLUMN worker_pid INTEGER;
 """
 
+MIGRATION_18_SQL = """
+CREATE TABLE IF NOT EXISTS data_connections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    source_type TEXT NOT NULL CHECK(source_type IN ('sqlite', 'postgresql', 'xlsx')),
+    config_json TEXT NOT NULL DEFAULT '{}',
+    credential_ref TEXT,
+    selection_json TEXT NOT NULL DEFAULT '{}',
+    limits_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    last_test_status TEXT,
+    last_test_message TEXT,
+    last_tested_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS data_connection_snapshots (
+    id TEXT PRIMARY KEY,
+    connection_id TEXT NOT NULL REFERENCES data_connections(id),
+    revision INTEGER NOT NULL,
+    selection_json TEXT NOT NULL,
+    schema_json TEXT NOT NULL DEFAULT '{}',
+    source_signature TEXT,
+    consistency_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed', 'canceled')),
+    artifact_path TEXT,
+    artifact_sha256 TEXT,
+    record_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    idempotency_key TEXT NOT NULL,
+    worker_token TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(connection_id, revision),
+    UNIQUE(connection_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_data_connection_snapshots_status
+ON data_connection_snapshots(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_data_connection_snapshots_connection
+ON data_connection_snapshots(connection_id, revision DESC);
+CREATE TABLE IF NOT EXISTS data_connection_events (
+    id TEXT PRIMARY KEY,
+    connection_id TEXT NOT NULL REFERENCES data_connections(id),
+    snapshot_id TEXT REFERENCES data_connection_snapshots(id),
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_data_connection_events_connection
+ON data_connection_events(connection_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_data_connection_events_snapshot
+ON data_connection_events(snapshot_id, created_at DESC);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1518,6 +1576,13 @@ class CampaignStore:
                     (17, utc_now()),
                 )
                 current = 17
+            if current < 18:
+                self._apply_migration_18(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (18, utc_now()),
+                )
+                current = 18
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1634,6 +1699,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_17(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_17_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_18(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_18_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

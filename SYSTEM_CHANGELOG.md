@@ -1,5 +1,21 @@
 # System changelog
 
+## 2026-10-28 — Read-only data connections and immutable snapshots
+
+- Added schema 18 durable connection profiles, append-only connection events,
+  revisioned snapshots, checksums, cancellation, restart recovery, and private
+  JSONL artifacts for SQLite, PostgreSQL, and XLSX sources.
+- Added bounded read-only adapters with safe selections, parameterized filters,
+  PostgreSQL symbolic credential references, and formula-safe XLSX handling.
+- Added Data Studio handoff plus shared browser/API/CLI surfaces. Existing
+  Contacts, Message Studio, Campaign, and Automation authorities remain the
+  downstream owners of their respective workflows.
+- Local synthetic validation covers SQLite/XLSX acquisition, API
+  upload/preview/snapshot, idempotency, cancellation, checksum rejection, and
+  Data Studio handoff. A disposable local PostgreSQL 16 cluster passed
+  `verify-full` schema, preview, and snapshot qualification; no external
+  provider, credential, mailbox, or recipient data was accessed.
+
 ## 2026-10-28 — Campaign operations workspace
 
 - Added `CampaignOperationsService` as the shared browser/API/CLI orchestration
