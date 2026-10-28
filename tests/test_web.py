@@ -307,6 +307,32 @@ def test_data_studio_connected_destinations_are_explicit_and_snapshot_pinned(
     assert message_preview.status_code == 200
     assert message_preview.json()["snapshot"]["revision_id"] == revision_id
 
+    campaign = client.post(
+        "/api/v1/campaigns",
+        headers=headers,
+        json={
+            "name": "Data Studio prepared batch",
+            "list_id": list_id,
+            "message_revision_id": revision_id,
+            "sender_email": "sender@example.com",
+        },
+    )
+    assert campaign.status_code == 200
+    prepared = client.post(
+        f"/api/v1/campaigns/{campaign.json()['id']}/prepare-data-studio",
+        headers=headers,
+        json={
+            "source_job_id": job_id,
+            "source_artifact_id": output["id"],
+            "recipe_revision_id": recipe.json()["current_revision_id"],
+            "message_revision_id": revision_id,
+            "field_mapping": {"email": "email"},
+        },
+    )
+    assert prepared.status_code == 200
+    assert prepared.json()["data_snapshot"]["artifact_sha256"] == output["sha256"]
+    assert prepared.json()["prepared"] == 2
+
     assert (
         client.post(
             "/api/v1/data-studio/extensions/email_domain_normalizer/register", headers=headers

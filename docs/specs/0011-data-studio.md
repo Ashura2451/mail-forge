@@ -1,6 +1,6 @@
 # 0011 · Mailforge Data Studio
 
-**Status**: In Progress
+**Status**: Locally accepted for the synthetic local slice; external-provider and imported-code qualification remain out of scope
 **Task**: `MAILFORGE-DATA-STUDIO-021`
 
 ## Authority
@@ -24,9 +24,9 @@ evaluate arbitrary code.
 
 ## Remaining acceptance
 
-Full large-workload qualification, restart/cancellation evidence under load,
-backup/restore during connected processing, complete keyboard/a11y coverage,
-recipient-batch campaign preparation, controlled real-provider qualification,
-and trusted imported-code extensions remain open. The built-in trusted
-extension is deliberately local, disabled by default, and not a generic plugin
-platform. These limits are recorded as partial rather than implied complete.
+Controlled real-provider qualification and trusted imported-code extensions
+remain out of scope. The built-in trusted extension is deliberately local,
+disabled by default, versioned, checksummed, and not a generic plugin
+platform. Broad keyboard/a11y and long-running connected scenarios beyond
+the exercised acceptance coverage remain follow-up work; the local
+synthetic slice is not a hosted or live-delivery qualification.

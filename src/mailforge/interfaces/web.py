@@ -86,6 +86,15 @@ class DataStudioMessagePreviewInput(BaseModel):
     row_number: int = Field(default=1, ge=1, le=100_000)
 
 
+class DataStudioCampaignPrepareInput(BaseModel):
+    source_job_id: str
+    source_artifact_id: str
+    recipe_revision_id: str
+    message_revision_id: str
+    field_mapping: dict[str, str]
+    run_key: str = Field(default="primary", min_length=1, max_length=120)
+
+
 class CampaignInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     list_id: str | None = None
@@ -478,14 +487,17 @@ class WebRuntime:
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
+        self.data_studio = DataStudioService(self.store)
         self.message_studio = MessageStudioService(
-            self.store, outbound=self.outbound, segmentation=self.segmentation
+            self.store,
+            outbound=self.outbound,
+            segmentation=self.segmentation,
+            data_studio=self.data_studio,
         )
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.provider_operations = ProviderOperationsService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
-        self.data_studio = DataStudioService(self.store)
         self.automation = AutomationService(
             self.store,
             campaigns=self.campaigns,
@@ -975,7 +987,7 @@ def create_app(
             if missing:
                 return _error(400, "mapping_invalid", f"unknown fields: {', '.join(missing)}")
             checked = runtime.segmentation.validate_import_rows(
-                payload.rows, mappings=payload.mappings
+                payload.rows, mappings=payload.mappings, overwrite=payload.overwrite
             )
             return {
                 "records": checked["records"],
@@ -984,6 +996,7 @@ def create_app(
                 "source_ref": payload.source_ref,
                 "valid": not checked["invalid"],
                 "invalid": checked["invalid"],
+                "conflicts": checked["conflicts"],
             }
         except (KeyError, SegmentationError) as error:
             return _error(400, "mapping_invalid", str(error))
@@ -1381,7 +1394,9 @@ def create_app(
                     "artifact has more rows than max_rows; raise the explicit import limit",
                     "contact_import_limit",
                 )
-            checked = runtime.segmentation.validate_import_rows(rows, mappings=payload.mappings)
+            checked = runtime.segmentation.validate_import_rows(
+                rows, mappings=payload.mappings, overwrite=payload.overwrite
+            )
             return {
                 "records": checked["records"],
                 "mappings": payload.mappings,
@@ -1389,6 +1404,7 @@ def create_app(
                 "source_ref": payload.source_ref,
                 "valid": not checked["invalid"],
                 "invalid": checked["invalid"],
+                "conflicts": checked["conflicts"],
             }
         except (DataStudioError, SegmentationError) as error:
             return _error(400, getattr(error, "code", "contact_import_invalid"), str(error))
@@ -1657,6 +1673,38 @@ def create_app(
             return asdict(report)
         except (KeyError, ValueError) as error:
             return _error(400, "campaign_not_ready", str(error))
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepare-data-studio")
+    async def prepare_data_studio_campaign(
+        campaign_id: str, payload: DataStudioCampaignPrepareInput
+    ):
+        try:
+            campaign = runtime.store.get_campaign(campaign_id)
+            configuration = json.loads(campaign["configuration_json"] or "{}")
+            sender = SenderPolicy(
+                ref=campaign["sender_config_ref"],
+                provider="synthetic",
+                email=configuration.get("sender_email", "sender@example.com"),
+            )
+            snapshot = runtime.message_studio.create_data_studio_snapshot(
+                campaign_id,
+                source_job_id=payload.source_job_id,
+                artifact_id=payload.source_artifact_id,
+                recipe_revision_id=payload.recipe_revision_id,
+                revision_id=payload.message_revision_id,
+                field_mapping=payload.field_mapping,
+                run_key=payload.run_key,
+            )
+            report = runtime.message_studio.prepare_campaign(
+                campaign_id,
+                sender=sender,
+                revision_id=payload.message_revision_id,
+                run_key=payload.run_key,
+                data_snapshot_id=snapshot["id"],
+            )
+            return {**asdict(report), "data_snapshot": snapshot}
+        except (DataStudioError, KeyError, ValueError, MessageStudioError) as error:
+            return _error(400, getattr(error, "code", "campaign_not_ready"), str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/authorize")
     async def authorize_campaign(campaign_id: str):

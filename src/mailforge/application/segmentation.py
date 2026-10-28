@@ -874,6 +874,7 @@ class SegmentationService:
         rows: list[dict[str, Any]],
         *,
         mappings: dict[str, str],
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """Validate a bounded import without mutating contacts or memberships."""
 
@@ -900,12 +901,16 @@ class SegmentationService:
             (key for key, field_id in mappings.items() if field_id == "contact.email"), "email"
         )
         invalid: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
         for position, row in enumerate(rows, start=1):
             email = row.get(email_key) or row.get("email")
             if not isinstance(email, str) or not validate_email(normalize_email(email)).valid:
                 invalid.append(
                     {"row": position, "field": email_key, "reason": "valid email is required"}
                 )
+                continue
+            normalized = normalize_email(email) if isinstance(email, str) else ""
+            contact = self.store.contact_by_email(normalized) if normalized else None
             for source_key, field in mapped_fields.items():
                 if field["id"] == "contact.email" or source_key not in row:
                     continue
@@ -921,7 +926,26 @@ class SegmentationService:
                         )
                 except SegmentationError as error:
                     invalid.append({"row": position, "field": source_key, "reason": str(error)})
-        return {"records": len(rows), "invalid": invalid}
+                    continue
+                if contact is not None:
+                    with self.store.connect() as connection:
+                        existing = connection.execute(
+                            "SELECT * FROM contact_attribute_values WHERE contact_id=? AND field_id=?",
+                            (contact["id"], field["id"]),
+                        ).fetchone()
+                    if existing is not None:
+                        old_value = self._stored_value(existing, field["field_type"])
+                        if old_value != value:
+                            conflicts.append(
+                                {
+                                    "row": position,
+                                    "field": field.get("machine_key", source_key),
+                                    "existing": str(old_value)[:MAX_COMPARISON],
+                                    "incoming": str(value)[:MAX_COMPARISON],
+                                    "disposition": "overwritten" if overwrite else "preserved",
+                                }
+                            )
+        return {"records": len(rows), "invalid": invalid, "conflicts": conflicts}
 
     def import_structured(
         self,
@@ -1027,7 +1051,7 @@ class SegmentationService:
                         "AND contact_id = ? AND field_id = ?",
                         (source_ref, position, contact_id, field["id"]),
                     ).fetchone()
-                    if prior_conflict is not None:
+                    if prior_conflict is not None and not overwrite:
                         conflicts.append(
                             {
                                 "id": prior_conflict["id"],
@@ -1046,24 +1070,36 @@ class SegmentationService:
                     )
                     if existing and old_value != value:
                         disposition = "overwritten" if overwrite else "preserved"
-                        conflict_id = str(uuid.uuid4())
-                        connection.execute(
-                            "INSERT INTO contact_attribute_conflicts(id, contact_id, field_id, source_kind, source_ref, source_record_position, existing_summary, incoming_summary, disposition, reason, actor, created_at) "
-                            "VALUES (?, ?, ?, 'structured', ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                conflict_id,
-                                contact_id,
-                                field["id"],
-                                source_ref,
-                                position,
-                                str(old_value)[:MAX_COMPARISON],
-                                str(value)[:MAX_COMPARISON],
-                                disposition,
-                                "explicit overwrite" if overwrite else "populated value preserved",
-                                actor,
-                                utc_now(),
-                            ),
+                        conflict_id = (
+                            prior_conflict["id"]
+                            if prior_conflict is not None
+                            else str(uuid.uuid4())
                         )
+                        if prior_conflict is None:
+                            connection.execute(
+                                "INSERT INTO contact_attribute_conflicts(id, contact_id, field_id, source_kind, source_ref, source_record_position, existing_summary, incoming_summary, disposition, reason, actor, created_at) "
+                                "VALUES (?, ?, ?, 'structured', ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    conflict_id,
+                                    contact_id,
+                                    field["id"],
+                                    source_ref,
+                                    position,
+                                    str(old_value)[:MAX_COMPARISON],
+                                    str(value)[:MAX_COMPARISON],
+                                    disposition,
+                                    "explicit overwrite"
+                                    if overwrite
+                                    else "populated value preserved",
+                                    actor,
+                                    utc_now(),
+                                ),
+                            )
+                        else:
+                            connection.execute(
+                                "UPDATE contact_attribute_conflicts SET disposition=?,reason=?,actor=? WHERE id=?",
+                                (disposition, "explicit overwrite", actor, conflict_id),
+                            )
                         conflicts.append(
                             {
                                 "id": conflict_id,

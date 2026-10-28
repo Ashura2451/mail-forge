@@ -12,6 +12,7 @@ attempt evidence, and operational events.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import re
@@ -57,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 17
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1188,6 +1189,48 @@ CREATE INDEX IF NOT EXISTS idx_data_studio_consumers_artifact
 ON data_studio_consumers(job_id, artifact_id, kind, created_at DESC);
 """
 
+MIGRATION_15_SQL = """
+CREATE TABLE IF NOT EXISTS data_studio_campaign_snapshots (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    run_key TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES data_studio_jobs(id),
+    source_artifact_id TEXT NOT NULL REFERENCES data_studio_artifacts(id),
+    artifact_sha256 TEXT NOT NULL,
+    recipe_revision_id TEXT NOT NULL REFERENCES data_studio_recipe_revisions(id),
+    message_revision_id TEXT NOT NULL REFERENCES message_revisions(id),
+    message_content_hash TEXT NOT NULL,
+    field_mapping_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(campaign_id, run_key)
+);
+CREATE INDEX IF NOT EXISTS idx_data_studio_campaign_snapshots_source
+ON data_studio_campaign_snapshots(source_job_id, source_artifact_id);
+CREATE TABLE IF NOT EXISTS data_studio_campaign_recipients (
+    snapshot_id TEXT NOT NULL REFERENCES data_studio_campaign_snapshots(id) ON DELETE CASCADE,
+    row_number INTEGER NOT NULL,
+    source_row_hash TEXT NOT NULL,
+    contact_id TEXT NOT NULL REFERENCES contacts(id),
+    normalized_email TEXT NOT NULL,
+    context_json TEXT NOT NULL,
+    attachment_asset_ids_json TEXT NOT NULL DEFAULT '[]',
+    rendering_seed INTEGER NOT NULL,
+    PRIMARY KEY(snapshot_id, row_number),
+    UNIQUE(snapshot_id, contact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_data_studio_campaign_recipients_contact
+ON data_studio_campaign_recipients(snapshot_id, contact_id);
+"""
+
+MIGRATION_16_SQL = """
+ALTER TABLE data_studio_jobs ADD COLUMN worker_token TEXT;
+"""
+
+MIGRATION_17_SQL = """
+ALTER TABLE data_studio_jobs ADD COLUMN worker_pid INTEGER;
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1252,6 +1295,21 @@ class CampaignStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
         return connection
+
+    @contextlib.contextmanager
+    def campaign_operation_lock(self) -> Iterator[None]:
+        """Serialize durable campaign preparation and snapshot publication."""
+
+        if str(self.path) == ":memory:":
+            yield
+            return
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        with lock_path.open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
@@ -1439,6 +1497,27 @@ class CampaignStore:
                     (14, utc_now()),
                 )
                 current = 14
+            if current < 15:
+                self._apply_migration_15(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (15, utc_now()),
+                )
+                current = 15
+            if current < 16:
+                self._apply_migration_16(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (16, utc_now()),
+                )
+                current = 16
+            if current < 17:
+                self._apply_migration_17(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (17, utc_now()),
+                )
+                current = 17
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1534,6 +1613,27 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_14(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_14_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_15(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_15_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_16(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_16_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_17(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_17_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

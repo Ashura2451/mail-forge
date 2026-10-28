@@ -10,10 +10,13 @@ jobs publish artifacts only after the complete output has been written.
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import fcntl
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -41,6 +44,7 @@ MAX_AGGREGATE_GROUPS = 100_000
 MAX_OUTPUT_TEXT = 10_000
 SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 MISSING = object()
+_LIVE_WORKERS: set[str] = set()
 
 
 class DataStudioError(ValueError):
@@ -51,6 +55,18 @@ class DataStudioError(ValueError):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _safe_filename(value: str, fallback: str = "data.csv") -> str:
@@ -388,20 +404,260 @@ class DataStudioService:
         self.store = store
         self.root = Path(root or self.store.path.parent / "data-studio")
         self.root.mkdir(parents=True, exist_ok=True)
+        self._operation_lock_path = self.root.with_name(f".{self.root.name}.lock")
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mailforge-data")
         self._running: set[str] = set()
         self._lock = threading.Lock()
         self._recover_jobs()
 
+    @contextlib.contextmanager
+    def _operation_lock(self):
+        with self._operation_lock_path.open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def close(self) -> None:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
+    def reconcile_stale_jobs(self, *, stale_after_seconds: int = 300) -> list[str]:
+        """Return interrupted jobs to a retryable state and isolate partial output.
+
+        ``updated_at`` is the durable heartbeat written after each processing batch.
+        Startup recovery intentionally calls this with a zero threshold because a new
+        service instance owns no in-memory workers; callers may use a larger threshold
+        for an in-process reconciliation pass.
+        """
+
+        cutoff = datetime.now(UTC).timestamp() - max(0, stale_after_seconds)
+        recovered: list[tuple[str, str]] = []
+        now = _now()
+        with self._operation_lock(), self.store.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT id,job_dir,updated_at,worker_token,worker_pid "
+                "FROM data_studio_jobs WHERE status='running'"
+            ).fetchall()
+            for row in rows:
+                try:
+                    updated = datetime.fromisoformat(row["updated_at"]).timestamp()
+                except TypeError, ValueError:
+                    updated = 0
+                if updated > cutoff:
+                    continue
+                if row["worker_token"] in _LIVE_WORKERS:
+                    continue
+                if row["worker_pid"] and _process_alive(row["worker_pid"]):
+                    continue
+                self._cleanup_attempt(row["id"], row["job_dir"], row["worker_token"], connection)
+                changed = connection.execute(
+                    "UPDATE data_studio_jobs SET status='pending',worker_token=NULL,worker_pid=NULL,"
+                    "error_message=?,updated_at=? WHERE id=? AND status='running' "
+                    "AND updated_at=?",
+                    ("recovered after worker interruption", now, row["id"], row["updated_at"]),
+                ).rowcount
+                if changed:
+                    recovered.append((row["id"], row["job_dir"]))
+        return [job_id for job_id, _ in recovered]
+
     def _recover_jobs(self) -> None:
+        self.reconcile_stale_jobs(stale_after_seconds=0)
+
+    def _cleanup_unpublished_files(self, job_id: str) -> None:
+        """Remove only uncommitted outputs; retained source inputs remain retryable."""
+
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT job_dir FROM data_studio_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            artifacts = connection.execute(
+                "SELECT path FROM data_studio_artifacts WHERE job_id=?", (job_id,)
+            ).fetchall()
+        if row is None:
+            return
+        job_dir = Path(row["job_dir"])
+        for path in (
+            job_dir / "output.rows.jsonl.tmp",
+            job_dir / "errors.jsonl.tmp",
+            job_dir / "errors.jsonl",
+        ):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(job_dir / "attempts", ignore_errors=True)
+        for artifact in artifacts:
+            path = Path(artifact["path"])
+            if path.is_file():
+                path.unlink(missing_ok=True)
+        shutil.rmtree(job_dir / "artifacts", ignore_errors=True)
         with self.store.transaction(immediate=True) as connection:
-            connection.execute(
-                "UPDATE data_studio_jobs SET status='pending', updated_at=? WHERE status='running'",
-                (_now(),),
-            )
+            connection.execute("DELETE FROM data_studio_artifacts WHERE job_id=?", (job_id,))
+
+    @staticmethod
+    def _cleanup_attempt(
+        job_id: str, job_dir: str, worker_token: str | None, connection: sqlite3.Connection
+    ) -> None:
+        root = Path(job_dir)
+        for path in (
+            root / "output.rows.jsonl.tmp",
+            root / "errors.jsonl.tmp",
+            root / "errors.jsonl",
+        ):
+            path.unlink(missing_ok=True)
+        attempt_root = Path(job_dir) / "attempts"
+        if worker_token:
+            shutil.rmtree(attempt_root / worker_token, ignore_errors=True)
+        else:
+            shutil.rmtree(attempt_root, ignore_errors=True)
+        connection.execute("DELETE FROM data_studio_artifacts WHERE job_id=?", (job_id,))
+
+    def backup_to(self, destination: str | Path) -> Path:
+        """Create an atomic database plus artifact bundle from a safe state."""
+
+        destination = Path(destination).resolve()
+        if destination.exists():
+            raise DataStudioError("backup destination already exists", "backup_exists")
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        with self._operation_lock(), self._lock:
+            with self.store.connect() as connection:
+                active = connection.execute(
+                    "SELECT COUNT(*) FROM data_studio_jobs WHERE status IN ('pending','running')"
+                ).fetchone()[0]
+                if active:
+                    raise DataStudioError(
+                        "backup requires no pending or running Data Studio jobs", "backup_unsafe"
+                    )
+                jobs = connection.execute(
+                    "SELECT id,status FROM data_studio_jobs ORDER BY id"
+                ).fetchall()
+            temporary.mkdir(parents=True)
+            try:
+                self.store.backup_to(temporary / "state.sqlite3")
+                shutil.copytree(self.root, temporary / "data-studio")
+                (temporary / "manifest.json").write_text(
+                    _json(
+                        {
+                            "kind": "mailforge_data_studio_backup",
+                            "schema_version": self.store.schema_version(),
+                            "data_studio_root": str(self.root.resolve()),
+                            "jobs": [dict(job) for job in jobs],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                temporary.replace(destination)
+            except Exception:
+                shutil.rmtree(temporary, ignore_errors=True)
+                raise
+        return destination
+
+    @staticmethod
+    def restore_from(
+        backup: str | Path, destination_db: str | Path, destination_root: str | Path
+    ) -> tuple[Path, Path]:
+        """Restore a Data Studio bundle and rebind durable paths to its new root."""
+
+        backup = Path(backup).resolve()
+        destination_db = Path(destination_db).resolve()
+        destination_root = Path(destination_root).resolve()
+        manifest_path = backup / "manifest.json"
+        if not manifest_path.is_file() or not (backup / "state.sqlite3").is_file():
+            raise DataStudioError("backup bundle is incomplete", "backup_invalid")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("kind") != "mailforge_data_studio_backup":
+            raise DataStudioError("backup bundle kind is invalid", "backup_invalid")
+        if destination_db.exists() or destination_root.exists():
+            raise DataStudioError("restore destination already exists", "restore_exists")
+        destination_root.parent.mkdir(parents=True, exist_ok=True)
+        CampaignStore.restore_from(backup / "state.sqlite3", destination_db)
+        shutil.copytree(backup / "data-studio", destination_root)
+        source_root = Path(manifest.get("data_studio_root", backup / "data-studio")).resolve()
+
+        def rebind(path: str) -> Path:
+            try:
+                relative = Path(path).resolve().relative_to(source_root)
+            except ValueError as error:
+                raise DataStudioError(
+                    "backup path is outside the Data Studio root", "restore_integrity"
+                ) from error
+            return destination_root / relative
+
+        with CampaignStore(destination_db).transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT id,job_dir,source_path,source_sha256 FROM data_studio_jobs"
+            ).fetchall()
+            for row in rows:
+                job_dir_path = rebind(row["job_dir"])
+                relative_job = Path(row["job_dir"]).resolve().relative_to(source_root)
+                backup_manifest = backup / "data-studio" / relative_job / "sources.json"
+                if (
+                    not backup_manifest.is_file()
+                    or _sha256(backup_manifest) != row["source_sha256"]
+                ):
+                    raise DataStudioError(
+                        "backup source manifest checksum does not match", "restore_integrity"
+                    )
+                payload = json.loads(backup_manifest.read_text(encoding="utf-8"))
+                for source in payload.get("sources", []):
+                    backup_retained = (
+                        backup
+                        / "data-studio"
+                        / Path(source["path"]).resolve().relative_to(source_root)
+                    )
+                    if not backup_retained.is_file():
+                        raise DataStudioError(
+                            "backup input checksum does not match", "restore_integrity"
+                        )
+                    recorded_sha = source.get("sha256")
+                    if recorded_sha is not None and _sha256(backup_retained) != recorded_sha:
+                        raise DataStudioError(
+                            "backup input checksum does not match", "restore_integrity"
+                        )
+                    source["sha256"] = _sha256(backup_retained)
+                    retained = destination_root / backup_retained.relative_to(
+                        backup / "data-studio"
+                    )
+                    source["path"] = str(retained)
+                source_manifest = job_dir_path / "sources.json"
+                source_manifest.write_text(_json(payload), encoding="utf-8")
+                connection.execute(
+                    "UPDATE data_studio_jobs SET job_dir=?,source_path=?,source_sha256=? WHERE id=?",
+                    (str(job_dir_path), str(source_manifest), _sha256(source_manifest), row["id"]),
+                )
+            artifacts = connection.execute("SELECT id,path FROM data_studio_artifacts").fetchall()
+            for artifact in artifacts:
+                path = str(rebind(artifact["path"]))
+                connection.execute(
+                    "UPDATE data_studio_artifacts SET path=? WHERE id=?", (path, artifact["id"])
+                )
+        restored = CampaignStore(destination_db)
+        restored.integrity_check()
+        with restored.connect() as connection:
+            jobs = connection.execute(
+                "SELECT source_path,source_sha256 FROM data_studio_jobs"
+            ).fetchall()
+            artifacts = connection.execute(
+                "SELECT path,sha256 FROM data_studio_artifacts"
+            ).fetchall()
+        for job in jobs:
+            source = Path(job["source_path"])
+            if not source.is_file() or _sha256(source) != job["source_sha256"]:
+                raise DataStudioError(
+                    "restored source checksum does not match", "restore_integrity"
+                )
+            source_manifest = json.loads(source.read_text(encoding="utf-8"))
+            for entry in source_manifest.get("sources", []):
+                retained = Path(entry["path"])
+                if not retained.is_file() or _sha256(retained) != entry.get("sha256"):
+                    raise DataStudioError(
+                        "restored input checksum does not match", "restore_integrity"
+                    )
+        for artifact in artifacts:
+            path = Path(artifact["path"])
+            if not path.is_file() or _sha256(path) != artifact["sha256"]:
+                raise DataStudioError(
+                    "restored artifact checksum does not match", "restore_integrity"
+                )
+        return destination_db, destination_root
 
     def create_recipe(
         self, name: str, description: str = "", definition: dict[str, Any] | None = None
@@ -625,6 +881,18 @@ class DataStudioService:
         *,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
+        with self._operation_lock():
+            return self._create_multi_source_job(
+                sources, recipe_revision_id, correlation_id=correlation_id
+            )
+
+    def _create_multi_source_job(
+        self,
+        sources: list[tuple[str | Path, str, str]],
+        recipe_revision_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
         if not sources or len(sources) > 16:
             raise DataStudioError("between one and sixteen sources are required", "source_limit")
         for source_path, _, _ in sources:
@@ -655,6 +923,7 @@ class DataStudioService:
                     "id": _safe_filename(source_id, f"source-{index}"),
                     "name": _safe_filename(source_filename),
                     "path": str(retained),
+                    "sha256": _sha256(retained),
                 }
             )
         manifest = job_dir / "sources.json"
@@ -699,24 +968,42 @@ class DataStudioService:
         return result
 
     def start(self, job_id: str) -> dict[str, Any]:
+        with self._operation_lock():
+            return self._start(job_id)
+
+    def _start(self, job_id: str) -> dict[str, Any]:
         self.get_job(job_id)
         with self._lock:
             if job_id in self._running:
                 return self.get_job(job_id)
             self._running.add(job_id)
-        with self.store.transaction(immediate=True) as connection:
-            row = connection.execute(
-                "SELECT status FROM data_studio_jobs WHERE id=?", (job_id,)
-            ).fetchone()
-            if row is None:
-                raise DataStudioError("processing job was not found", "job_not_found")
-            if row["status"] in {"completed", "canceled"}:
-                raise DataStudioError("this job cannot be started again", "job_state")
-            connection.execute(
-                "UPDATE data_studio_jobs SET status='running',started_at=COALESCE(started_at,?),updated_at=?,error_message=NULL WHERE id=?",
-                (_now(), _now(), job_id),
-            )
-        self.executor.submit(self._run, job_id)
+        try:
+            with self.store.transaction(immediate=True) as connection:
+                row = connection.execute(
+                    "SELECT status FROM data_studio_jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    raise DataStudioError("processing job was not found", "job_not_found")
+                if row["status"] not in {"pending", "failed"}:
+                    raise DataStudioError("this job is not retryable", "job_state")
+            self._cleanup_unpublished_files(job_id)
+            with self.store.transaction(immediate=True) as connection:
+                worker_token = str(uuid.uuid4())
+                changed = connection.execute(
+                    "UPDATE data_studio_jobs SET status='running',started_at=?,completed_at=NULL,"
+                    "processed_count=0,output_count=0,rejected_count=0,error_count=0,summary_json='{}',"
+                    "updated_at=?,error_message=NULL,worker_token=?,worker_pid=? "
+                    "WHERE id=? AND status IN ('pending','failed')",
+                    (_now(), _now(), worker_token, os.getpid(), job_id),
+                ).rowcount
+                if changed != 1:
+                    raise DataStudioError("job state changed before it could start", "job_state")
+        except Exception:
+            with self._lock:
+                self._running.discard(job_id)
+            raise
+        _LIVE_WORKERS.add(worker_token)
+        self.executor.submit(self._run, job_id, worker_token)
         return self.get_job(job_id)
 
     def register_extension(self, name: str = "email_domain_normalizer") -> dict[str, Any]:
@@ -1005,22 +1292,37 @@ class DataStudioService:
                     yield {"value": line.rstrip("\r\n")}
 
     def cancel(self, job_id: str) -> dict[str, Any]:
-        with self.store.transaction(immediate=True) as connection:
-            changed = connection.execute(
-                "UPDATE data_studio_jobs SET status='canceled',updated_at=? WHERE id=? AND status IN ('pending','running')",
-                (_now(), job_id),
-            ).rowcount
-            if (
-                not changed
-                and connection.execute(
-                    "SELECT 1 FROM data_studio_jobs WHERE id=?", (job_id,)
-                ).fetchone()
-                is None
-            ):
-                raise DataStudioError("processing job was not found", "job_not_found")
+        with self._operation_lock(), self._lock:
+            with self.store.transaction(immediate=True) as connection:
+                changed = connection.execute(
+                    "UPDATE data_studio_jobs SET status='canceled',worker_token=NULL,worker_pid=NULL,updated_at=? "
+                    "WHERE id=? AND status IN ('pending','running')",
+                    (_now(), job_id),
+                ).rowcount
+                if (
+                    not changed
+                    and connection.execute(
+                        "SELECT 1 FROM data_studio_jobs WHERE id=?", (job_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise DataStudioError("processing job was not found", "job_not_found")
+            if changed:
+                self._cleanup_unpublished_files(job_id)
         return self.get_job(job_id)
 
-    def _run(self, job_id: str) -> None:
+    def _assert_worker_owns(self, job_id: str, worker_token: str) -> None:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT status,worker_token FROM data_studio_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        if row is None or row["status"] == "canceled":
+            raise DataStudioError("processing was canceled", "job_canceled")
+        if row["status"] != "running" or row["worker_token"] != worker_token:
+            raise DataStudioError("processing worker no longer owns this job", "job_stale")
+
+    def _run(self, job_id: str, worker_token: str) -> None:
+        job_dir: str | None = None
         try:
             with self.store.connect() as connection:
                 row = connection.execute(
@@ -1036,9 +1338,13 @@ class DataStudioService:
                 )
             if row is None or revision is None:
                 return
+            job_dir = row["job_dir"]
+            self._assert_worker_owns(job_id, worker_token)
             definition = json.loads(revision["definition_json"])
-            output = Path(row["job_dir"]) / "output.rows.jsonl.tmp"
-            errors = Path(row["job_dir"]) / "errors.jsonl.tmp"
+            attempt_dir = Path(row["job_dir"]) / "attempts" / worker_token
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+            output = attempt_dir / "output.rows.jsonl.tmp"
+            errors = attempt_dir / "errors.jsonl.tmp"
             count = rejected = processed = 0
             summary = {"removed": 0, "changed_fields": [], "validation_errors": 0}
             dedupe_seen: dict[tuple[str, ...], set[tuple[Any, ...]]] = {}
@@ -1069,13 +1375,10 @@ class DataStudioService:
                         summary["removed"] += result["removed"]
                         summary["validation_errors"] += len(result["errors"])
                         batch.clear()
-                        self._progress(job_id, processed, count, rejected)
-                    with self.store.connect() as check:
-                        current = check.execute(
-                            "SELECT status FROM data_studio_jobs WHERE id=?", (job_id,)
-                        ).fetchone()
-                    if current is None or current["status"] == "canceled":
-                        raise DataStudioError("processing was canceled", "job_canceled")
+                        self._progress(job_id, processed, count, rejected, worker_token)
+                        self._assert_worker_owns(job_id, worker_token)
+                    elif processed % 500 == 0:
+                        self._assert_worker_owns(job_id, worker_token)
                 if batch:
                     result = self._execute_rows(
                         batch,
@@ -1095,10 +1398,11 @@ class DataStudioService:
                     for aggregate_row in self._finalize_aggregate(aggregate_state):
                         out.write(_json(aggregate_row) + "\n")
                         count += 1
+            self._assert_worker_owns(job_id, worker_token)
             output_spec = definition.get("output", {})
             output_format = output_spec.get("format", "jsonl")
             requested_name = output_spec.get("filename") or f"data-studio-output.{output_format}"
-            artifact_dir = Path(row["job_dir"]) / "artifacts"
+            artifact_dir = attempt_dir / "artifacts"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             final = artifact_dir / _safe_filename(requested_name, f"output.{output_format}")
             if final.suffix.lower() != f".{output_format}":
@@ -1106,7 +1410,7 @@ class DataStudioService:
             export_tmp = final.with_suffix(final.suffix + ".tmp")
             self._export_rows(output, export_tmp, output_spec)
             output.unlink(missing_ok=True)
-            error_final = Path(row["job_dir"]) / "errors.jsonl"
+            error_final = attempt_dir / "errors.jsonl"
             export_tmp.replace(final)
             errors.replace(error_final)
             self._publish(
@@ -1115,37 +1419,53 @@ class DataStudioService:
                 count,
                 rejected,
                 summary,
+                worker_token,
                 [
                     ("output", final, "application/x-ndjson"),
                     ("errors", error_final, "application/x-ndjson"),
                 ],
             )
         except DataStudioError as error:
-            with self.store.transaction(immediate=True) as connection:
-                connection.execute(
-                    "UPDATE data_studio_jobs SET status=?,error_message=?,updated_at=? WHERE id=?",
-                    (
-                        "canceled" if error.code == "job_canceled" else "failed",
-                        str(error),
-                        _now(),
-                        job_id,
-                    ),
-                )
+            with self._operation_lock():
+                with self.store.transaction(immediate=True) as connection:
+                    changed = connection.execute(
+                        "UPDATE data_studio_jobs SET status=?,error_message=?,worker_token=NULL,worker_pid=NULL,"
+                        "updated_at=? WHERE id=? AND status='running' AND worker_token=?",
+                        (
+                            "canceled" if error.code == "job_canceled" else "failed",
+                            str(error),
+                            _now(),
+                            job_id,
+                            worker_token,
+                        ),
+                    ).rowcount
+                    if job_dir is not None and (
+                        error.code == "job_canceled" or (changed and error.code != "job_stale")
+                    ):
+                        self._cleanup_attempt(job_id, job_dir, worker_token, connection)
         except Exception as error:  # noqa: BLE001
-            with self.store.transaction(immediate=True) as connection:
-                connection.execute(
-                    "UPDATE data_studio_jobs SET status='failed',error_message=?,updated_at=? WHERE id=?",
-                    (type(error).__name__, _now(), job_id),
-                )
+            with self._operation_lock():
+                with self.store.transaction(immediate=True) as connection:
+                    changed = connection.execute(
+                        "UPDATE data_studio_jobs SET status='failed',error_message=?,worker_token=NULL,worker_pid=NULL,"
+                        "updated_at=? WHERE id=? AND status='running' AND worker_token=?",
+                        (type(error).__name__, _now(), job_id, worker_token),
+                    ).rowcount
+                    if changed and job_dir is not None:
+                        self._cleanup_attempt(job_id, job_dir, worker_token, connection)
         finally:
+            _LIVE_WORKERS.discard(worker_token)
             with self._lock:
                 self._running.discard(job_id)
 
-    def _progress(self, job_id: str, processed: int, output: int, rejected: int) -> None:
+    def _progress(
+        self, job_id: str, processed: int, output: int, rejected: int, worker_token: str
+    ) -> None:
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE data_studio_jobs SET processed_count=?,output_count=?,rejected_count=?,updated_at=? WHERE id=? AND status='running'",
-                (processed, output, rejected, _now(), job_id),
+                "UPDATE data_studio_jobs SET processed_count=?,output_count=?,rejected_count=?,updated_at=? "
+                "WHERE id=? AND status='running' AND worker_token=?",
+                (processed, output, rejected, _now(), job_id, worker_token),
             )
 
     @staticmethod
@@ -1279,10 +1599,20 @@ class DataStudioService:
         output_count: int,
         rejected: int,
         summary: dict[str, Any],
+        worker_token: str,
         files: list[tuple[str, Path, str]],
     ) -> None:
         now = _now()
         with self.store.transaction(immediate=True) as connection:
+            status = connection.execute(
+                "SELECT status,worker_token FROM data_studio_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if status is None:
+                raise DataStudioError("processing job was not found", "job_not_found")
+            if status["status"] == "canceled":
+                raise DataStudioError("processing was canceled", "job_canceled")
+            if status["status"] != "running" or status["worker_token"] != worker_token:
+                raise DataStudioError("processing worker no longer owns this job", "job_stale")
             for kind, path, media_type in files:
                 connection.execute(
                     "INSERT INTO data_studio_artifacts(id,job_id,kind,filename,path,media_type,size_bytes,sha256,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -1299,8 +1629,10 @@ class DataStudioService:
                     ),
                 )
             connection.execute(
-                "UPDATE data_studio_jobs SET status='completed',processed_count=?,output_count=?,rejected_count=?,summary_json=?,completed_at=?,updated_at=? WHERE id=?",
-                (processed, output_count, rejected, _json(summary), now, now, job_id),
+                "UPDATE data_studio_jobs SET status='completed',worker_token=NULL,worker_pid=NULL,"
+                "processed_count=?,output_count=?,rejected_count=?,summary_json=?,completed_at=?,"
+                "updated_at=? WHERE id=? AND status='running' AND worker_token=?",
+                (processed, output_count, rejected, _json(summary), now, now, job_id, worker_token),
             )
 
     def artifact_path(self, job_id: str, artifact_id: str) -> tuple[Path, str]:
