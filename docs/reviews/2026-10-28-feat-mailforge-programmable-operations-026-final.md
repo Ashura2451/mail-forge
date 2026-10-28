@@ -4,7 +4,7 @@
 **Scope**: programmable registry, schema 20 migration, trusted local Python
 boundary, Data Studio, Message Studio, Inbound, Automation, API/CLI/browser,
 backup/restore, and packaged macOS runtime
-**Verdict**: Ready for merge; release caveats recorded below
+**Verdict**: Merged; release caveats recorded below
 
 ## Delivered
 
@@ -49,7 +49,7 @@ validator or extension runner.
 | V–W browser surface, resource and security controls | TypeScript/oxlint/build, API boundary, resource-limited worker | Pass |
 | X–AA regression, bounded behavior, connected validation, full suite | 241 Python tests, browser acceptance, package build | Pass with performance evidence limited to bounded tests |
 | AB–AC review and documentation truth | this review, spec, operator docs, independent review follow-up | Pass |
-| AD–AE publication and main integration | requires branch push, PR, merge, and post-merge verification | Pending release workflow |
+| AD–AE publication and main integration | branch push, PR #12 merge, and post-merge verification on `origin/main` at `c3e482f` | Pass |
 
 ## Validation executed
 
