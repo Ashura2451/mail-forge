@@ -1,5 +1,19 @@
 # System changelog
 
+## 2026-10-28 — Visual workflow automation
+
+- Added SQLite schema 8 for durable visual workflow definitions, immutable
+  revisions, source-event deduplication, enrollments, pinned runs, waits,
+  action correlations, step history, and audit evidence.
+- Added the canonical `AutomationService`, versioned API, `mailforge automation`
+  CLI, bounded synthetic worker, revision lifecycle, graph validation, UTC wait
+  handling, and allowlisted list/campaign-preparation/note actions.
+- Added an accessible Automation console with a structured visual canvas,
+  explicit keyboard edge editor, revision controls, synthetic enrollment, and
+  durable run history.
+- This is local synthetic evidence only: no provider, mailbox, credential, or
+  real-recipient data was accessed, and no live delivery is enabled.
+
 ## 2026-10-28 — Advanced audience segmentation
 
 - Added CampaignStore schema 7 for typed contact attributes, conflict/audit

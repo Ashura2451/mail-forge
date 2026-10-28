@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from mailforge.application.automation import AutomationError, AutomationService
 from mailforge.application.campaigns import CampaignService
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_sources import EmlFileSource
@@ -60,6 +61,26 @@ class CampaignInput(BaseModel):
     sender_email: str = "sender@example.com"
     subject: str = Field(default="Synthetic Mailforge campaign", max_length=200)
     text: str = Field(default="Hello {{ email }}", max_length=100_000)
+
+
+class AutomationInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=500)
+
+
+class AutomationRevisionInput(BaseModel):
+    graph: dict[str, Any] | None = None
+    revision_id: str | None = None
+
+
+class AutomationEnrollInput(BaseModel):
+    contact_id: str | None = None
+    event_kind: str = "manual_enrollment"
+    source_identity: str | None = Field(default=None, max_length=240)
+    subject_key: str | None = Field(default=None, max_length=240)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    correlation_id: str | None = Field(default=None, max_length=240)
 
 
 class PrepareInput(BaseModel):
@@ -215,6 +236,52 @@ class WorkerSupervisor:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
 
+class AutomationWorkerSupervisor:
+    """Bounded synthetic workflow worker; waits and history remain durable."""
+
+    def __init__(self, automation: AutomationService):
+        self.automation = automation
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mailforge-automation")
+        self._lock = threading.Lock()
+        self._running: set[str] = set()
+
+    def start(self, run_id: str) -> bool:
+        with self._lock:
+            if run_id in self._running:
+                return False
+            self._running.add(run_id)
+        self.executor.submit(self._run, run_id)
+        return True
+
+    def _run(self, run_id: str) -> None:
+        try:
+            for _ in range(50):
+                detail = self.automation.advance(
+                    run_id, max_steps=20, worker_id=f"web-{threading.get_ident()}"
+                )
+                status = detail["run"]["status"]
+                if status not in {"running", "pending"}:
+                    break
+                time.sleep(0.03)
+        except Exception as error:
+            # Never leave a durable run claiming it is running after a worker
+            # exception; the operator must see and explicitly recover it.
+            try:
+                self.automation.fail_run(run_id, "worker_exception", type(error).__name__)
+            except Exception:
+                pass
+        finally:
+            with self._lock:
+                self._running.discard(run_id)
+
+    def active(self, run_id: str) -> bool:
+        with self._lock:
+            return run_id in self._running
+
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=True, cancel_futures=False)
+
+
 class WebRuntime:
     def __init__(self, database: str | Path, frontend_dir: str | Path | None = None):
         self.store = CampaignStore(database)
@@ -224,6 +291,8 @@ class WebRuntime:
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
+        self.automation = AutomationService(self.store, campaigns=self.campaigns)
+        self.automation_workers = AutomationWorkerSupervisor(self.automation)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
         self._recover_running_campaigns()
 
@@ -250,6 +319,7 @@ class WebRuntime:
 
     def close(self) -> None:
         self.workers.shutdown()
+        self.automation_workers.shutdown()
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -835,6 +905,138 @@ def create_app(
             }
         except KeyError:
             return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.get(f"{API_PREFIX}/automations")
+    async def automations(limit: int = 100, offset: int = 0):
+        return runtime.automation.list_workflows(limit=limit, offset=offset)
+
+    @app.post(f"{API_PREFIX}/automations")
+    async def create_automation(payload: AutomationInput):
+        try:
+            return runtime.automation.create_workflow(payload.name, payload.description)
+        except AutomationError as error:
+            return _error(409 if error.code == "workflow_exists" else 400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/automations/runs/{{run_id}}")
+    async def automation_run_detail(run_id: str):
+        try:
+            return runtime.automation.run_detail(run_id)
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/automations/runs/{{run_id}}/{{action}}")
+    async def automation_run_control(run_id: str, action: str):
+        try:
+            result = runtime.automation.control_run(run_id, action)
+            if action == "resume":
+                runtime.automation_workers.start(run_id)
+            return {"run": result, "action": action}
+        except AutomationError as error:
+            return _error(
+                409 if error.code == "run_state" else 404 if error.code == "run_not_found" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.post(f"{API_PREFIX}/automations/runs/{{run_id}}/advance")
+    async def advance_automation_run(run_id: str):
+        try:
+            return runtime.automation.advance(run_id)
+        except AutomationError as error:
+            return _error(
+                409 if error.code == "run_state" else 404 if error.code == "run_not_found" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/automations/{{automation_id}}")
+    async def automation_detail(automation_id: str):
+        try:
+            return runtime.automation.get_workflow(automation_id)
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/automations/{{automation_id}}/revisions")
+    async def automation_revisions(automation_id: str):
+        try:
+            return {"items": runtime.automation.list_revisions(automation_id)}
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/revisions")
+    async def save_automation_revision(automation_id: str, payload: AutomationRevisionInput):
+        try:
+            if payload.graph is None:
+                return _error(400, "graph_required", "graph is required when saving a draft")
+            return runtime.automation.save_revision(
+                automation_id, payload.graph, revision_id=payload.revision_id
+            )
+        except AutomationError as error:
+            return _error(
+                409 if error.code in {"revision_state", "workflow_exists"} else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/validate")
+    async def validate_automation(
+        automation_id: str, payload: AutomationRevisionInput | None = None
+    ):
+        try:
+            graph = (
+                payload.graph
+                if payload and payload.graph is not None
+                else runtime.automation.get_workflow(automation_id)["draft"]["graph"]
+            )
+            return runtime.automation.validate_graph(graph)
+        except AutomationError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/enroll")
+    async def enroll_automation(automation_id: str, payload: AutomationEnrollInput):
+        try:
+            result = runtime.automation.enroll(
+                automation_id, **payload.model_dump(exclude_none=True)
+            )
+            if result.get("run_id"):
+                runtime.automation_workers.start(result["run_id"])
+            return result
+        except AutomationError as error:
+            return _error(
+                409 if error.code in {"workflow_state", "trigger_not_configured"} else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/{{action}}")
+    async def automation_lifecycle(
+        automation_id: str, action: str, payload: AutomationRevisionInput | None = None
+    ):
+        try:
+            if action == "publish":
+                return runtime.automation.publish(
+                    automation_id, payload.revision_id if payload else None
+                )
+            if action in {"activate", "pause", "archive"}:
+                return runtime.automation.set_lifecycle(
+                    automation_id, action, payload.revision_id if payload else None
+                )
+            raise AutomationError("unsupported workflow lifecycle action")
+        except AutomationError as error:
+            return _error(
+                409
+                if error.code in {"revision_state", "workflow_state", "trigger_not_configured"}
+                else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/automations/{{automation_id}}/runs")
+    async def automation_runs(automation_id: str, limit: int = 100, offset: int = 0):
+        try:
+            return runtime.automation.list_runs(automation_id, limit=limit, offset=offset)
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/resume")
     async def resume_campaign(campaign_id: str):

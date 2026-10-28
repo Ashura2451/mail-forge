@@ -212,3 +212,51 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
     finally:
         server.terminate()
         server.wait(timeout=5)
+
+
+def test_browser_visual_automation_revision_lifecycle(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "automation-browser.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        "from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="Automations", exact=True).click()
+            page.get_by_label("Automation name").fill("Browser visual automation")
+            page.get_by_role("button", name="+ New automation").click()
+            page.get_by_role("heading", name="Browser visual automation").wait_for()
+            page.get_by_role("button", name="Open →").click()
+            page.get_by_role("button", name="Save draft").click()
+            page.get_by_text("Draft saved").wait_for()
+            page.get_by_role("button", name="Validate").click()
+            page.get_by_text("Workflow validated").wait_for()
+            page.get_by_role("button", name="Publish").click()
+            page.get_by_text("Revision published").wait_for()
+            page.get_by_role("button", name="Activate").click()
+            page.get_by_text("Workflow activated").wait_for()
+            assert page.get_by_text("active", exact=True).is_visible()
+            page.get_by_role("button", name="Dashboard", exact=True).click()
+            page.get_by_role("button", name="Automations", exact=True).click()
+            page.get_by_text("Browser visual automation", exact=True).wait_for()
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)

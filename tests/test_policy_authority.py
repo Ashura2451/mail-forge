@@ -275,7 +275,7 @@ def test_operator_declaration_is_idempotent_and_backup_preserves_policy_state(tm
     backup = store.backup_to(tmp_path / "backup.sqlite3")
     restored = CampaignStore.restore_from(backup, tmp_path / "restored.sqlite3")
     restored_store = CampaignStore(restored)
-    assert restored_store.schema_version() == 7
+    assert restored_store.schema_version() == 8
     assert len(restored_store.list_preferences()) == 1
     assert len(restored_store.list_operator_declarations(campaign_id=campaign_id)) == 1
     assert restored_store.integrity_check()

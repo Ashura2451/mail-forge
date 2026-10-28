@@ -3,7 +3,7 @@ import { api, bootstrapSession, upload, type ApiRecord } from './api/client'
 import './App.css'
 
 const nav = [
-  ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['campaigns', 'Campaigns', '↗'],
+  ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['campaigns', 'Campaigns', '↗'], ['automations', 'Automations', '✦'],
   ['inbound', 'Inbound', '↘'], ['providers', 'Providers', '◈'], ['activity', 'Activity', '≡'],
 ]
 
@@ -35,13 +35,145 @@ function App() {
     </aside>
     <main className="main"><header className="topbar"><div><p className="eyebrow">WORKSPACE / {view.toUpperCase()}</p><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div><div className="top-actions"><span className="status-chip"><span className="live-dot" /> Local</span><button className="icon-button" aria-label="Refresh" onClick={() => load()}>↻</button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}{error && <div className="error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
-      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
+      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
     </main>
   </div>
 }
 
 function Dashboard({ data, onNavigate }: { data: ApiRecord, onNavigate: (view: string) => void }) { const counts = data.counts || {}; return <div className="content"><div className="hero-copy"><div><p className="eyebrow teal">OPERATOR OVERVIEW</p><h2>Make every send<br /><em>accountable.</em></h2><p className="lede">A calm, local control room for contacts, policy-aware campaigns, and inbound signals.</p></div><div className="hero-note"><span className="stamp">LOCAL<br />FIRST</span><p>Durable actions<br />stay in your SQLite<br />authority.</p></div></div><div className="stat-grid"><Stat label="Contacts" value={counts.contacts ?? 0} tone="teal" /><Stat label="Lists" value={counts.lists ?? 0} /><Stat label="Inbound reviews" value={counts.inbound?.pending_reviews ?? 0} tone="amber" /><Stat label="Schema" value={`v${data.schema_version ?? '—'}`} /></div><section className="section-head"><div><p className="eyebrow">RECENT WORK</p><h3>Campaign pulse</h3></div><button className="text-button" onClick={() => onNavigate('campaigns')}>View campaigns ↗</button></section><CampaignTable items={data.campaigns || []} empty="No campaigns yet. Create a list and launch a synthetic campaign to begin." /></div> }
 function Stat({ label, value, tone = '' }: { label: string, value: string | number, tone?: string }) { return <div className={`stat-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>durable local state</small></div> }
+
+
+type WorkflowNode = { id: string, kind: string, label: string, config: ApiRecord }
+type WorkflowEdge = { source: string, target: string, branch?: string }
+
+const nodeDefaults: Record<string, WorkflowNode> = {
+  CONDITION: { id: '', kind: 'CONDITION', label: 'Check whether…', config: { result: true } },
+  WAIT: { id: '', kind: 'WAIT', label: 'Wait until…', config: { seconds: 60, timezone: 'UTC', catch_up_policy: 'run_once' } },
+  ADD_TO_LIST: { id: '', kind: 'ADD_TO_LIST', label: 'Add to list', config: { list_id: '' } },
+  REMOVE_FROM_LIST: { id: '', kind: 'REMOVE_FROM_LIST', label: 'Remove from list', config: { list_id: '' } },
+  PREPARE_CAMPAIGN: { id: '', kind: 'PREPARE_CAMPAIGN', label: 'Prepare synthetic campaign', config: { campaign_id: '' } },
+  NOTE: { id: '', kind: 'NOTE', label: 'Record operator note', config: { note: '' } },
+  END: { id: '', kind: 'END', label: 'End', config: {} },
+}
+
+function Automations({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void }) {
+  const [name, setName] = useState('New local automation')
+  const [selected, setSelected] = useState('')
+  const [detail, setDetail] = useState<ApiRecord | null>(null)
+  const [graph, setGraph] = useState<ApiRecord>({ nodes: [], edges: [] })
+  const [lists, setLists] = useState<ApiRecord[]>([])
+  const [segments, setSegments] = useState<ApiRecord[]>([])
+  const [campaigns, setCampaigns] = useState<ApiRecord[]>([])
+  const [contacts, setContacts] = useState<ApiRecord[]>([])
+  const [contactId, setContactId] = useState('')
+  const [runs, setRuns] = useState<ApiRecord[]>([])
+  const items: ApiRecord[] = data.items || []
+
+  const refresh = async (id = selected) => {
+    if (!id) return
+    const next = await api<ApiRecord>(`/automations/${id}`)
+    setDetail(next)
+    setGraph(next.draft?.graph || next.active?.graph || { nodes: [], edges: [] })
+    const runResult = await api<ApiRecord>(`/automations/${id}/runs`)
+    setRuns(runResult.items || [])
+  }
+
+  useEffect(() => {
+    void api<ApiRecord>('/lists').then(result => setLists(result.items || []))
+    void api<ApiRecord>('/segments').then(result => setSegments(result.items || []))
+    void api<ApiRecord>('/campaigns').then(result => setCampaigns(result.items || []))
+    void api<ApiRecord>('/contacts').then(result => setContacts(result.items || []))
+  }, [])
+  useEffect(() => { if (selected) void refresh(selected) }, [selected])
+
+  const nodes: WorkflowNode[] = graph.nodes || []
+  const edges: WorkflowEdge[] = graph.edges || []
+  const updateNode = (id: string, changes: Partial<WorkflowNode>) => setGraph((current: ApiRecord) => ({
+    ...current,
+    nodes: (current.nodes || []).map((node: WorkflowNode) => node.id === id ? { ...node, ...changes } : node),
+  }))
+  const addNode = (kind: string) => {
+    const template = nodeDefaults[kind]
+    const id = `${kind.toLowerCase()}_${Date.now()}`
+    setGraph((current: ApiRecord) => ({
+      ...current,
+      nodes: [...(current.nodes || []), { ...template, id, config: { ...template.config } }],
+    }))
+  }
+  const removeNode = (id: string) => {
+    if (id === 'trigger' || id === 'end') return
+    setGraph((current: ApiRecord) => ({
+      ...current,
+      nodes: current.nodes.filter((node: WorkflowNode) => node.id !== id),
+      edges: current.edges.filter((edge: WorkflowEdge) => edge.source !== id && edge.target !== id),
+    }))
+  }
+  const create = () => onRun(async () => {
+    const created = await api<ApiRecord>('/automations', { method: 'POST', body: JSON.stringify({ name }) })
+    setSelected(created.id)
+    await api(`/automations/${created.id}/revisions`, { method: 'POST', body: JSON.stringify({ graph: created.draft.graph }) })
+  }, 'Automation created')
+  const save = () => selected && onRun(
+    () => api(`/automations/${selected}/revisions`, {
+      method: 'POST',
+      body: JSON.stringify({ graph, revision_id: detail?.draft?.id }),
+    }).then(() => refresh(selected)),
+    'Draft saved',
+  )
+  const action = (path: string, message: string) => selected && onRun(
+    () => api(`/automations/${selected}/${path}`, {
+      method: 'POST',
+      body: JSON.stringify({ revision_id: detail?.draft?.id }),
+    }).then(() => refresh(selected)),
+    message,
+  )
+  const enroll = () => selected && contactId && onRun(
+    () => api(`/automations/${selected}/enroll`, {
+      method: 'POST',
+      body: JSON.stringify({ contact_id: contactId, event_kind: 'manual_enrollment', provenance: { ui: 'automation-console' } }),
+    }).then(() => refresh(selected)),
+    'Synthetic contact enrolled',
+  )
+  const connect = (source: string, target: string | undefined, branch: string) => setGraph((current: ApiRecord) => ({
+    ...current,
+    edges: [
+      ...(current.edges as WorkflowEdge[]).filter(edge => !(edge.source === source && edge.branch === branch)),
+      ...(target ? [{ source, target, branch }] : []),
+    ],
+  }))
+
+  return <div className="content">
+    <div className="toolbar"><div><p className="eyebrow teal">VISUAL WORKFLOWS</p><p className="muted">Compose accountable local automation. Every run is synthetic and revision-pinned.</p></div><div className="toolbar-actions"><input aria-label="Automation name" value={name} onChange={event => setName(event.target.value)} /><button className="primary" onClick={create}>+ New automation</button></div></div>
+    <div className="automation-layout">
+      <section className="panel"><div className="panel-head"><div><h3>Automation library</h3><p className="muted">Draft, active, paused, and archived definitions.</p></div><span className="count-badge">{items.length}</span></div>
+        {items.length ? <div className="list-stack">{items.map(item => <button className={item.id === selected ? 'list-row selected' : 'list-row'} key={item.id} onClick={() => setSelected(item.id)}><span><strong>{item.name}</strong><small>{item.status} · {item.active_revision_id ? 'published revision' : 'draft only'}</small></span><b>Open →</b></button>)}</div> : <Empty text="Create a workflow to start mapping an operator journey." />}
+      </section>
+      {selected && detail ? <section className="panel automation-editor">
+        <div className="panel-head"><div><h3>{detail.name}</h3><p className="muted">{detail.status} · draft revision {detail.draft?.revision_number || '—'}</p></div><span className="status-chip">{detail.status}</span></div>
+        <div className="workflow-steps" aria-label="Workflow canvas"><p className="eyebrow">WHEN THIS HAPPENS… CHECK WHETHER… WAIT UNTIL… THEN DO… OTHERWISE… END</p>
+          {nodes.map(node => <div className={`workflow-node ${node.kind.toLowerCase()}`} key={node.id}>
+            <div className="workflow-node-top"><strong>{node.label}</strong><span className="tag">{node.kind}</span>{!['TRIGGER', 'END'].includes(node.kind) && <button className="icon-button" aria-label={`Remove ${node.label}`} onClick={() => removeNode(node.id)}>×</button>}</div>
+            {node.kind === 'TRIGGER' && <label>Trigger<select value={node.config.trigger_kind || ''} onChange={event => updateNode(node.id, { config: { ...node.config, trigger_kind: event.target.value } })}><option value="manual_enrollment">Manual enrollment</option><option value="contact_imported">Contact imported</option><option value="contact_added_to_list">Contact added to list</option><option value="scheduled_occurrence">Scheduled occurrence</option><option value="trusted_inbound_event">Trusted inbound event</option></select></label>}
+            {node.kind === 'TRIGGER' && node.config.trigger_kind === 'contact_added_to_list' && <label>Trigger list<select value={node.config.list_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, list_id: event.target.value } })}><option value="">Choose a list</option>{lists.map(list => <option key={list.id} value={list.id}>{list.name}</option>)}</select></label>}
+            {node.kind === 'CONDITION' && <><label>Saved segment (optional)<select value={node.config.segment_id || ''} onChange={event => { const segment = segments.find(item => item.id === event.target.value); updateNode(node.id, { config: { ...node.config, segment_id: event.target.value || undefined, segment_revision_id: segment?.current_revision_id, result: event.target.value ? undefined : true } }) }}><option value="">Static result</option>{segments.map(segment => <option key={segment.id} value={segment.id}>{segment.name} · pinned {segment.current_revision_id?.slice(0, 8)}</option>)}</select></label>{!node.config.segment_id && <label>Condition result<select value={String(node.config.result)} onChange={event => updateNode(node.id, { config: { ...node.config, result: event.target.value === 'true' ? true : event.target.value === 'false' ? false : undefined } })}><option value="true">TRUE</option><option value="false">FALSE</option><option value="unknown">UNKNOWN (safe false)</option></select></label>}</>}
+            {node.kind === 'WAIT' && <label>Wait seconds<input type="number" min="0" max="604800" value={node.config.seconds || 0} onChange={event => updateNode(node.id, { config: { ...node.config, seconds: Number(event.target.value) } })} /></label>}
+            {['ADD_TO_LIST', 'REMOVE_FROM_LIST'].includes(node.kind) && <label>Static list<select value={node.config.list_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, list_id: event.target.value } })}><option value="">Choose a list</option>{lists.map(list => <option key={list.id} value={list.id}>{list.name}</option>)}</select></label>}
+            {node.kind === 'PREPARE_CAMPAIGN' && <label>Synthetic campaign<select value={node.config.campaign_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, campaign_id: event.target.value } })}><option value="">Choose a campaign</option>{campaigns.map(campaign => <option key={campaign.id} value={campaign.id}>{campaign.name} · {campaign.status}</option>)}</select></label>}
+            {node.kind === 'NOTE' && <label>Operator note<input value={node.config.note || ''} onChange={event => updateNode(node.id, { config: { ...node.config, note: event.target.value } })} /></label>}
+          </div>)}
+        </div>
+        <div className="button-row"><select aria-label="Add workflow node" defaultValue="" onChange={event => { if (event.target.value) { addNode(event.target.value); event.target.value = '' } }}><option value="">+ Add node</option><option value="CONDITION">Check condition</option><option value="WAIT">Wait</option><option value="ADD_TO_LIST">Add to list</option><option value="REMOVE_FROM_LIST">Remove from list</option><option value="PREPARE_CAMPAIGN">Prepare synthetic campaign</option><option value="NOTE">Record note</option><option value="END">End</option></select><button onClick={save}>Save draft</button><button onClick={() => action('validate', 'Workflow validated')}>Validate</button><button onClick={() => action('publish', 'Revision published')}>Publish</button><button className="primary" onClick={() => action('activate', 'Workflow activated')}>Activate</button><button onClick={() => action('pause', 'Workflow paused')}>Pause</button></div>
+        <div className="edge-editor"><div className="panel-head"><h3>Connections</h3><span className="muted">Keyboard-accessible edge editor</span></div>
+          {nodes.map(node => { const outgoing = edges.filter(edge => edge.source === node.id); return <div className="edge-row" key={'edges-' + node.id}><strong>{node.label}</strong>{node.kind === 'CONDITION' ? ['true', 'false'].map(branch => <label key={branch}>{branch.toUpperCase()}<select aria-label={branch + ' connection from ' + node.label} value={outgoing.find(edge => edge.branch === branch)?.target || ''} onChange={event => connect(node.id, event.target.value || undefined, branch)}><option value="">Choose next node</option>{nodes.filter(target => target.id !== node.id).map(target => <option key={target.id} value={target.id}>{target.label}</option>)}</select></label>) : <select aria-label={'Connection from ' + node.label} value={outgoing.find(edge => edge.branch === 'default')?.target || ''} onChange={event => connect(node.id, event.target.value || undefined, 'default')}><option value="">Choose next node</option>{nodes.filter(target => target.id !== node.id).map(target => <option key={target.id} value={target.id}>{target.label}</option>)}</select>}</div>})}
+          {edges.length > 0 && <p className="muted">{edges.length} explicit connections · {edges.map(edge => edge.source + ' → ' + edge.target + ' (' + (edge.branch || 'default') + ')').join(' · ')}</p>}
+        </div>
+        <div className="enrollment-box"><div><h3>Run a synthetic enrollment</h3><p className="muted">The active published revision is pinned to each run.</p></div><select aria-label="Contact to enroll" value={contactId} onChange={event => setContactId(event.target.value)}><option value="">Choose contact</option>{contacts.map(contact => <option key={contact.id} value={contact.id}>{contact.normalized_email}</option>)}</select><button className="primary" disabled={!contactId || detail.status !== 'active'} onClick={enroll}>Enroll contact</button></div>
+        <div className="run-history"><div className="panel-head"><h3>Run history</h3><span className="muted">Durable step diagnostics</span></div>{runs.length ? runs.map(run => <div className="run-row" key={run.id}><span><strong>{run.status}</strong><small>{run.current_node_key} · revision {run.revision_id.slice(0, 8)}</small></span><div className="button-row"><button onClick={() => onRun(() => api(`/automations/runs/${run.id}/advance`, { method: 'POST' }).then(() => refresh(selected)), 'Run advanced')}>Advance</button><button onClick={() => onRun(() => api(`/automations/runs/${run.id}`, { method: 'GET' }), 'Run diagnostics loaded')}>Details</button><button onClick={() => onRun(() => api(`/automations/runs/${run.id}/${run.status === 'paused' ? 'resume' : 'pause'}`, { method: 'POST' }).then(() => refresh(selected)), run.status === 'paused' ? 'Run resumed' : 'Run paused')}>{run.status === 'paused' ? 'Resume' : 'Pause'}</button><button onClick={() => onRun(() => api(`/automations/runs/${run.id}/cancel`, { method: 'POST' }).then(() => refresh(selected)), 'Run canceled')}>Cancel</button></div></div>) : <Empty text="No enrollments yet." />}</div>
+      </section> : <section className="panel"><Empty text="Select an automation or create one to open the workflow canvas." /></section>}
+    </div>
+  </div>
+}
 
 type SegmentRule = { fieldId: string, operator: string, value: string }
 
