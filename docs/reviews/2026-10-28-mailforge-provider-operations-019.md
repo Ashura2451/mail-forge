@@ -3,7 +3,7 @@
 **Task:** `MAILFORGE-PROVIDER-OPERATIONS-019`
 **Branch:** `feat/mailforge-provider-operations-019`
 **Base:** verified 018 feature HEAD `16ad2b1`
-**Commit:** to be recorded after final publication
+**Feature commit:** `0c72222f54d8ee2585f83c9e936971f52fd787d3`
 
 ## Result
 
@@ -73,8 +73,8 @@ provider credential, or owner-controlled recipient mailbox was supplied.
 | AA. Real-provider result | NOT PERFORMED | No owner authorization or real provider data supplied |
 | AB. Independent review | NOT VERIFIED | No independent reviewer was available in this execution environment |
 | AC. Documentation | PASS | Spec, provider guide, capability baseline, performance note, changelog |
-| AD. Feature publication | PENDING FINAL PUSH | Exact branch/commit/push verification follows this review |
-| AE. Main integration | NOT INTEGRATED | `origin/main` remains `3bd42f7`; no merge performed |
+| AD. Feature publication | PUBLISHED | `origin/feat/mailforge-provider-operations-019` resolves to `0c72222f54d8ee2585f83c9e936971f52fd787d3` |
+| AE. Main integration | NOT INTEGRATED | `origin/main` remains `3bd42f796ba9f371fc91d36e921dc1eb1a2a5728`; no merge performed |
 
 ## Validation
 
@@ -104,5 +104,5 @@ provider credential, or owner-controlled recipient mailbox was supplied.
   boundaries, while the current outbound campaign route remains simulation-only.
 - The prior 011-S correction remains locally corrected but independently
   unapproved; no new approval is claimed here.
-- No publication or merge is claimed until the final commit and remote branch
-  verification are complete.
+- Feature publication is complete and the remote branch resolves to the
+  feature commit above. No merge into `main` was performed or claimed.
