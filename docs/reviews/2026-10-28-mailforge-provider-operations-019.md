@@ -4,6 +4,7 @@
 **Branch:** `feat/mailforge-provider-operations-019`
 **Base:** verified 018 feature HEAD `16ad2b1`
 **Feature commit:** `0c72222f54d8ee2585f83c9e936971f52fd787d3`
+**Published branch head:** `e208f00df50b1b99c16ad51fd4c6a538c5b95972`
 
 ## Result
 
@@ -73,7 +74,7 @@ provider credential, or owner-controlled recipient mailbox was supplied.
 | AA. Real-provider result | NOT PERFORMED | No owner authorization or real provider data supplied |
 | AB. Independent review | NOT VERIFIED | No independent reviewer was available in this execution environment |
 | AC. Documentation | PASS | Spec, provider guide, capability baseline, performance note, changelog |
-| AD. Feature publication | PUBLISHED | `origin/feat/mailforge-provider-operations-019` resolves to `0c72222f54d8ee2585f83c9e936971f52fd787d3` |
+| AD. Feature publication | PUBLISHED | `origin/feat/mailforge-provider-operations-019` resolves to branch head `e208f00df50b1b99c16ad51fd4c6a538c5b95972`, containing feature commit `0c72222f` |
 | AE. Main integration | NOT INTEGRATED | `origin/main` remains `3bd42f796ba9f371fc91d36e921dc1eb1a2a5728`; no merge performed |
 
 ## Validation
