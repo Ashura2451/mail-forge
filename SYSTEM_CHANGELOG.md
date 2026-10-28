@@ -289,3 +289,13 @@
   export choice, downloads, contact destinations, and message previews.
 - Real-provider qualification remains readiness-only; no external action or
   private recipient/provider data was used.
+
+## 2026-10-28 — Local application distribution
+
+- Added a macOS arm64 application bundle builder with the locked Python runtime,
+  package, dependencies, and compiled browser assets.
+- Added stable local data-directory management, lifecycle controls, health
+  diagnostics, first-run setup, runtime maintenance, and complete backup/restore
+  validation boundaries.
+- Preserved loopback security, SQLite authority, supervised workers, and the
+  explicit simulation-only external-operation boundary.

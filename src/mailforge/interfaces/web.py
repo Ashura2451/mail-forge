@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -34,6 +37,17 @@ from mailforge.application.inbound_operations import InboundOperations, InboundO
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import iter_raw_values
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
+from mailforge.application.local_application import (
+    DataDirectory,
+    application_status,
+    backup_database_snapshot,
+    complete_onboarding,
+    create_backup,
+    current_schema_version,
+    list_backups,
+    restore_backup,
+    utc_now,
+)
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.provider_operations import ProviderOperationsService
@@ -57,7 +71,7 @@ from mailforge.domain.provider import (
     ProviderProfile,
     TLSMode,
 )
-from mailforge.infrastructure.campaign_store import CampaignStore
+from mailforge.infrastructure.campaign_store import SCHEMA_VERSION, CampaignStore
 from mailforge.infrastructure.credentials import EnvironmentCredentialResolver
 
 API_PREFIX = "/api/v1"
@@ -136,6 +150,17 @@ class CampaignScheduleInput(BaseModel):
     recurrence: str | None = Field(default=None, max_length=20)
     catch_up_policy: CatchUpPolicy = CatchUpPolicy.SKIP
     fold: int | None = Field(default=None, ge=0, le=1)
+
+
+class SetupInput(BaseModel):
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+    simulation_mode: bool = True
+    sample_data: bool = False
+
+
+class RestoreInput(BaseModel):
+    backup_name: str = Field(min_length=1, max_length=200)
+    destination_name: str = Field(min_length=1, max_length=120)
 
 
 class MessageDocumentInput(BaseModel):
@@ -560,7 +585,29 @@ class AutomationRuntimeSupervisor:
 
 
 class WebRuntime:
-    def __init__(self, database: str | Path, frontend_dir: str | Path | None = None):
+    def __init__(
+        self,
+        database: str | Path,
+        frontend_dir: str | Path | None = None,
+        data_directory: str | Path | None = None,
+    ):
+        self.data_directory = DataDirectory.from_path(data_directory or Path(database).parent)
+        self.data_directory.initialize()
+        self.runtime_id = uuid.uuid4().hex
+        self.started_at = utc_now()
+        database_path = Path(database)
+        current_schema = current_schema_version(database_path)
+        if current_schema > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"database schema {current_schema} is newer than this Mailforge build; "
+                "upgrade is refused"
+            )
+        if 0 < current_schema < SCHEMA_VERSION:
+            snapshot = self.data_directory.backups / (
+                f"pre-migration-v{current_schema}-{datetime.now().strftime('%Y%m%dT%H%M%S')}.sqlite3"
+            )
+            if not snapshot.exists():
+                backup_database_snapshot(database_path, snapshot)
         self.store = CampaignStore(database)
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
@@ -635,6 +682,29 @@ class WebRuntime:
         self.campaign_scheduler.shutdown()
         self.workers.shutdown()
         self.automation_workers.shutdown()
+
+    def status(self) -> dict[str, Any]:
+        status = application_status(self.data_directory)
+        status.update(
+            {
+                "runtime_id": self.runtime_id,
+                "started_at": self.started_at,
+                "pid": os.getpid(),
+                "worker_status": {
+                    "campaigns_active": len(self.workers._running),
+                    "automations_active": len(self.automation_workers._running),
+                    "scheduler": "running"
+                    if self.campaign_scheduler.thread.is_alive()
+                    else "stopped",
+                    "automation_scheduler": (
+                        "running" if self.automation_runtime.thread.is_alive() else "stopped"
+                    ),
+                },
+                "loopback_only": True,
+                "simulation_mode": True,
+            }
+        )
+        return status
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -827,9 +897,10 @@ def create_app(
     database: str | Path = "state/mailforge.sqlite3",
     *,
     frontend_dir: str | Path | None = None,
+    data_directory: str | Path | None = None,
     allowed_hosts: set[str] | None = None,
 ) -> FastAPI:
-    runtime = WebRuntime(database, frontend_dir)
+    runtime = WebRuntime(database, frontend_dir, data_directory)
     session = LocalSession(allowed_hosts or {"127.0.0.1", "localhost", "::1"})
 
     @asynccontextmanager
@@ -847,6 +918,10 @@ def create_app(
     app.state.session = session
     app.add_middleware(LocalSecurityMiddleware, session=session)
 
+    @app.get("/healthz")
+    async def healthz():
+        return runtime.status()
+
     @app.get(f"{API_PREFIX}/session")
     async def session_endpoint():
         response = JSONResponse({"session": "local", "csrf_token": session.csrf_token})
@@ -856,13 +931,73 @@ def create_app(
 
     @app.get(f"{API_PREFIX}/status")
     async def status():
+        payload = runtime.status()
+        payload.update(
+            {
+                "mode": "local-simulation",
+                "policy_revision": runtime.store.policy_revision(),
+                "database_kind": "sqlite",
+                "external_network": False,
+            }
+        )
+        return payload
+
+    @app.get(f"{API_PREFIX}/setup")
+    async def setup():
+        payload = runtime.status()
         return {
-            "application": "Mailforge",
-            "mode": "local-simulation",
-            "schema_version": runtime.store.schema_version(),
-            "policy_revision": runtime.store.policy_revision(),
-            "database_kind": "sqlite",
-            "external_network": False,
+            "complete": payload["onboarding_complete"],
+            "data_directory_id": payload["data_directory_id"],
+            "preferences": payload.get("preferences", {}),
+        }
+
+    @app.post(f"{API_PREFIX}/setup/complete")
+    async def setup_complete(payload: SetupInput):
+        settings = complete_onboarding(
+            runtime.data_directory,
+            preferences=payload.model_dump(),
+        )
+        return {
+            "complete": True,
+            "preferences": settings["preferences"],
+            "data_directory_id": runtime.data_directory.identity,
+        }
+
+    @app.get(f"{API_PREFIX}/runtime")
+    async def runtime_status():
+        return runtime.status()
+
+    @app.get(f"{API_PREFIX}/runtime/backups")
+    async def runtime_backups():
+        return {"items": list_backups(runtime.data_directory)}
+
+    @app.post(f"{API_PREFIX}/runtime/backup")
+    async def runtime_backup():
+        backup = create_backup(runtime.data_directory)
+        return {"backup": backup.name, "metadata": list_backups(runtime.data_directory)[0]}
+
+    @app.post(f"{API_PREFIX}/runtime/restore")
+    async def runtime_restore(payload: RestoreInput):
+        if Path(payload.backup_name).name != payload.backup_name:
+            return _error(400, "backup_path_invalid", "choose a backup from the local backup list")
+        if Path(payload.destination_name).name != payload.destination_name:
+            return _error(
+                400,
+                "restore_destination_invalid",
+                "restore destination must be a single local name",
+            )
+        source = runtime.data_directory.backups / payload.backup_name
+        destination = runtime.data_directory.root / "restores" / payload.destination_name
+        try:
+            restored = restore_backup(source, destination)
+        except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as error:
+            return _error(400, "restore_rejected", str(error))
+        return {
+            "restored": True,
+            "destination_id": DataDirectory.from_path(restored).identity,
+            "database_schema_version": CampaignStore(
+                restored / "mailforge.sqlite3"
+            ).schema_version(),
         }
 
     @app.get(f"{API_PREFIX}/dashboard")
