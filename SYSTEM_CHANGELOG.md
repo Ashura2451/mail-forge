@@ -12,10 +12,12 @@
 - Added the responsive Campaign Operations browser workspace and CLI parity
   commands. The execution boundary remains local synthetic simulation only;
   no live provider or unrestricted delivery path was added.
-- Focused and full local validation pass: 224 Python tests, type compilation,
-  and Oxlint (with the existing five React effect warnings). Vite build remains
-  environment-blocked here because the installed Vite/Rolldown requires Node
-  20+ while this runner provides Node 18.
+- Follow-up review fixes add due-schedule supervision, purpose propagation,
+  ordinary-list redaction, source-safe draft updates, bounded drilldown SQL,
+  message preview evidence, and export metadata/outcome correctness.
+- Final local validation pass: 225 Python tests, 5 browser/accessibility tests,
+  TypeScript/Vite build, and Oxlint (with the existing five React effect
+  warnings). The build used the available Node 24 executable.
 
 ## 2026-10-28 — Operational intelligence and reporting
 

@@ -148,6 +148,7 @@ class CampaignOperationsService:
         sender_email: str = "sender@example.com",
         subject: str = "Synthetic Mailforge campaign",
         text: str = "Hello {{ email }}",
+        purpose: str = "transactional",
         message_revision_id: str | None = None,
         provider_account_ref: str | None = None,
     ) -> str:
@@ -170,7 +171,7 @@ class CampaignOperationsService:
             template_ref=f"campaign-template-{uuid.uuid4().hex[:12]}",
             sender_config_ref=sender_ref,
             configuration={
-                "communication_purpose": "transactional",
+                "communication_purpose": purpose,
                 "operator_authorization_required": True,
                 "sender_email": sender_email,
                 "subject": subject,
@@ -202,8 +203,17 @@ class CampaignOperationsService:
             except KeyError as error:
                 raise CampaignOperationsError(str(error), "provider_account_not_found") from error
         old = _safe_config(campaign)
+        audience_list_id = values.get("list_id") or campaign["audience_list_id"]
+        if source_type == "segment" and campaign["audience_source_type"] != "segment":
+            audience_list_id = self.store.create_list(
+                f"__segment_anchor__{campaign_id[:12]}",
+                "Internal segment campaign anchor",
+            )
         configuration = {
             **old,
+            "communication_purpose": values.get(
+                "purpose", old.get("communication_purpose", "transactional")
+            ),
             "sender_email": values.get(
                 "sender_email", old.get("sender_email", "sender@example.com")
             ),
@@ -217,7 +227,7 @@ class CampaignOperationsService:
             description=values.get("description", campaign["description"] or ""),
             sender_config_ref=campaign["sender_config_ref"],
             template_ref=campaign["template_ref"],
-            audience_list_id=campaign["audience_list_id"],
+            audience_list_id=audience_list_id,
             audience_source_type=source_type,
             audience_source_id=source_id,
             audience_revision_id=audience_revision_id,
@@ -566,17 +576,43 @@ class CampaignOperationsService:
             "schedule": asdict(self._schedule_from_row(schedule)) if schedule else None,
             "preflight": self.preflight(campaign_id),
             "progress": self.campaigns.report(campaign_id).to_dict(),
-            "preview": self.campaigns.preview(campaign_id).get("intents", [])[
-                : max(1, min(preview_limit, 50))
-            ],
+            "preview": self.recipients(campaign_id, limit=preview_limit),
+            "message_previews": self._message_previews(campaign_id, preview_limit),
         }
+
+    def _message_previews(self, campaign_id: str, limit: int) -> list[dict[str, Any]]:
+        campaign = self.store.get_campaign(campaign_id)
+        rows = self.recipients(campaign_id, limit=max(1, min(limit, 10)))
+        previews = []
+        for item in rows:
+            try:
+                if campaign["message_revision_id"]:
+                    contact = self.store.contact_by_email(item["email"])
+                    if contact:
+                        previews.append(
+                            self.message_studio.preview(
+                                revision_id=campaign["message_revision_id"],
+                                contact_id=contact["id"],
+                            )
+                        )
+                else:
+                    previews.append(self.outbound.preview_message(campaign_id, item["email"]))
+            except KeyError, ValueError:
+                continue
+        return previews
 
     def recipients(
         self, campaign_id: str, *, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
-        rows = self.store.list_intents(campaign_id)
+        safe_limit = max(1, min(limit, 500))
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM delivery_intents WHERE campaign_id=? "
+                "ORDER BY normalized_email LIMIT ? OFFSET ?",
+                (campaign_id, safe_limit, max(0, offset)),
+            ).fetchall()
         result = []
-        for row in rows[offset : offset + max(1, min(limit, 500))]:
+        for row in rows:
             latest = self.store.latest_attempt(row["id"])
             result.append(
                 {
@@ -585,6 +621,7 @@ class CampaignOperationsService:
                     "state": row["state"],
                     "eligibility_reason": row["eligibility_reason"],
                     "attempt_count": row["attempt_count"],
+                    "latest_outcome": latest["outcome"] if latest else None,
                     "latest_attempt": {
                         key: latest[key]
                         for key in (
@@ -635,11 +672,25 @@ class CampaignOperationsService:
         output = io.StringIO()
         writer = csv.DictWriter(
             output,
-            fieldnames=("email", "state", "eligibility_reason", "attempt_count", "latest_outcome"),
+            fieldnames=(
+                "campaign_id",
+                "definition_version",
+                "evidence_class",
+                "email",
+                "state",
+                "eligibility_reason",
+                "attempt_count",
+                "latest_outcome",
+            ),
         )
         writer.writeheader()
         for item in payload["recipients"]:
-            values = [str(item.get(key, "")) for key in writer.fieldnames]
+            values = [
+                campaign_id,
+                "campaign-operations-023",
+                "local_durable_observation",
+                *[str(item.get(key, "")) for key in writer.fieldnames[3:]],
+            ]
             values = [
                 "'" + value if value.startswith(("=", "+", "-", "@")) else value for value in values
             ]

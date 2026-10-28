@@ -109,6 +109,7 @@ class DataStudioCampaignPrepareInput(BaseModel):
 class CampaignInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=500)
+    purpose: str = Field(default="transactional", min_length=1, max_length=80)
     list_id: str | None = None
     segment_id: str | None = None
     segment_revision_id: str | None = None
@@ -434,6 +435,53 @@ class WorkerSupervisor:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
 
+class CampaignScheduleSupervisor:
+    """Starts only authorized, due synthetic schedules from durable rows."""
+
+    def __init__(self, store: CampaignStore, outbound: OutboundService, workers: WorkerSupervisor):
+        self.store = store
+        self.outbound = outbound
+        self.workers = workers
+        self.stop = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, name="mailforge-campaign-scheduler", daemon=True
+        )
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop.is_set():
+            try:
+                with self.store.connect() as connection:
+                    rows = connection.execute(
+                        "SELECT c.id, s.* FROM campaigns c JOIN campaign_schedules s "
+                        "ON s.campaign_id=c.id WHERE c.status='scheduled' "
+                        "AND c.authorization='simulation_authorized'"
+                    ).fetchall()
+                for row in rows:
+                    schedule = ScheduleSpec(
+                        mode=ScheduleMode(row["mode"]),
+                        timezone=row["timezone"],
+                        scheduled_at=row["scheduled_at"],
+                        window_start=row["window_start"],
+                        window_end=row["window_end"],
+                        weekdays=tuple(json.loads(row["weekdays_json"] or "[]")),
+                        pacing_seconds=float(row["pacing_seconds"]),
+                        cooldown_seconds=float(row["cooldown_seconds"]),
+                        recurrence=row["recurrence"],
+                        catch_up_policy=CatchUpPolicy(row["catch_up_policy"]),
+                        fold=row["fold"],
+                    )
+                    if self.outbound.schedules.due(schedule, self.outbound.now_fn()):
+                        self.workers.start(row["id"])
+            except Exception:
+                pass
+            self.stop.wait(0.1)
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=2)
+
+
 class AutomationWorkerSupervisor:
     """Bounded synthetic workflow worker; waits and history remain durable."""
 
@@ -529,6 +577,9 @@ class WebRuntime:
         self.provider_operations = ProviderOperationsService(self.store)
         self.reporting = ReportingService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
+        self.campaign_scheduler = CampaignScheduleSupervisor(
+            self.store, self.outbound, self.workers
+        )
         self.campaign_operations = CampaignOperationsService(
             self.store,
             campaigns=self.campaigns,
@@ -581,6 +632,7 @@ class WebRuntime:
         self.automation_runtime.shutdown()
         self.list_processing.close()
         self.data_studio.close()
+        self.campaign_scheduler.shutdown()
         self.workers.shutdown()
         self.automation_workers.shutdown()
 
@@ -647,6 +699,7 @@ def _require_list(store: CampaignStore, list_id: str) -> None:
 
 def _campaign_view(runtime: WebRuntime, row: sqlite3.Row) -> dict[str, Any]:
     campaign = _row(row)
+    campaign.pop("configuration", None)
     report = runtime.campaigns.report(row["id"])
     campaign["report"] = report.to_dict()
     campaign["worker_active"] = runtime.workers.active(row["id"])

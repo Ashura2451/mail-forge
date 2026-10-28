@@ -1075,6 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
                     list_id=args.list_id,
                     segment_id=args.segment_id,
                     segment_revision_id=args.segment_revision_id,
+                    purpose=args.purpose,
                 )
                 print(json.dumps({"campaign_id": campaign_id}))
             elif args.campaign_command == "workspace":
