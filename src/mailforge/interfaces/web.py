@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -28,6 +28,7 @@ from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_sources import EmlFileSource
 from mailforge.application.ingest import iter_raw_values
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
+from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
@@ -62,6 +63,36 @@ class CampaignInput(BaseModel):
     sender_email: str = "sender@example.com"
     subject: str = Field(default="Synthetic Mailforge campaign", max_length=200)
     text: str = Field(default="Hello {{ email }}", max_length=100_000)
+    message_revision_id: str | None = None
+
+
+class MessageDocumentInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    kind: str = "message"
+    document: dict[str, Any] | None = None
+
+
+class MessageSaveInput(BaseModel):
+    document: dict[str, Any]
+    expected_revision_id: str | None = None
+
+
+class MessageRevisionInput(BaseModel):
+    expected_revision_id: str | None = None
+
+
+class MessagePreviewInput(BaseModel):
+    document: dict[str, Any] | None = None
+    revision_id: str | None = None
+    contact_id: str | None = None
+    condition_mode: str | None = None
+
+
+class MessageAttachmentMapInput(BaseModel):
+    revision_id: str
+    contact_id: str
+    asset_id: str
+    required: bool = True
 
 
 class AutomationInput(BaseModel):
@@ -320,10 +351,15 @@ class WebRuntime:
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
+        self.message_studio = MessageStudioService(
+            self.store, outbound=self.outbound, segmentation=self.segmentation
+        )
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
-        self.automation = AutomationService(self.store, campaigns=self.campaigns)
+        self.automation = AutomationService(
+            self.store, campaigns=self.campaigns, message_studio=self.message_studio
+        )
         self.automation_workers = AutomationWorkerSupervisor(self.automation)
         self.automation_runtime = AutomationRuntimeSupervisor(
             self.automation, self.automation_workers
@@ -574,6 +610,165 @@ def create_app(
     @app.get(f"{API_PREFIX}/fields")
     async def fields(include_archived: bool = False):
         return {"items": runtime.segmentation.list_fields(include_archived=include_archived)}
+
+    @app.get(f"{API_PREFIX}/message-studio/documents")
+    async def message_documents(kind: str | None = None, limit: int = 100, offset: int = 0):
+        return {
+            "items": runtime.message_studio.list_documents(kind=kind, limit=limit, offset=offset)
+        }
+
+    @app.post(f"{API_PREFIX}/message-studio/documents")
+    async def create_message_document(payload: MessageDocumentInput):
+        try:
+            return runtime.message_studio.create_document(
+                payload.name, kind=payload.kind, document=payload.document
+            )
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/documents/{{document_id}}")
+    async def message_document(document_id: str):
+        try:
+            return runtime.message_studio.get_document(document_id)
+        except MessageStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/save")
+    async def save_message_document(document_id: str, payload: MessageSaveInput):
+        try:
+            return runtime.message_studio.save_draft(
+                document_id, payload.document, expected_revision_id=payload.expected_revision_id
+            )
+        except MessageStudioError as error:
+            return _error(409 if error.code == "revision_conflict" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/publish")
+    async def publish_message_document(
+        document_id: str, payload: MessageRevisionInput | None = None
+    ):
+        try:
+            return runtime.message_studio.publish(
+                document_id, expected_revision_id=payload.expected_revision_id if payload else None
+            )
+        except MessageStudioError as error:
+            return _error(409 if error.code == "revision_conflict" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/archive")
+    async def archive_message_document(document_id: str):
+        try:
+            return runtime.message_studio.archive(document_id)
+        except MessageStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/duplicate")
+    async def duplicate_message_document(
+        document_id: str, payload: MessageDocumentInput | None = None
+    ):
+        try:
+            return runtime.message_studio.duplicate(document_id, payload.name if payload else None)
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/templates")
+    async def message_templates(limit: int = 100, offset: int = 0):
+        return {
+            "items": runtime.message_studio.list_documents(
+                kind="template", limit=limit, offset=offset
+            )
+        }
+
+    @app.post(f"{API_PREFIX}/message-studio/validate")
+    async def validate_message_document(payload: MessageSaveInput):
+        try:
+            document = runtime.message_studio.validate_document(payload.document)
+            return {
+                "valid": True,
+                "content_hash": hashlib.sha256(
+                    json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "warnings": [],
+            }
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/preview")
+    async def preview_message_document(payload: MessagePreviewInput):
+        try:
+            return runtime.message_studio.preview(
+                payload.document,
+                revision_id=payload.revision_id,
+                contact_id=payload.contact_id,
+                condition_mode=payload.condition_mode,
+            )
+        except (MessageStudioError, KeyError) as error:
+            return _error(400, getattr(error, "code", "preview_invalid"), str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/assets")
+    async def message_assets(kind: str | None = None):
+        return {"items": runtime.message_studio.list_assets(kind=kind)}
+
+    @app.get(f"{API_PREFIX}/message-studio/revisions/{{revision_id}}/recipient-attachments")
+    async def recipient_attachment_mappings(revision_id: str):
+        try:
+            return {"items": runtime.message_studio.list_recipient_attachments(revision_id)}
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/recipient-attachments")
+    async def map_recipient_attachment(payload: MessageAttachmentMapInput):
+        try:
+            return runtime.message_studio.map_recipient_attachment(**payload.model_dump())
+        except MessageStudioError as error:
+            status = 404 if error.code.endswith("_not_found") else 400
+            return _error(status, error.code, str(error))
+
+    @app.delete(f"{API_PREFIX}/message-studio/recipient-attachments")
+    async def remove_recipient_attachment(payload: MessageAttachmentMapInput):
+        try:
+            runtime.message_studio.remove_recipient_attachment(
+                payload.revision_id, payload.contact_id, payload.asset_id
+            )
+            return {"removed": True}
+        except MessageStudioError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/assets")
+    async def upload_message_asset(file: UploadFile = File(...), kind: str = "attachment"):  # noqa: B008
+        try:
+            raw = file.file.read(10 * 1024 * 1024 + 1)
+            if len(raw) > 10 * 1024 * 1024:
+                return _error(413, "asset_limit", "asset exceeds the 10 MiB local limit")
+            return runtime.message_studio.create_asset(
+                file.filename or "attachment",
+                file.content_type or "application/octet-stream",
+                raw,
+                kind=kind,
+            )
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.delete(f"{API_PREFIX}/message-studio/assets/{{asset_id}}")
+    async def archive_message_asset(asset_id: str):
+        try:
+            runtime.message_studio.archive_asset(asset_id)
+            return {"asset_id": asset_id, "status": "archived"}
+        except MessageStudioError as error:
+            return _error(409 if error.code == "asset_referenced" else 404, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/assets/{{asset_id}}")
+    async def download_message_asset(asset_id: str):
+        try:
+            asset = runtime.message_studio.get_asset(asset_id, include_data=True)
+            return Response(
+                content=asset["data_blob"],
+                media_type=asset["media_type"],
+                headers={
+                    "content-disposition": f'inline; filename="{asset["filename"]}"',
+                    "cache-control": "no-store",
+                },
+            )
+        except MessageStudioError as error:
+            return _error(404, error.code, str(error))
 
     @app.post(f"{API_PREFIX}/fields")
     async def create_field(payload: FieldInput):
@@ -880,6 +1075,18 @@ def create_app(
                 source_type = "segment"
                 source_id = segment["id"]
                 payload.segment_revision_id = segment["revision"]["id"]
+            if payload.message_revision_id:
+                with runtime.store.connect() as connection:
+                    revision = connection.execute(
+                        "SELECT status FROM message_revisions WHERE id = ?",
+                        (payload.message_revision_id,),
+                    ).fetchone()
+                if revision is None or revision["status"] != "published":
+                    return _error(
+                        400,
+                        "revision_not_published",
+                        "campaigns require a published message revision",
+                    )
             campaign_id = runtime.campaigns.create_campaign(
                 payload.name.strip(),
                 payload.list_id,
@@ -894,6 +1101,7 @@ def create_app(
                 audience_source_type=source_type,
                 audience_source_id=source_id,
                 audience_revision_id=payload.segment_revision_id,
+                message_revision_id=payload.message_revision_id,
             )
         except KeyError:
             return _error(404, "list_not_found", "audience list was not found")
@@ -925,10 +1133,24 @@ def create_app(
             sender = SenderPolicy(
                 ref=campaign["sender_config_ref"], provider="synthetic", email=sender_email
             )
+            run_key = payload.run_key if payload else "primary"
+            if campaign["message_revision_id"]:
+                if run_key != "primary":
+                    return _error(
+                        400,
+                        "run_key_unsupported",
+                        "Message Studio campaigns use the primary audience run",
+                    )
+                report = runtime.message_studio.prepare_campaign(
+                    campaign_id,
+                    sender=sender,
+                    revision_id=campaign["message_revision_id"],
+                    run_key=run_key,
+                )
+                return asdict(report)
             template = TemplateDefinition(
                 name=campaign["template_ref"], version="1", subject=subject, text=text
             )
-            run_key = payload.run_key if payload else "primary"
             if run_key != "primary":
                 report = runtime.campaigns.prepare(campaign_id, run_key=run_key)
                 return {

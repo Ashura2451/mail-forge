@@ -1,5 +1,23 @@
 # System changelog
 
+## 2026-10-28 — Message Studio
+
+- Added schema 10 durable Message Studio documents, immutable revisions,
+  bounded local assets, recipient-specific attachment mappings, and immutable
+  campaign content snapshots.
+- Added the canonical `MessageStudioService` for structured blocks, safe merge
+  fields, conditional segments, deterministic HTML/plain-text rendering, CID
+  images, attachment manifests, and recipient previews.
+- Added secured `/api/v1/message-studio/*` operations, `mailforge message`
+  list/validate/render commands, campaign revision pinning, and workflow
+  preparation reuse of the canonical renderer.
+- Added a responsive structured browser studio with keyboard block reordering,
+  merge-field insertion, local uploads, revision controls, isolated preview,
+  and campaign revision selection.
+- Validation remains local and synthetic. No provider, mailbox, credential,
+  or real-recipient data was accessed, and arbitrary HTML/script execution is
+  not supported.
+
 ## 2026-10-28 — Operational workflows and List Tools
 
 - Added SQLite schema 9 for durable operational-event cursors, schedule

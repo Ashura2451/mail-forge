@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from email.parser import BytesParser
@@ -20,6 +20,7 @@ from mailforge.application.composition import (
     AssetResolver,
     MessageComposer,
     MessagePreparationError,
+    ResolvedAttachment,
 )
 from mailforge.application.policy import PolicyEngine
 from mailforge.application.providers import ProviderService
@@ -159,6 +160,10 @@ class OutboundService:
         one_click_unsubscribe: bool = False,
         dkim_signed: bool = False,
         sender_configuration: Mapping[str, object] | None = None,
+        resolved_attachments: tuple[ResolvedAttachment, ...] = (),
+        resolved_attachments_by_contact: Mapping[str, tuple[ResolvedAttachment, ...]] | None = None,
+        render_callback: Callable[[Mapping[str, object], Mapping[str, object], int], object]
+        | None = None,
     ) -> OutboundPreparationReport:
         campaign = self.store.get_campaign(campaign_id)
         if campaign["sender_config_ref"] != sender.ref:
@@ -223,12 +228,26 @@ class OutboundService:
             try:
                 if asset_error is not None:
                     raise asset_error
-                rendered = self.renderer.render(template, context, seed=seed, now=self.now_fn())
+                callback_attachments: tuple[ResolvedAttachment, ...] = ()
+                if render_callback is not None:
+                    callback_result = render_callback(contact, intent, seed)
+                    if isinstance(callback_result, tuple) and len(callback_result) == 2:
+                        rendered, callback_attachments = callback_result
+                    else:
+                        rendered = callback_result
+                else:
+                    rendered = self.renderer.render(template, context, seed=seed, now=self.now_fn())
+                selected_attachments = resolved_attachments or resolved
+                if resolved_attachments_by_contact:
+                    selected_attachments = selected_attachments + tuple(
+                        resolved_attachments_by_contact.get(intent["contact_id"], ())
+                    )
+                selected_attachments = selected_attachments + callback_attachments
                 composed = self.composer.compose(
                     sender=replace(sender, reply_to=sender.reply_to or template.reply_to),
                     recipient=intent["normalized_email"],
                     rendered=rendered,
-                    attachments=resolved,
+                    attachments=selected_attachments,
                     unsubscribe_url=unsubscribe_url,
                     one_click_unsubscribe=one_click_unsubscribe,
                     dkim_signed=dkim_signed,

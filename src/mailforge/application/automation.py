@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from mailforge.application.campaigns import CampaignService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.domain.campaign import utc_now
+from mailforge.domain.outbound import SenderPolicy
 from mailforge.infrastructure.campaign_store import CampaignStore
 
 WORKFLOW_STATUSES = {"draft", "active", "paused", "archived"}
@@ -107,9 +108,12 @@ class AutomationError(ValueError):
 class AutomationService:
     """The sole workflow authority for API, CLI, and in-process workers."""
 
-    def __init__(self, store: CampaignStore, *, campaigns: CampaignService | None = None):
+    def __init__(
+        self, store: CampaignStore, *, campaigns: CampaignService | None = None, message_studio=None
+    ):
         self.store = store
         self.campaigns = campaigns or CampaignService(store)
+        self.message_studio = message_studio
         self.segmentation = SegmentationService(store)
         self._event_lock = threading.Lock()
 
@@ -661,14 +665,19 @@ class AutomationService:
                             "reference_not_found",
                         )
                 if node["kind"] == "PREPARE_CAMPAIGN":
-                    exists = connection.execute(
-                        "SELECT 1 FROM campaigns WHERE id = ?", (config["campaign_id"],)
+                    campaign = connection.execute(
+                        "SELECT * FROM campaigns WHERE id = ?", (config["campaign_id"],)
                     ).fetchone()
-                    if exists is None:
+                    if campaign is None:
                         raise AutomationError(
                             f"campaign action references a missing campaign: {config['campaign_id']}",
                             "reference_not_found",
                         )
+                    if self.message_studio and campaign["message_revision_id"]:
+                        try:
+                            self.message_studio.validate_revision(campaign["message_revision_id"])
+                        except Exception as error:
+                            raise AutomationError(str(error), "reference_not_found") from error
                 if node["kind"] == "CONDITION" and config.get("segment_id"):
                     try:
                         self.segmentation.get_segment(
@@ -1416,7 +1425,19 @@ class AutomationService:
             if not campaign_id:
                 raise AutomationError("prepare campaign action requires campaign_id")
             try:
-                report = self.campaigns.prepare(campaign_id)
+                campaign = self.store.get_campaign(campaign_id)
+                if self.message_studio and campaign["message_revision_id"]:
+                    configuration = json.loads(campaign["configuration_json"] or "{}")
+                    sender = SenderPolicy(
+                        ref=campaign["sender_config_ref"],
+                        provider="synthetic",
+                        email=configuration.get("sender_email", "sender@example.com"),
+                    )
+                    report = self.message_studio.prepare_campaign(
+                        campaign_id, sender=sender, revision_id=campaign["message_revision_id"]
+                    )
+                else:
+                    report = self.campaigns.prepare(campaign_id)
             except (KeyError, ValueError) as error:
                 raise AutomationError(str(error), "campaign_prepare_failed") from error
             output = {"campaign_id": campaign_id, "prepared": report.to_dict()}

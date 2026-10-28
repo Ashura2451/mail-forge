@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -870,6 +870,70 @@ CREATE INDEX IF NOT EXISTS idx_list_processing_artifacts_job
 ON list_processing_artifacts(job_id, kind, filename);
 """
 
+MIGRATION_10_SQL = """
+CREATE TABLE IF NOT EXISTS message_documents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('message', 'template')),
+    status TEXT NOT NULL CHECK(status IN ('draft', 'active', 'archived')),
+    current_draft_revision_id TEXT,
+    current_published_revision_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'local-operator',
+    updated_by TEXT NOT NULL DEFAULT 'local-operator'
+);
+CREATE INDEX IF NOT EXISTS idx_message_documents_status
+ON message_documents(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS message_revisions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES message_documents(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('draft', 'published')),
+    document_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    created_by TEXT NOT NULL DEFAULT 'local-operator',
+    UNIQUE(document_id, revision_number)
+);
+CREATE INDEX IF NOT EXISTS idx_message_revisions_document
+ON message_revisions(document_id, revision_number DESC);
+CREATE TABLE IF NOT EXISTS message_assets (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'attachment')),
+    filename TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    data_blob BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT,
+    UNIQUE(kind, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_message_assets_kind
+ON message_assets(kind, created_at DESC);
+CREATE TABLE IF NOT EXISTS message_recipient_attachments (
+    revision_id TEXT NOT NULL REFERENCES message_revisions(id) ON DELETE CASCADE,
+    contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    asset_id TEXT NOT NULL REFERENCES message_assets(id) ON DELETE RESTRICT,
+    required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1)),
+    PRIMARY KEY(revision_id, contact_id, asset_id)
+);
+CREATE TABLE IF NOT EXISTS message_campaign_snapshots (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    run_key TEXT NOT NULL,
+    revision_id TEXT NOT NULL REFERENCES message_revisions(id),
+    content_hash TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(campaign_id, run_key)
+);
+CREATE INDEX IF NOT EXISTS idx_message_campaign_snapshots_campaign
+ON message_campaign_snapshots(campaign_id, run_key);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1042,6 +1106,18 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (9, utc_now()),
                 )
+                current = 9
+            if current < 10:
+                columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(campaigns)")
+                }
+                if "message_revision_id" not in columns:
+                    connection.execute("ALTER TABLE campaigns ADD COLUMN message_revision_id TEXT")
+                self._apply_migration_10(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (10, utc_now()),
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1102,6 +1178,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_9(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_9_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_10(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_10_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
@@ -2230,6 +2313,7 @@ class CampaignStore:
         audience_source_id: str | None = None,
         audience_revision_id: str | None = None,
         audience_run_key: str = "primary",
+        message_revision_id: str | None = None,
     ) -> str:
         _assert_no_secrets({"name": name, "description": description}, "campaign")
         _assert_safe_reference(sender_config_ref, "sender_config_ref")
@@ -2243,8 +2327,8 @@ class CampaignStore:
                 "INSERT INTO campaigns "
                 "(id, name, description, sender_config_ref, template_ref, audience_list_id, "
                 "audience_source_type, audience_source_id, audience_revision_id, audience_run_key, "
-                "status, authorization, configuration_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "message_revision_id, status, authorization, configuration_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
                     name,
@@ -2256,6 +2340,7 @@ class CampaignStore:
                     audience_source_id or audience_list_id,
                     audience_revision_id,
                     audience_run_key,
+                    message_revision_id,
                     CampaignStatus.DRAFT.value,
                     ExecutionAuthorization.UNAUTHORIZED.value,
                     _json(configuration),

@@ -77,6 +77,7 @@ def test_console_routes_have_no_axe_critical_or_serious_findings(tmp_path: Path)
             for label in (
                 "Dashboard",
                 "Contacts",
+                "Message Studio",
                 "Campaigns",
                 "Automations",
                 "Inbound",

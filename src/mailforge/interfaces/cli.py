@@ -23,6 +23,7 @@ from mailforge.application.mailer_compat import (
     migrate_legacy_state,
     prepare_legacy_campaign,
 )
+from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import run_outbound_demo
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationService
@@ -155,6 +156,20 @@ def build_parser() -> argparse.ArgumentParser:
     segment_membership.add_argument("--list-id", required=True)
     segment_membership.add_argument("--contact-id", required=True)
     segment_membership.add_argument("--action", choices=["add", "remove"], required=True)
+    message = subparsers.add_parser(
+        "message", help="inspect and render local Message Studio content"
+    )
+    message_commands = message.add_subparsers(dest="message_command", required=True)
+    message_list = message_commands.add_parser("list")
+    message_list.add_argument("--database", type=Path, required=True)
+    message_validate = message_commands.add_parser("validate")
+    message_validate.add_argument("--database", type=Path, required=True)
+    message_validate.add_argument("--document", type=Path, required=True)
+    message_render = message_commands.add_parser("render")
+    message_render.add_argument("--database", type=Path, required=True)
+    message_render.add_argument("--revision-id", required=True)
+    message_render.add_argument("--contact-id")
+    message_render.add_argument("--condition-mode", choices=["true", "false"])
     campaign = subparsers.add_parser("campaign", help="manage durable local campaign state")
     campaign_commands = campaign.add_subparsers(dest="campaign_command", required=True)
     demo = campaign_commands.add_parser("demo", help="run the complete synthetic campaign workflow")
@@ -646,6 +661,30 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     service.set_membership(
                         args.list_id, args.contact_id, args.action, source="cli"
+                    ),
+                    indent=2,
+                )
+            )
+    elif args.command == "message":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = MessageStudioService(CampaignStore(args.database))
+        if args.message_command == "list":
+            print(json.dumps(service.list_documents(), indent=2))
+        elif args.message_command == "validate":
+            document = json.loads(args.document.read_text(encoding="utf-8"))
+            print(
+                json.dumps(
+                    {"valid": True, "document": service.validate_document(document)}, indent=2
+                )
+            )
+        else:
+            print(
+                json.dumps(
+                    service.preview(
+                        revision_id=args.revision_id,
+                        contact_id=args.contact_id,
+                        condition_mode=args.condition_mode,
                     ),
                     indent=2,
                 )
