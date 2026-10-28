@@ -4,6 +4,9 @@
 **Branch:** `feat/mailforge-inbound-operations-020`
 **Status:** Local implementation verified; external-provider qualification and
 independent review remain open.
+**Commit:** `79c4048448434d40070b6ea53a28d532bc135e2b`
+**Pull request:** [#3](https://github.com/Ashura2451/mail-forge/pull/3), open and
+mergeable against `main`
 
 ## Result
 
@@ -67,8 +70,8 @@ adapters share the same parser and durable acquisition path.
 | AC. Complete 52-step synthetic acceptance | PARTIAL / NOT CLAIMED | Durable local paths are covered, but no claim is made that every packet step was independently exercised in one run |
 | AD. Independent review | NOT AVAILABLE | No independent reviewer was available; none is claimed |
 | AE. Documentation synchronization | PASS | Spec 0010, guide, capability atlas, changelog, and local `.aios` observations updated |
-| AF. Git publication | PENDING | To be completed after final validation and commit |
-| AG. Main integration | PENDING | 020 PR is not yet merged at review drafting time |
+| AF. Git publication | PASS | Branch pushed; remote head matches `79c4048448434d40070b6ea53a28d532bc135e2b`; PR #3 is open |
+| AG. Main integration | NOT YET INTEGRATED | `origin/main` remains `d25f46795f98d18b3944863f03500549850ba509`; PR #3 is mergeable but not merged |
 
 ## Security and operational limitations
 
