@@ -1,5 +1,24 @@
 # System changelog
 
+## 2026-10-28 — Inbound operations workbench
+
+- Added schema 12 durable inbound attachment metadata, extracted values,
+  versioned rules/runs, Message Studio draft provenance, and explicit mailbox
+  action requests.
+- Added the canonical inbound workbench facade for bounded search/filter/detail,
+  safe header/address extraction with JSON/CSV export, deterministic rule
+  validation/evaluation, explicit contact/list addition, and reply/forward
+  preparation through Message Studio.
+- Added a read-only POP3S UIDL/RETR adapter and preserved EML, MBOX, synthetic,
+  and IMAP cursor/recovery behavior. Acquisition never marks, moves, deletes,
+  or sends remote mail.
+- Expanded the browser/API/CLI Inbound surface with message inspection, rules,
+  extraction, and draft controls while preserving review-gated suppression and
+  workflow event authority.
+- Validation is local and synthetic. 193 Python tests, API/browser checks, and
+  frontend build pass; no live provider, mailbox, credential, or recipient
+  data was accessed, and independent review was unavailable.
+
 ## 2026-10-28 — Provider Operations
 
 - Added schema 11 provider accounts, separate inbound settings, expiring

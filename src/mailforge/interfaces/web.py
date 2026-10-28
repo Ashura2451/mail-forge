@@ -25,7 +25,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from mailforge.application.automation import AutomationError, AutomationService
 from mailforge.application.campaigns import CampaignService
 from mailforge.application.inbound import InboundService
-from mailforge.application.inbound_sources import EmlFileSource
+from mailforge.application.inbound_operations import InboundOperations, InboundOperationsError
+from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import iter_raw_values
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
@@ -197,6 +198,46 @@ class ProviderOAuthCallbackInput(BaseModel):
 class ReviewDecision(BaseModel):
     decision: str
     reason: str = Field(min_length=1, max_length=500)
+
+
+class InboundRuleInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    definition: dict[str, Any]
+    priority: int = Field(default=0, ge=-100_000, le=100_000)
+
+
+class InboundRuleStatusInput(BaseModel):
+    status: str
+
+
+class InboundExtractInput(BaseModel):
+    fields: list[str] | None = Field(default=None, max_length=20)
+
+
+class InboundDraftInput(BaseModel):
+    kind: str
+    body: str = Field(default="", max_length=20_000)
+    account_ref: str | None = Field(default=None, max_length=120)
+
+
+class InboundContactInput(BaseModel):
+    list_id: str
+    field: str = "sender"
+
+
+class InboundMailboxActionInput(BaseModel):
+    action: str
+    authorization_ref: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    target_folder: str | None = Field(default=None, max_length=240)
+
+
+class InboundSyncInput(BaseModel):
+    batch_limit: int = Field(default=100, ge=1, le=10_000)
+    retain_raw: bool = True
+    authorization_ref: str | None = Field(default=None, max_length=200)
+    purpose: str | None = Field(default=None, max_length=500)
+    expires_at: str | None = None
 
 
 class FieldInput(BaseModel):
@@ -420,6 +461,8 @@ class WebRuntime:
         self.automation = AutomationService(
             self.store, campaigns=self.campaigns, message_studio=self.message_studio
         )
+        self.inbound_operations = InboundOperations(self.store, message_studio=self.message_studio)
+        self.inbound.set_operations(self.inbound_operations)
         self.automation_workers = AutomationWorkerSupervisor(self.automation)
         self.automation_runtime = AutomationRuntimeSupervisor(
             self.automation, self.automation_workers
@@ -1481,13 +1524,152 @@ def create_app(
             return _error(400, "resume_failed", str(error))
 
     @app.get(f"{API_PREFIX}/inbound")
-    async def inbound():
+    async def inbound(
+        q: str | None = None,
+        sender: str | None = None,
+        recipient: str | None = None,
+        subject: str | None = None,
+        classification: str | None = None,
+        source_ref: str | None = None,
+        processed: bool | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ):
         reviews = runtime.inbound.review_queue()
+        workbench = runtime.inbound_operations.search(
+            q=q,
+            sender=sender,
+            recipient=recipient,
+            subject=subject,
+            classification=classification,
+            source_ref=source_ref,
+            processed=processed,
+            limit=limit,
+            offset=offset,
+        )
         return {
             "items": reviews,
-            "messages": runtime.inbound.inspect(limit=100),
+            "messages": workbench["items"],
+            "total": workbench["total"],
             "stats": runtime.inbound.stats(),
         }
+
+    @app.get(f"{API_PREFIX}/inbound/messages/{{message_id}}")
+    async def inbound_message_detail(message_id: str):
+        try:
+            return runtime.inbound_operations.detail(message_id)
+        except (KeyError, InboundOperationsError) as error:
+            return _error(404, getattr(error, "code", "message_not_found"), str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/messages/{{message_id}}/extract")
+    async def inbound_extract(message_id: str, payload: InboundExtractInput):
+        try:
+            return {"items": runtime.inbound_operations.extract_message(message_id, payload.fields)}
+        except (KeyError, InboundOperationsError) as error:
+            return _error(400, getattr(error, "code", "extract_failed"), str(error))
+
+    @app.get(f"{API_PREFIX}/inbound/export")
+    async def inbound_export(message_id: str | None = None, fmt: str = "json"):
+        try:
+            media_type, content = runtime.inbound_operations.export(message_id=message_id, fmt=fmt)
+            return Response(content, media_type=media_type)
+        except InboundOperationsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/inbound/rules")
+    async def inbound_rules():
+        return {"items": runtime.inbound_operations.list_rules()}
+
+    @app.post(f"{API_PREFIX}/inbound/rules")
+    async def create_inbound_rule(payload: InboundRuleInput):
+        try:
+            return runtime.inbound_operations.create_rule(
+                payload.name, payload.definition, priority=payload.priority
+            )
+        except InboundOperationsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/rules/{{rule_id}}/status")
+    async def set_inbound_rule_status(rule_id: str, payload: InboundRuleStatusInput):
+        try:
+            return runtime.inbound_operations.set_rule_status(rule_id, payload.status)
+        except InboundOperationsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/rules/{{rule_id}}/preview")
+    async def preview_inbound_rule(rule_id: str, message_id: str):
+        try:
+            return runtime.inbound_operations.preview_rule(rule_id, message_id)
+        except InboundOperationsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/messages/{{message_id}}/draft")
+    async def prepare_inbound_draft(message_id: str, payload: InboundDraftInput):
+        try:
+            return runtime.inbound_operations.prepare_draft(
+                message_id,
+                payload.kind,
+                body=payload.body,
+                account_ref=payload.account_ref,
+            )
+        except (KeyError, InboundOperationsError, MessageStudioError) as error:
+            return _error(400, getattr(error, "code", "draft_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/messages/{{message_id}}/contact")
+    async def add_inbound_contact(message_id: str, payload: InboundContactInput):
+        try:
+            return runtime.inbound_operations.add_extracted_contact(
+                message_id, field=payload.field, list_id=payload.list_id
+            )
+        except (KeyError, InboundOperationsError, ValueError) as error:
+            return _error(400, getattr(error, "code", "contact_add_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/sources/{{source_ref}}/actions")
+    async def request_inbound_mailbox_action(
+        source_ref: str, payload: InboundMailboxActionInput, message_id: str | None = None
+    ):
+        try:
+            return runtime.inbound_operations.request_mailbox_action(
+                source_ref,
+                action=payload.action,
+                authorization_ref=payload.authorization_ref,
+                idempotency_key=payload.idempotency_key,
+                message_id=message_id,
+                target_folder=payload.target_folder,
+            )
+        except InboundOperationsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/sources/{{source_ref}}/sync")
+    async def sync_inbound_source(source_ref: str, payload: InboundSyncInput):
+        try:
+            account = runtime.provider_operations.account(source_ref)
+            grant = None
+            if payload.authorization_ref:
+                if not payload.purpose or not payload.expires_at:
+                    return _error(
+                        400,
+                        "authorization_incomplete",
+                        "sync authorization requires purpose and expiry",
+                    )
+                grant = ExternalOperationGrant(
+                    account_ref=source_ref,
+                    operation=ProviderOperation.INBOUND_READINESS,
+                    host=account["host"],
+                    port=account["port"],
+                    purpose=payload.purpose,
+                    expires_at=payload.expires_at,
+                    authorization_ref=payload.authorization_ref,
+                )
+            source = runtime.provider_operations.inbound_source(
+                source_ref, EnvironmentCredentialResolver(), grant=grant
+            )
+            report = runtime.inbound.ingest(
+                source, batch_limit=payload.batch_limit, retain_raw=payload.retain_raw
+            )
+            return {"report": asdict(report), "stats": runtime.inbound.stats()}
+        except (KeyError, ValueError, PermissionError, RuntimeError) as error:
+            return _error(400, "inbound_sync_failed", str(error))
 
     @app.get(f"{API_PREFIX}/inbound/reviews")
     async def inbound_reviews():
@@ -1505,6 +1687,20 @@ def create_app(
             return {"report": asdict(report), "stats": runtime.inbound.stats()}
         except (OSError, ValueError, RuntimeError) as error:
             return _error(400, "inbound_import_invalid", str(error))
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+    @app.post(f"{API_PREFIX}/inbound/import-mbox")
+    async def import_inbound_mbox(file: UploadFile = File(...)):  # noqa: B008
+        path: Path | None = None
+        try:
+            path, digest = _upload_inbound(file)
+            source = MboxSource(f"browser-mbox-{digest[:16]}", path)
+            report = runtime.inbound.ingest(source, retain_raw=True)
+            return {"report": asdict(report), "stats": runtime.inbound.stats()}
+        except (OSError, ValueError, RuntimeError) as error:
+            return _error(400, "inbound_mbox_invalid", str(error))
         finally:
             if path is not None:
                 path.unlink(missing_ok=True)

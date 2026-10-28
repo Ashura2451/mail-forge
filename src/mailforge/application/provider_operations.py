@@ -371,6 +371,17 @@ class ProviderOperationsService:
         self.store.record_provider_diagnostic(diagnostic)
         return diagnostic.to_dict()
 
+    def inbound_source(
+        self, ref: str, resolver: CredentialResolver, *, grant: ExternalOperationGrant | None = None
+    ):
+        """Return the canonical read-only IMAP source after an explicit grant."""
+        profile = self.providers.profile(ref)
+        if profile.kind is not ProviderKind.IMAP:
+            raise ValueError("inbound acquisition requires an IMAP account")
+        if not _loopback(profile.host):
+            self._require_grant(ref, ProviderOperation.INBOUND_READINESS, grant)
+        return self.providers.imap_source(ref, resolver)
+
     def _external_diagnostic(
         self, ref: str, resolver: CredentialResolver, operation: ProviderOperation
     ) -> dict[str, object]:

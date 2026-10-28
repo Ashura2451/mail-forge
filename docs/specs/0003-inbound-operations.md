@@ -1,7 +1,7 @@
 # Spec 0003: durable inbound email operations
 
-**Status:** Assumed for implementation; operational/provider acceptance remains
-required before real mailbox use.
+**Status:** Superseded by [0010](0010-inbound-mail-operations.md); retained as
+the original inbound foundation.
 
 ## Summary
 

@@ -15,6 +15,7 @@ from mailforge.application.campaigns import (
 )
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_demo import run_inbound_demo
+from mailforge.application.inbound_operations import InboundOperations
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import collect_unique_addresses, iter_jsonl_email_field
 from mailforge.application.legacy_migration import rehearse_legacy_migration
@@ -377,6 +378,33 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--source-ref", required=True)
     stats = inbound_commands.add_parser("stats", help="show inbound operation statistics")
     stats.add_argument("--database", type=Path, required=True)
+    search = inbound_commands.add_parser("search", help="search durable inbound metadata")
+    search.add_argument("--database", type=Path, required=True)
+    search.add_argument("--query")
+    search.add_argument("--sender")
+    search.add_argument("--subject")
+    search.add_argument("--classification")
+    search.add_argument("--limit", type=int, default=100)
+    search.add_argument("--offset", type=int, default=0)
+    extract_values = inbound_commands.add_parser("extract", help="extract safe message metadata")
+    extract_values.add_argument("--database", type=Path, required=True)
+    extract_values.add_argument("--message-id", required=True)
+    extract_values.add_argument("--fields", nargs="*")
+    export_values = inbound_commands.add_parser("export", help="export extracted values")
+    export_values.add_argument("--database", type=Path, required=True)
+    export_values.add_argument("--message-id")
+    export_values.add_argument("--format", choices=["json", "csv"], default="json")
+    rule = inbound_commands.add_parser("rule", help="manage bounded inbound rules")
+    rule.add_argument("--database", type=Path, required=True)
+    rule.add_argument("rule_command", choices=["list", "create", "activate", "pause"])
+    rule.add_argument("--rule-id")
+    rule.add_argument("--name")
+    rule.add_argument("--definition", type=Path)
+    draft = inbound_commands.add_parser("draft", help="prepare a reply or forward draft")
+    draft.add_argument("--database", type=Path, required=True)
+    draft.add_argument("--message-id", required=True)
+    draft.add_argument("--kind", choices=["reply", "forward"], required=True)
+    draft.add_argument("--body", default="")
     provider = subparsers.add_parser(
         "provider", help="inspect safe provider profiles and diagnostics"
     )
@@ -1077,6 +1105,8 @@ def main(argv: list[str] | None = None) -> int:
             from mailforge.infrastructure.campaign_store import CampaignStore
 
             service = InboundService(CampaignStore(args.database))
+            operations = InboundOperations(service.store)
+            service.set_operations(operations)
             if args.inbound_command == "import-eml":
                 report = service.ingest(
                     EmlFileSource(args.source_ref, args.path), retain_raw=args.retain_raw
@@ -1102,6 +1132,68 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"replayed": service.replay(args.source_ref)}))
             elif args.inbound_command == "stats":
                 print(json.dumps(service.stats(), indent=2))
+            elif args.inbound_command == "search":
+                print(
+                    json.dumps(
+                        operations.search(
+                            q=args.query,
+                            sender=args.sender,
+                            subject=args.subject,
+                            classification=args.classification,
+                            limit=args.limit,
+                            offset=args.offset,
+                        ),
+                        indent=2,
+                        default=str,
+                    )
+                )
+            elif args.inbound_command == "extract":
+                print(
+                    json.dumps(
+                        operations.extract_message(args.message_id, args.fields or None),
+                        indent=2,
+                        default=str,
+                    )
+                )
+            elif args.inbound_command == "export":
+                media_type, content = operations.export(message_id=args.message_id, fmt=args.format)
+                print(json.dumps({"media_type": media_type, "content": content}, indent=2))
+            elif args.inbound_command == "rule":
+                if args.rule_command == "list":
+                    print(json.dumps(operations.list_rules(), indent=2, default=str))
+                elif args.rule_command == "create":
+                    if not args.name or not args.definition:
+                        raise ValueError("rule create requires --name and --definition")
+                    print(
+                        json.dumps(
+                            operations.create_rule(
+                                args.name, json.loads(args.definition.read_text(encoding="utf-8"))
+                            ),
+                            indent=2,
+                            default=str,
+                        )
+                    )
+                else:
+                    if not args.rule_id:
+                        raise ValueError("rule status changes require --rule-id")
+                    print(
+                        json.dumps(
+                            operations.set_rule_status(
+                                args.rule_id,
+                                "active" if args.rule_command == "activate" else "paused",
+                            ),
+                            indent=2,
+                            default=str,
+                        )
+                    )
+            elif args.inbound_command == "draft":
+                print(
+                    json.dumps(
+                        operations.prepare_draft(args.message_id, args.kind, body=args.body),
+                        indent=2,
+                        default=str,
+                    )
+                )
     elif args.command == "interactive":
         overrides = {}
         if args.results_dir is not None:

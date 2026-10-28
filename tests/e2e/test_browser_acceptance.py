@@ -213,6 +213,13 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
             reopened.get_by_role("button", name="Import evidence for review").click()
             reopened.get_by_text("Inbound evidence acquired").wait_for()
             reopened.get_by_text("create_unsubscribe").wait_for()
+            reopened.get_by_label("Search inbound messages").fill("unsubscribe")
+            reopened.get_by_role("button", name="Search").click()
+            message_row = reopened.locator('tr[tabindex="0"]').first
+            message_row.click()
+            reopened.get_by_text("Attachments: 0").wait_for()
+            reopened.get_by_role("button", name="Prepare reply draft").click()
+            reopened.get_by_text("Reply draft prepared in Message Studio").wait_for()
             reopened.get_by_role("button", name="Approve").click()
             reopened.get_by_text("Review approved").wait_for()
             assert reopened.get_by_text("No inbound actions need review.").is_visible()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import imaplib
 import mailbox
+import poplib
 import ssl
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -369,3 +370,112 @@ class DisabledImapSource:
         self, cursor: str | None = None, limit: int | None = None
     ) -> Iterator[SourceMessage]:
         raise ExternalSourceDisabled("real IMAP acquisition is disabled; use a qualified adapter")
+
+
+@dataclass(frozen=True)
+class POP3ConnectionConfig:
+    """Bounded POP3S settings; the adapter never issues DELE or QUIT-after-delete."""
+
+    host: str
+    port: int = 995
+    username: str = ""
+    password: str | None = None
+    credential_ref: str | None = None
+    timeout: float = 30.0
+    max_message_bytes: int = 10 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if not self.host.strip() or not self.username:
+            raise ValueError("POP3S host and username are required")
+        if not 1 <= self.port <= 65_535 or self.timeout <= 0 or self.max_message_bytes <= 0:
+            raise ValueError("POP3S connection limits are invalid")
+        if not (self.password or self.credential_ref):
+            raise ValueError("POP3S requires password or credential_ref")
+
+
+class Pop3Source:
+    """Read-only POP3/POP3S UIDL acquisition with bounded RETR."""
+
+    source_type = InboundSourceType.POP3
+
+    def __init__(
+        self,
+        source_ref: str,
+        config: POP3ConnectionConfig,
+        *,
+        credential_resolver: CredentialResolver | None = None,
+        use_tls: bool = True,
+    ):
+        self.source_ref = source_ref
+        self.config = config
+        self.credential_resolver = credential_resolver or EnvironmentCredentialResolver()
+        self.use_tls = use_tls
+
+    def _credential(self) -> str:
+        if self.config.credential_ref:
+            try:
+                return self.credential_resolver.resolve(self.config.credential_ref).secret
+            except CredentialError as error:
+                raise CredentialError("POP3 credential is unavailable") from error
+        return self.config.password or ""
+
+    def _connect(self):
+        client = (
+            poplib.POP3_SSL(self.config.host, self.config.port, timeout=self.config.timeout)
+            if self.use_tls
+            else poplib.POP3(self.config.host, self.config.port, timeout=self.config.timeout)
+        )
+        try:
+            client.user(self.config.username)
+            client.pass_(self._credential())
+            return client
+        except BaseException:
+            try:
+                client.quit()
+            except Exception:
+                pass
+            raise
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        client = self._connect()
+        try:
+            response, lines, _ = client.uidl()
+            if not response.startswith(b"+OK"):
+                raise SourceError("POP3 UIDL failed")
+            items = []
+            for line in lines:
+                parts = line.decode("ascii", "replace").split()
+                if len(parts) >= 2:
+                    items.append((parts[0], parts[1]))
+            if cursor and cursor not in {uidl for _, uidl in items}:
+                raise CursorInvalidated("POP3 UIDL cursor is no longer present")
+            started = cursor is None
+            count = 0
+            for number, uidl in items:
+                if not started:
+                    if uidl == cursor:
+                        started = True
+                    continue
+                response, lines, _ = client.retr(int(number))
+                if not response.startswith(b"+OK"):
+                    raise SourceError(f"POP3 RETR failed for {uidl}")
+                raw = b"\r\n".join(lines) + b"\r\n"
+                if len(raw) > self.config.max_message_bytes:
+                    raise SourceError(f"POP3 message {uidl} exceeds acquisition limit")
+                yield SourceMessage(
+                    self.source_ref,
+                    uidl,
+                    raw,
+                    mailbox="POP3",
+                    uid=uidl,
+                )
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+        finally:
+            try:
+                client.quit()
+            except Exception:
+                pass

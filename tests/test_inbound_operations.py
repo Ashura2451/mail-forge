@@ -11,6 +11,8 @@ from mailforge.application.inbound_sources import (
     DisabledImapSource,
     EmlFileSource,
     MboxSource,
+    POP3ConnectionConfig,
+    Pop3Source,
     SimulatedImapSource,
     SyntheticMailboxSource,
 )
@@ -306,3 +308,39 @@ def test_backup_restore_preserves_inbound_and_outbound_authority(tmp_path):
     backup = store.backup_to(tmp_path / "backup.sqlite3")
     restored = CampaignStore.restore_from(backup, tmp_path / "restored.sqlite3")
     assert CampaignStore(restored).inbound_stats()["messages"] == 1
+
+
+def test_pop3_uidl_adapter_is_bounded_and_never_deletes(monkeypatch):
+    class FakePop3:
+        commands = []
+
+        def user(self, value):
+            self.commands.append(("USER", value))
+
+        def pass_(self, value):
+            self.commands.append(("PASS", value))
+
+        def uidl(self):
+            self.commands.append(("UIDL",))
+            return b"+OK", [b"1 uid-one", b"2 uid-two"], 0
+
+        def retr(self, value):
+            self.commands.append(("RETR", value))
+            return b"+OK", [b"From: alice@example.com", b"", b"Hello"], 0
+
+        def quit(self):
+            self.commands.append(("QUIT",))
+
+    fake = FakePop3()
+    monkeypatch.setattr(
+        "mailforge.application.inbound_sources.poplib.POP3_SSL",
+        lambda *args, **kwargs: fake,
+    )
+    source = Pop3Source(
+        "pop3-fixture",
+        POP3ConnectionConfig(host="fixture", username="user", password="disposable"),
+    )
+    messages = list(source.messages(limit=1))
+    assert [item.source_identity for item in messages] == ["uid-one"]
+    assert ("RETR", 1) in fake.commands
+    assert not any(command[0] == "DELE" for command in fake.commands)
