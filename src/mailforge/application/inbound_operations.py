@@ -14,6 +14,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from mailforge.application.message_studio import MessageStudioService
+from mailforge.application.programmable_operations import (
+    ProgrammableOperationsError,
+    ProgrammableOperationsService,
+)
 from mailforge.domain.inbound import ActionStatus, ActionType
 from mailforge.infrastructure.campaign_store import CampaignStore, _assert_no_secrets
 
@@ -28,7 +32,7 @@ RULE_FIELDS = {
     "correlation",
 }
 RULE_OPS = {"equals", "contains", "starts_with", "domain", "in"}
-RULE_ACTIONS = {"record_event", "extract", "review", "prepare_reply", "prepare_forward"}
+RULE_ACTIONS = {"record_event", "extract", "function", "review", "prepare_reply", "prepare_forward"}
 EXTRACT_FIELDS = {
     "sender",
     "recipients",
@@ -75,9 +79,16 @@ def _safe_export(value: Any) -> Any:
 class InboundOperations:
     """Canonical workbench facade; acquisition remains InboundService-owned."""
 
-    def __init__(self, store: CampaignStore, *, message_studio: MessageStudioService | None = None):
+    def __init__(
+        self,
+        store: CampaignStore,
+        *,
+        message_studio: MessageStudioService | None = None,
+        programmable: ProgrammableOperationsService | None = None,
+    ):
         self.store = store
         self.message_studio = message_studio or MessageStudioService(store)
+        self.programmable = programmable or getattr(self.message_studio, "programmable", None) or ProgrammableOperationsService(store)
 
     @staticmethod
     def validate_rule(definition: Mapping[str, Any]) -> dict[str, Any]:
@@ -109,6 +120,11 @@ class InboundOperations:
                     raise InboundOperationsError("extract actions require bounded fields")
                 if any(field not in EXTRACT_FIELDS for field in fields):
                     raise InboundOperationsError("extract action contains an unsupported field")
+            if action["type"] == "function":
+                if not action.get("function_id") or not action.get("revision_id"):
+                    raise InboundOperationsError("function actions require a pinned function revision")
+                if not action.get("content_hash"):
+                    raise InboundOperationsError("function actions require content_hash")
             if action["type"] in {"prepare_reply", "prepare_forward"}:
                 body = action.get("body", "")
                 if not isinstance(body, str) or len(body) > 20_000:
@@ -333,6 +349,29 @@ class InboundOperations:
                             {
                                 "type": kind,
                                 "count": len(self.extract_message(message_id, action["fields"])),
+                            }
+                        )
+                    elif kind == "function":
+                        try:
+                            revision = self.programmable.get_revision(action["revision_id"])
+                            if revision["content_hash"] != action["content_hash"]:
+                                raise InboundOperationsError("function revision content hash does not match", "reference_not_found")
+                            execution = self.programmable.execute(
+                                action["function_id"],
+                                context,
+                                revision_id=action["revision_id"],
+                                parameters=action.get("parameters", {}),
+                                context="inbound",
+                                correlation_id=f"inbound:{key}:{len(actions_done)}",
+                            )
+                        except ProgrammableOperationsError as error:
+                            raise InboundOperationsError(str(error), error.code) from error
+                        actions_done.append(
+                            {
+                                "type": kind,
+                                "function_id": action["function_id"],
+                                "execution_id": execution["execution_id"],
+                                "records": execution["records"],
                             }
                         )
                     elif kind == "record_event":

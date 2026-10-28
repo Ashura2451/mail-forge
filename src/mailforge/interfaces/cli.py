@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from mailforge.application.automation import AutomationService
@@ -39,6 +40,7 @@ from mailforge.application.mailer_compat import (
 )
 from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import OutboundService, run_outbound_demo
+from mailforge.application.programmable_operations import ProgrammableOperationsService
 from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
 from mailforge.application.reporting import ReportFilters, ReportingError, ReportingService
@@ -630,6 +632,41 @@ def build_parser() -> argparse.ArgumentParser:
     automation_advance = automation_commands.add_parser("advance")
     automation_advance.add_argument("--database", type=Path, required=True)
     automation_advance.add_argument("run_id")
+    functions = subparsers.add_parser("functions", help="manage reusable programmable functions")
+    function_commands = functions.add_subparsers(dest="function_command", required=True)
+    function_list = function_commands.add_parser("list")
+    function_list.add_argument("--database", type=Path, required=True)
+    function_create = function_commands.add_parser("create")
+    function_create.add_argument("--database", type=Path, required=True)
+    function_create.add_argument("--name", required=True)
+    function_create.add_argument("--version", default="1.0")
+    function_create.add_argument("--definition", type=Path, required=True)
+    function_preview = function_commands.add_parser("preview")
+    function_preview.add_argument("--database", type=Path, required=True)
+    function_preview.add_argument("name")
+    function_preview.add_argument("--records", type=Path, required=True)
+    function_preview.add_argument("--revision-id")
+    function_preview.add_argument("--parameters", default="{}")
+    function_revisions = function_commands.add_parser("revisions")
+    function_revisions.add_argument("--database", type=Path, required=True)
+    function_revisions.add_argument("name")
+    function_history = function_commands.add_parser("history")
+    function_history.add_argument("--database", type=Path, required=True)
+    function_history.add_argument("--name")
+    function_history.add_argument("--limit", type=int, default=100)
+    for action in ("enable", "disable"):
+        function_action = function_commands.add_parser(action)
+        function_action.add_argument("--database", type=Path, required=True)
+        function_action.add_argument("name")
+    function_install = function_commands.add_parser(
+        "install-python", help="privileged local extension registration"
+    )
+    function_install.add_argument("--database", type=Path, required=True)
+    function_install.add_argument("--source", type=Path, required=True)
+    function_install.add_argument("--manifest", type=Path, required=True)
+    function_install.add_argument(
+        "--confirm-checksum", required=True, help="type the source SHA-256 to confirm local trust"
+    )
     data_studio = subparsers.add_parser("data-studio", help="process structured local data")
     data_commands = data_studio.add_subparsers(dest="data_command", required=True)
     data_schema = data_commands.add_parser("schema", help="inspect source fields")
@@ -809,6 +846,56 @@ def main(argv: list[str] | None = None) -> int:
                     return 0 if job["status"] == "completed" else 2
             finally:
                 service.close()
+    elif args.command == "functions":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = ProgrammableOperationsService(CampaignStore(args.database))
+        if args.function_command == "list":
+            print(json.dumps(service.list_functions(), indent=2))
+        elif args.function_command == "create":
+            definition = json.loads(args.definition.read_text(encoding="utf-8"))
+            print(
+                json.dumps(
+                    service.create_function(args.name, definition, version=args.version), indent=2
+                )
+            )
+        elif args.function_command == "preview":
+            records = json.loads(args.records.read_text(encoding="utf-8"))
+            print(
+                json.dumps(
+                    service.execute(
+                        args.name,
+                        records,
+                        revision_id=args.revision_id,
+                        parameters=json.loads(args.parameters),
+                        context="data_studio",
+                        correlation_id=f"cli-preview:{uuid.uuid4()}",
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.function_command == "revisions":
+            print(json.dumps(service.list_revisions(args.name), indent=2))
+        elif args.function_command == "history":
+            print(json.dumps(service.list_executions(args.name, limit=args.limit), indent=2))
+        elif args.function_command in {"enable", "disable"}:
+            print(
+                json.dumps(
+                    service.set_enabled(args.name, args.function_command == "enable"), indent=2
+                )
+            )
+        else:
+            manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+            import hashlib
+
+            digest = hashlib.sha256(args.source.read_bytes()).hexdigest()
+            if digest != args.confirm_checksum:
+                raise SystemExit("checksum confirmation does not match the local extension source")
+            print(
+                json.dumps(
+                    service.install_python_extension(args.source, manifest, confirm=True), indent=2
+                )
+            )
     elif args.command == "serve":
         import uvicorn
 
