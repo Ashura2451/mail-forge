@@ -30,8 +30,8 @@ used for validation were synthetic and disposable.
 | Y. Performance | LOCALLY MEASURED | 100-block synthetic preview: median 11.57 ms, p95 12.10 ms, max 12.56 ms over 20 renders |
 | Z. Engineering checks | PASS | Full suite, Ruff, frontend lint/build, package/secret/diff checks listed below |
 | AA. Independent review | NOT VERIFIED | No independent reviewer was available in this execution environment |
-| AB. Git publication | PENDING | Commit/push are performed only after final staged review |
-| AC. Main integration | BLOCKED | Main branch protection/review remains unavailable; branch is correctly stacked on verified 017 |
+| AB. Git publication | PUBLISHED | Commit `70a276c` pushed; remote feature ref verified; PR [#1](https://github.com/Ashura2451/mail-forge/pull/1) is open |
+| AC. Main integration | NOT INTEGRATED | Main branch protection/review remains unavailable; branch is correctly stacked on verified 017 |
 | AD. Documentation/truth | PASS | Spec, capability atlas, Message Studio reference, changelog, and local repo truth update |
 
 ## Validation commands
