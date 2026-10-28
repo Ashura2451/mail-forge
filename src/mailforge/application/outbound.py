@@ -167,6 +167,7 @@ class OutboundService:
         refresh_prepared: bool = False,
         render_callback: Callable[[Mapping[str, object], Mapping[str, object], int], object]
         | None = None,
+        unsubscribe_url_callback: Callable[[Mapping[str, object]], str | None] | None = None,
     ) -> OutboundPreparationReport:
         with self.store.campaign_operation_lock():
             with self.store.connect() as connection:
@@ -196,6 +197,7 @@ class OutboundService:
                 recipient_ids=recipient_ids,
                 refresh_prepared=refresh_prepared,
                 render_callback=render_callback,
+                unsubscribe_url_callback=unsubscribe_url_callback,
             )
 
     def _prepare_campaign(
@@ -219,6 +221,7 @@ class OutboundService:
         refresh_prepared: bool = False,
         render_callback: Callable[[Mapping[str, object], Mapping[str, object], int], object]
         | None = None,
+        unsubscribe_url_callback: Callable[[Mapping[str, object]], str | None] | None = None,
     ) -> OutboundPreparationReport:
         campaign = self.store.get_campaign(campaign_id)
         if campaign["sender_config_ref"] != sender.ref:
@@ -331,12 +334,15 @@ class OutboundService:
                         resolved_attachments_by_contact.get(intent["contact_id"], ())
                     )
                 selected_attachments = selected_attachments + callback_attachments
+                resolved_unsubscribe_url = unsubscribe_url
+                if unsubscribe_url_callback is not None:
+                    resolved_unsubscribe_url = unsubscribe_url_callback(contact)
                 composed = self.composer.compose(
                     sender=replace(sender, reply_to=sender.reply_to or template.reply_to),
                     recipient=intent["normalized_email"],
                     rendered=rendered,
                     attachments=selected_attachments,
-                    unsubscribe_url=unsubscribe_url,
+                    unsubscribe_url=resolved_unsubscribe_url,
                     one_click_unsubscribe=one_click_unsubscribe,
                     dkim_signed=dkim_signed,
                 )

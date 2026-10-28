@@ -10,7 +10,7 @@ import html
 import json
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import PurePath
 from typing import Any
@@ -250,7 +250,9 @@ class MessageStudioService:
             if not isinstance(block.get("function_id"), str) or not block["function_id"]:
                 raise MessageStudioError("function blocks require function_id", "function_invalid")
             if not isinstance(block.get("revision_id"), str) or not block["revision_id"]:
-                raise MessageStudioError("function blocks require a pinned revision_id", "function_invalid")
+                raise MessageStudioError(
+                    "function blocks require a pinned revision_id", "function_invalid"
+                )
             if not isinstance(block.get("content_hash"), str) or not block["content_hash"]:
                 raise MessageStudioError("function blocks require content_hash", "function_invalid")
             mapping = block.get("input_mapping", {})
@@ -260,17 +262,33 @@ class MessageStudioService:
                 if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(key)) or not re.fullmatch(
                     r"(?:email|name|contact\.[a-z][a-z0-9_]{0,63})", str(value)
                 ):
-                    raise MessageStudioError("function input_mapping contains an unsafe field", "function_invalid")
+                    raise MessageStudioError(
+                        "function input_mapping contains an unsafe field", "function_invalid"
+                    )
             if not isinstance(block.get("parameters", {}), Mapping):
-                raise MessageStudioError("function parameters must be an object", "function_invalid")
+                raise MessageStudioError(
+                    "function parameters must be an object", "function_invalid"
+                )
             try:
-                revision = self.programmable.get_revision(block["revision_id"]) if block.get("revision_id") else self.programmable.get_function(block["function_id"])
+                revision = (
+                    self.programmable.get_revision(block["revision_id"])
+                    if block.get("revision_id")
+                    else self.programmable.get_function(block["function_id"])
+                )
             except ProgrammableOperationsError as error:
                 raise MessageStudioError(str(error), error.code) from error
-            if block.get("revision_id") and revision.get("function_id") != self.programmable.get_function(block["function_id"])["id"]:
-                raise MessageStudioError("function revision does not belong to function", "function_invalid")
+            if (
+                block.get("revision_id")
+                and revision.get("function_id")
+                != self.programmable.get_function(block["function_id"])["id"]
+            ):
+                raise MessageStudioError(
+                    "function revision does not belong to function", "function_invalid"
+                )
             if revision.get("content_hash") != block["content_hash"]:
-                raise MessageStudioError("function revision content hash does not match", "function_invalid")
+                raise MessageStudioError(
+                    "function revision content hash does not match", "function_invalid"
+                )
 
     def _validate_attachment_ref(self, attachment: Any) -> None:
         if not isinstance(attachment, Mapping) or not isinstance(attachment.get("asset_id"), str):
@@ -763,9 +781,13 @@ class MessageStudioService:
                     raise MessageStudioError(str(error), error.code) from error
                 output = execution["records"][0] if execution["records"] else {}
                 field = str(block.get("output_field", "value"))
-                value = output.get(field, output.get("personalization_label", output.get("email_domain", "")))
+                value = output.get(
+                    field, output.get("personalization_label", output.get("email_domain", ""))
+                )
                 value = str(value or "")[:10_000]
-                html_parts.append(f"<p style=\"margin:0 0 16px;line-height:1.6\">{html.escape(value)}</p>")
+                html_parts.append(
+                    f'<p style="margin:0 0 16px;line-height:1.6">{html.escape(value)}</p>'
+                )
                 text.append(value)
             elif kind == "columns":
                 cells = []
@@ -1290,6 +1312,9 @@ class MessageStudioService:
         run_key: str = "primary",
         campaign_variables: dict[str, Any] | None = None,
         data_snapshot_id: str | None = None,
+        unsubscribe_url_callback: Callable[[Mapping[str, object]], str | None] | None = None,
+        one_click_unsubscribe: bool = False,
+        dkim_signed: bool = False,
     ):
         with self.store.campaign_operation_lock():
             return self._prepare_campaign(
@@ -1299,6 +1324,9 @@ class MessageStudioService:
                 run_key=run_key,
                 campaign_variables=campaign_variables,
                 data_snapshot_id=data_snapshot_id,
+                unsubscribe_url_callback=unsubscribe_url_callback,
+                one_click_unsubscribe=one_click_unsubscribe,
+                dkim_signed=dkim_signed,
             )
 
     def _prepare_campaign(
@@ -1310,6 +1338,9 @@ class MessageStudioService:
         run_key: str = "primary",
         campaign_variables: dict[str, Any] | None = None,
         data_snapshot_id: str | None = None,
+        unsubscribe_url_callback: Callable[[Mapping[str, object]], str | None] | None = None,
+        one_click_unsubscribe: bool = False,
+        dkim_signed: bool = False,
     ):
         if self.outbound is None:
             raise MessageStudioError("outbound service is not configured")
@@ -1395,4 +1426,7 @@ class MessageStudioService:
             recipient_ids=recipient_ids,
             refresh_prepared=refresh_prepared,
             render_callback=render,
+            unsubscribe_url_callback=unsubscribe_url_callback,
+            one_click_unsubscribe=one_click_unsubscribe,
+            dkim_signed=dkim_signed,
         )

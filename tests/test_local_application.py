@@ -32,7 +32,7 @@ def test_local_data_directory_onboarding_and_full_backup_restore(tmp_path: Path)
     backup = create_backup(data)
     metadata = validate_backup(backup)
     assert metadata["valid"] is True
-    assert metadata["schema_version"] == 20
+    assert metadata["schema_version"] == 21
     restored = restore_backup(backup, tmp_path / "restored-data")
     assert (restored / "artifacts" / "synthetic.txt").read_text(
         encoding="utf-8"
@@ -74,7 +74,7 @@ def test_newer_schema_fails_closed(tmp_path: Path) -> None:
         connection.execute(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
-        connection.execute("INSERT INTO schema_migrations VALUES (21, 'now')")
+        connection.execute("INSERT INTO schema_migrations VALUES (22, 'now')")
     with pytest.raises(RuntimeError, match="newer"):
         from mailforge.interfaces.web import WebRuntime
 
