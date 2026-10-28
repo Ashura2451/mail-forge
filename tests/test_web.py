@@ -249,6 +249,59 @@ def test_inbound_eml_import_and_review_updates_eligibility(tmp_path: Path) -> No
     assert client.get("/api/v1/inbound").json()["items"] == []
 
 
+def test_inbound_workbench_api_supports_detail_rules_extraction_and_drafts(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    message = EmailMessage()
+    message["From"] = "alice@example.com"
+    message["To"] = "operator@example.com"
+    message["Subject"] = "Quarterly question"
+    message.set_content("Please review.")
+    message.add_attachment(b"fixture", maintype="text", subtype="plain", filename="note.txt")
+    imported = client.post(
+        "/api/v1/inbound/import",
+        headers=headers,
+        files={"file": ("message.eml", message.as_bytes(), "message/rfc822")},
+    )
+    assert imported.status_code == 200
+    message_id = client.get("/api/v1/inbound").json()["messages"][0]["id"]
+    rule = client.post(
+        "/api/v1/inbound/rules",
+        headers=headers,
+        json={
+            "name": "Extract questions",
+            "definition": {
+                "version": 1,
+                "conditions": [{"field": "subject", "op": "contains", "value": "Quarterly"}],
+                "actions": [{"type": "extract", "fields": ["sender", "subject"]}],
+            },
+        },
+    )
+    assert rule.status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/inbound/rules/{rule.json()['id']}/status",
+            headers=headers,
+            json={"status": "active"},
+        ).status_code
+        == 200
+    )
+    detail = client.get(f"/api/v1/inbound/messages/{message_id}").json()
+    assert detail["attachments"][0]["filename"] == "note.txt"
+    extracted = client.post(
+        f"/api/v1/inbound/messages/{message_id}/extract",
+        headers=headers,
+        json={"fields": ["sender", "subject"]},
+    )
+    assert extracted.status_code == 200
+    draft = client.post(
+        f"/api/v1/inbound/messages/{message_id}/draft",
+        headers=headers,
+        json={"kind": "reply", "body": "Thanks."},
+    )
+    assert draft.status_code == 200
+    assert draft.json()["provenance"]["message_id"] == message_id
+
+
 def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> None:
     database = tmp_path / "runtime.sqlite3"
     first = DatabaseProcessLock(database)

@@ -24,8 +24,8 @@ def _studio(tmp_path: Path) -> tuple[CampaignStore, MessageStudioService]:
 
 def test_message_schema_is_current_and_migration_is_repeatable(tmp_path: Path) -> None:
     store, _ = _studio(tmp_path)
-    assert store.schema_version() == 11
-    assert store.migrate() == 11
+    assert store.schema_version() == 12
+    assert store.migrate() == 12
     with store.connect() as connection:
         names = {
             row["name"]

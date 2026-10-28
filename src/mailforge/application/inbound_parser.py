@@ -11,6 +11,7 @@ from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.utils import getaddresses
 from html.parser import HTMLParser
+from pathlib import PurePath
 from typing import Any
 
 from mailforge.domain.inbound import (
@@ -18,6 +19,7 @@ from mailforge.domain.inbound import (
     DsnAction,
     DsnRecipient,
     DsnReport,
+    InboundAttachment,
     InboundLimits,
     ParsedInbound,
     ParseIssue,
@@ -341,6 +343,7 @@ class SafeInboundParser:
         decoded_total = 0
         text_parts: list[str] = []
         html_parts: list[str] = []
+        attachments: list[InboundAttachment] = []
         pending = [(message, 0)]
         while pending:
             if time.perf_counter() - started > self.limits.max_processing_seconds:
@@ -361,6 +364,25 @@ class SafeInboundParser:
             if part.is_multipart() and part.get_content_disposition() != "attachment":
                 pending.extend((child, depth + 1) for child in reversed(tuple(part.iter_parts())))
             if part.is_multipart() or part.get_content_disposition() == "attachment":
+                if not part.is_multipart():
+                    payload = part.get_payload(decode=True)
+                    size = len(payload) if isinstance(payload, bytes) else 0
+                    attachments.append(
+                        InboundAttachment(
+                            part_path=str(parts),
+                            filename=PurePath(part.get_filename() or "").name or None,
+                            media_type=part.get_content_type(),
+                            size_bytes=size,
+                            content_id=part.get("Content-ID"),
+                            disposition=part.get_content_disposition(),
+                            sha256=(
+                                hashlib.sha256(payload).hexdigest()
+                                if isinstance(payload, bytes)
+                                and size <= self.limits.max_decoded_payload_bytes
+                                else None
+                            ),
+                        )
+                    )
                 continue
             if part.get_content_type() == "message/rfc822":
                 continue
@@ -416,4 +438,5 @@ class SafeInboundParser:
             issues=tuple(issues),
             dsn=dsn,
             complaint=complaint,
+            attachments=tuple(attachments),
         )

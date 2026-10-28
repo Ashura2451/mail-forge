@@ -34,6 +34,11 @@ class InboundService:
     def __init__(self, store: CampaignStore, parser: SafeInboundParser | None = None):
         self.store = store
         self.parser = parser or SafeInboundParser()
+        self.operations = None
+
+    def set_operations(self, operations) -> None:
+        """Attach the workbench facade without changing inbound authority."""
+        self.operations = operations
 
     def ingest_provider(
         self,
@@ -308,6 +313,8 @@ class InboundService:
             message_id, parsed, classification, correlations, trust
         )
         self.store.mark_inbound_processed(message_id)
+        if self.operations is not None:
+            self.operations.apply_active_rules(message_id)
         exact = next((item for item in correlations if item.kind is CorrelationKind.EXACT), None)
         if trust is TrustStatus.TRUSTED_SYNTHETIC and exact is not None:
             target = self._target(parsed, correlations)

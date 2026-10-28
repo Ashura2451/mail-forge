@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1016,6 +1016,89 @@ INSERT OR IGNORE INTO provider_inbound_settings(account_ref, mailbox, read_only,
 SELECT ref, COALESCE(mailbox, 'INBOX'), 1, 100, updated_at FROM provider_profiles;
 """
 
+MIGRATION_12_SQL = """
+CREATE INDEX IF NOT EXISTS idx_inbound_messages_sender ON inbound_messages(sender);
+CREATE INDEX IF NOT EXISTS idx_inbound_messages_subject ON inbound_messages(subject);
+CREATE INDEX IF NOT EXISTS idx_inbound_messages_received ON inbound_messages(received_at DESC);
+CREATE TABLE IF NOT EXISTS inbound_attachments (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL REFERENCES inbound_messages(id) ON DELETE CASCADE,
+    part_path TEXT NOT NULL,
+    filename TEXT,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    content_id TEXT,
+    disposition TEXT,
+    sha256 TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(message_id, part_path)
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_attachments_message
+ON inbound_attachments(message_id, filename);
+CREATE TABLE IF NOT EXISTS inbound_extracted_values (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL REFERENCES inbound_messages(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(message_id, field_key)
+);
+CREATE TABLE IF NOT EXISTS inbound_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'paused' CHECK(status IN ('active', 'paused', 'archived')),
+    priority INTEGER NOT NULL DEFAULT 0,
+    definition_json TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_rules_status
+ON inbound_rules(status, priority DESC, id);
+CREATE TABLE IF NOT EXISTS inbound_rule_runs (
+    id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL REFERENCES inbound_rules(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL REFERENCES inbound_messages(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK(status IN ('matched', 'skipped', 'applied', 'failed', 'preview')),
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    error_message TEXT,
+    occurred_at TEXT NOT NULL,
+    UNIQUE(rule_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS inbound_drafts (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL REFERENCES inbound_messages(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('reply', 'forward')),
+    document_id TEXT NOT NULL REFERENCES message_documents(id),
+    revision_id TEXT NOT NULL REFERENCES message_revisions(id),
+    account_ref TEXT,
+    subject TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'ready', 'sent', 'canceled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(message_id, kind)
+);
+CREATE TABLE IF NOT EXISTS inbound_mailbox_actions (
+    id TEXT PRIMARY KEY,
+    source_ref TEXT NOT NULL REFERENCES inbound_sources(ref),
+    message_id TEXT REFERENCES inbound_messages(id) ON DELETE SET NULL,
+    action TEXT NOT NULL CHECK(action IN ('mark_read', 'move', 'copy')),
+    target_folder TEXT,
+    authorization_ref TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested', 'applied', 'failed', 'ambiguous', 'canceled')),
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_mailbox_actions_source
+ON inbound_mailbox_actions(source_ref, created_at DESC);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1232,6 +1315,26 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (11, utc_now()),
                 )
+                current = 11
+            if current < 12:
+                inbound_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(inbound_messages)")
+                }
+                for column, definition in (
+                    ("account_ref", "TEXT"),
+                    ("folder", "TEXT"),
+                    ("thread_key", "TEXT"),
+                    ("retention_state", "TEXT NOT NULL DEFAULT 'retained'"),
+                ):
+                    if column not in inbound_columns:
+                        connection.execute(
+                            f"ALTER TABLE inbound_messages ADD COLUMN {column} {definition}"
+                        )
+                self._apply_migration_12(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (12, utc_now()),
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1306,6 +1409,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_11(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_11_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_12(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_12_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
@@ -3756,7 +3866,7 @@ class CampaignStore:
                 uuid.uuid5(uuid.NAMESPACE_URL, f"inbound:{source.source_ref}:{source_identity}")
             )
             connection.execute(
-                "INSERT INTO inbound_messages(id, source_ref, source_identity, content_hash, raw_bytes, raw_retained, size_bytes, received_at, acquired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO inbound_messages(id, source_ref, source_identity, content_hash, raw_bytes, raw_retained, size_bytes, received_at, acquired_at, account_ref, folder, retention_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message_id,
                     source.source_ref,
@@ -3767,6 +3877,9 @@ class CampaignStore:
                     len(source.raw_bytes),
                     source.received_at,
                     utc_now(),
+                    source.source_ref if source.mailbox else None,
+                    source.mailbox,
+                    "retained" if retain_raw else "released",
                 ),
             )
             self.record_event(
@@ -3790,7 +3903,7 @@ class CampaignStore:
     def release_inbound_raw(self, message_id: str) -> None:
         with self.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE inbound_messages SET raw_bytes = NULL, raw_retained = 0 WHERE id = ?",
+                "UPDATE inbound_messages SET raw_bytes = NULL, raw_retained = 0, retention_state = 'released' WHERE id = ?",
                 (message_id,),
             )
 
@@ -3854,6 +3967,30 @@ class CampaignStore:
                     message_id,
                 ),
             )
+            connection.execute(
+                "DELETE FROM inbound_attachments WHERE message_id = ?", (message_id,)
+            )
+            for attachment in parsed.attachments:
+                connection.execute(
+                    "INSERT OR REPLACE INTO inbound_attachments(id, message_id, part_path, filename, media_type, size_bytes, content_id, disposition, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"inbound-attachment:{message_id}:{attachment.part_path}",
+                            )
+                        ),
+                        message_id,
+                        attachment.part_path,
+                        attachment.filename,
+                        attachment.media_type,
+                        attachment.size_bytes,
+                        attachment.content_id,
+                        attachment.disposition,
+                        attachment.sha256,
+                        utc_now(),
+                    ),
+                )
             if parsed.dsn:
                 connection.execute(
                     "INSERT OR REPLACE INTO inbound_dsn_reports(message_id, reporting_mta, original_envelope_id, arrival_date, fields_json) VALUES (?, ?, ?, ?, ?)",

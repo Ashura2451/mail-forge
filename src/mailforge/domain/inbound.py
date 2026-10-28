@@ -11,6 +11,7 @@ class InboundSourceType(enum.StrEnum):
     MBOX = "mbox"
     SYNTHETIC = "synthetic"
     IMAP = "imap"
+    POP3 = "pop3"
 
 
 class ParseStatus(enum.StrEnum):
@@ -117,6 +118,20 @@ class ParsedInbound:
     issues: tuple[ParseIssue, ...] = field(default_factory=tuple)
     dsn: DsnReport | None = None
     complaint: ComplaintReport | None = None
+    attachments: tuple[InboundAttachment, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class InboundAttachment:
+    """Safe metadata for an attachment; message bytes are never exposed here."""
+
+    part_path: str
+    filename: str | None
+    media_type: str
+    size_bytes: int
+    content_id: str | None
+    disposition: str | None
+    sha256: str | None
 
 
 @dataclass(frozen=True)
