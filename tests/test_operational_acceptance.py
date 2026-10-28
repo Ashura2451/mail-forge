@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from email.message import Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -10,6 +11,7 @@ from mailforge.application.campaigns import CampaignService
 from mailforge.application.inbound import InboundService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.providers import ProviderService
+from mailforge.application.reporting import ReportFilters, ReportingService
 from mailforge.domain.campaign import ContactCandidate, DeliveryState
 from mailforge.domain.outbound import SenderPolicy, TemplateDefinition
 from mailforge.domain.provider import ProviderKind, ProviderProfile, TLSMode
@@ -186,6 +188,13 @@ def test_unified_local_smtp_imap_recovery_and_policy_lifecycle(tmp_path):
         )
         assert resumed_report.counts["ambiguous"] == 1
         assert len(ambiguous.commands) == command_count
+
+    report = ReportingService(store, now_fn=lambda: datetime.now(UTC)).summary(
+        ReportFilters(preset="last_30_days")
+    )
+    assert report["metrics"]["campaigns"]["attempts"]["accepted"] >= 1
+    assert report["metrics"]["campaigns"]["attempts"]["ambiguous"] >= 1
+    assert report["metrics"]["inbound"]["messages"] >= 1
 
     backup = store.backup_to(tmp_path / "unified-backup.sqlite3")
     restored = CampaignStore.restore_from(backup, tmp_path / "unified-restored.sqlite3")

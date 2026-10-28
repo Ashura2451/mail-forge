@@ -4,7 +4,7 @@ import './App.css'
 
 const nav = [
   ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['data-studio', 'Data Studio', '◆'], ['message-studio', 'Message Studio', '✎'], ['campaigns', 'Campaigns', '↗'], ['automations', 'Automations', '✦'], ['list-tools', 'List Tools', '▦'],
-  ['inbound', 'Inbound', '↘'], ['providers', 'Providers', '◈'], ['activity', 'Activity', '≡'],
+  ['inbound', 'Inbound', '↘'], ['providers', 'Providers', '◈'], ['reports', 'Reports & Insights', '▥'], ['activity', 'Activity', '≡'],
 ]
 
 function App() {
@@ -19,7 +19,7 @@ function App() {
     const sequence = ++loadSequence.current
     setBusy(true); setError('')
     try {
-      const next = await api(target === 'dashboard' ? '/dashboard' : target === 'list-tools' ? '/list-tools/jobs' : target === 'message-studio' ? '/message-studio/documents' : target === 'data-studio' ? '/data-studio/recipes' : `/${target}`)
+      const next = await api(target === 'dashboard' ? '/dashboard' : target === 'list-tools' ? '/list-tools/jobs' : target === 'message-studio' ? '/message-studio/documents' : target === 'data-studio' ? '/data-studio/recipes' : target === 'reports' ? '/reports/summary' : `/${target}`)
       if (sequence === loadSequence.current) setData(next)
     }
     catch (err) { setError(err instanceof Error ? err.message : 'Unable to load this view') }
@@ -40,13 +40,100 @@ function App() {
     </aside>
     <main className="main"><header className="topbar"><div><p className="eyebrow">WORKSPACE / {view.toUpperCase()}</p><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div><div className="top-actions"><span className="status-chip"><span className="live-dot" /> Local</span><button className="icon-button" aria-label="Refresh" onClick={() => load()}>↻</button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}{error && <div className="error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
-      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
+      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'reports' && <Reports data={data} onNavigate={setView} />}{view === 'activity' && <Activity data={data} />}
     </main>
   </div>
 }
 
 function Dashboard({ data, onNavigate }: { data: ApiRecord, onNavigate: (view: string) => void }) { const counts = data.counts || {}; return <div className="content"><div className="hero-copy"><div><p className="eyebrow teal">OPERATOR OVERVIEW</p><h2>Make every send<br /><em>accountable.</em></h2><p className="lede">A calm, local control room for contacts, policy-aware campaigns, and inbound signals.</p></div><div className="hero-note"><span className="stamp">LOCAL<br />FIRST</span><p>Durable actions<br />stay in your SQLite<br />authority.</p></div></div><div className="stat-grid"><Stat label="Contacts" value={counts.contacts ?? 0} tone="teal" /><Stat label="Lists" value={counts.lists ?? 0} /><Stat label="Inbound reviews" value={counts.inbound?.pending_reviews ?? 0} tone="amber" /><Stat label="Schema" value={`v${data.schema_version ?? '—'}`} /></div><section className="section-head"><div><p className="eyebrow">RECENT WORK</p><h3>Campaign pulse</h3></div><button className="text-button" onClick={() => onNavigate('campaigns')}>View campaigns ↗</button></section><CampaignTable items={data.campaigns || []} empty="No campaigns yet. Create a list and launch a synthetic campaign to begin." /></div> }
 function Stat({ label, value, tone = '' }: { label: string, value: string | number, tone?: string }) { return <div className={`stat-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>durable local state</small></div> }
+
+function Reports({ data, onNavigate }: { data: ApiRecord, onNavigate: (view: string) => void }) {
+  const [summary, setSummary] = useState<ApiRecord>(data)
+  const [preset, setPreset] = useState('last_7_days')
+  const [timezone, setTimezone] = useState('UTC')
+  const [start, setStart] = useState('')
+  const [end, setEnd] = useState('')
+  const [providerRef, setProviderRef] = useState('')
+  const [workflowId, setWorkflowId] = useState('')
+  const [sourceRef, setSourceRef] = useState('')
+  const [accountRef, setAccountRef] = useState('')
+  const [folder, setFolder] = useState('')
+  const [jobKind, setJobKind] = useState('')
+  const [section, setSection] = useState('summary')
+  const [detail, setDetail] = useState<ApiRecord | null>(null)
+  const [detailBusy, setDetailBusy] = useState(false)
+  const [detailError, setDetailError] = useState('')
+  const [summaryError, setSummaryError] = useState('')
+  const metrics = summary.metrics || {}
+  const campaigns = metrics.campaigns || {}
+  const providers = metrics.providers || {}
+  const inbound = metrics.inbound || {}
+  const workflows = metrics.workflows || {}
+  const processing = metrics.processing || {}
+  const messageStudio = metrics.message_studio || {}
+  const attemptTotal = campaigns.attempts?.total ?? 0
+  const accepted = campaigns.attempts?.accepted ?? 0
+  const previousCampaigns = summary.previous?.campaigns?.campaign_count
+  const campaignDelta = previousCampaigns === undefined ? null : (campaigns.campaign_count ?? 0) - previousCampaigns
+
+  useEffect(() => { setSummary(data) }, [data])
+  const reportQuery = (nextPreset = preset, nextTimezone = timezone, nextStart = start, nextEnd = end) => {
+    const params = new URLSearchParams({ preset: nextPreset, timezone: nextTimezone })
+    if (nextStart) params.set('start', nextStart)
+    if (nextEnd) params.set('end', nextEnd)
+    if (providerRef) params.set('provider_ref', providerRef)
+    if (workflowId) params.set('workflow_id', workflowId)
+    if (sourceRef) params.set('source_ref', sourceRef)
+    if (accountRef) params.set('account_ref', accountRef)
+    if (folder) params.set('folder', folder)
+    if (jobKind) params.set('job_kind', jobKind)
+    return params
+  }
+  const loadDetail = async (nextSection: string, nextPreset = preset, nextTimezone = timezone, nextStart = start, nextEnd = end) => {
+    if (nextSection === 'summary') return
+    setDetailBusy(true); setDetailError('')
+    try {
+      const params = reportQuery(nextPreset, nextTimezone, nextStart, nextEnd)
+      setDetail(await api<ApiRecord>(`/reports/${nextSection}?${params}`))
+    } catch (err) {
+      setDetail(null); setDetailError(err instanceof Error ? err.message : 'Unable to load this report section')
+    } finally { setDetailBusy(false) }
+  }
+  const reload = async (nextPreset = preset, nextTimezone = timezone, nextStart = start, nextEnd = end) => {
+    if (nextPreset === 'custom' && (!nextStart || !nextEnd)) return
+    const params = reportQuery(nextPreset, nextTimezone, nextStart, nextEnd)
+    setSummaryError('')
+    try {
+      setSummary(await api<ApiRecord>(`/reports/summary?${params}`))
+      if (section !== 'summary') await loadDetail(section, nextPreset, nextTimezone, nextStart, nextEnd)
+    } catch (err) {
+      setSummaryError(err instanceof Error ? err.message : 'Unable to refresh this report')
+    }
+  }
+  const selectSection = async (next: string) => {
+    setSection(next); setDetail(null); setDetailError('')
+    await loadDetail(next)
+  }
+  const sections = [['summary', 'Summary'], ['campaigns', 'Campaigns'], ['providers', 'Providers'], ['workflows', 'Workflows'], ['inbound', 'Inbound'], ['jobs', 'Processing']]
+  const detailRows = section === 'workflows' ? (detail?.runs || []) : detail?.items || detail?.accounts || detail?.messages || detail?.jobs || []
+  const exportParams = reportQuery(); exportParams.set('report_type', section === 'jobs' ? 'jobs' : section); exportParams.set('format', 'csv')
+  const workbench = section === 'inbound' ? 'inbound' : section === 'workflows' ? 'automations' : section === 'jobs' ? (jobKind === 'list_tools' ? 'list-tools' : 'data-studio') : section === 'providers' ? 'providers' : 'campaigns'
+  return <div className="content reports-view">
+    <div className="toolbar"><div><p className="eyebrow teal">OPERATIONAL INTELLIGENCE</p><h2>Reports &amp; Insights</h2><p className="muted">A read-only view of durable local observations across campaigns, providers, inbound evidence, workflows, and processing jobs.</p></div><div className="toolbar-actions"><label>Range<select aria-label="Report range" value={preset} onChange={event => { const next = event.target.value; setPreset(next); void reload(next, timezone, start, end) }}><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="last_7_days">Last 7 days</option><option value="last_30_days">Last 30 days</option><option value="custom">Custom</option></select></label><label>Timezone<input aria-label="Report timezone" value={timezone} onChange={event => setTimezone(event.target.value)} onBlur={() => void reload(preset, timezone, start, end)} /></label><button onClick={() => void reload()} aria-label="Refresh report">Refresh</button></div></div>
+    {preset === 'custom' && <div className="report-range-fields"><label>Start date<input aria-label="Report start date" type="date" value={start} onChange={event => { setStart(event.target.value); if (end) void reload('custom', timezone, event.target.value, end) }} /></label><label>End date<input aria-label="Report end date" type="date" value={end} onChange={event => { setEnd(event.target.value); if (start) void reload('custom', timezone, start, event.target.value) }} /></label></div>}
+    <div className="report-filter-fields"><label>Provider ref<input aria-label="Report provider filter" value={providerRef} onChange={event => setProviderRef(event.target.value)} placeholder="Any provider" /></label><label>Workflow id<input aria-label="Report workflow filter" value={workflowId} onChange={event => setWorkflowId(event.target.value)} placeholder="Any workflow" /></label><label>Inbound source<input aria-label="Report source filter" value={sourceRef} onChange={event => setSourceRef(event.target.value)} placeholder="Any source" /></label><label>Account ref<input aria-label="Report account filter" value={accountRef} onChange={event => setAccountRef(event.target.value)} placeholder="Any account" /></label><label>Folder<input aria-label="Report folder filter" value={folder} onChange={event => setFolder(event.target.value)} placeholder="Any folder" /></label><label>Job kind<select aria-label="Report job filter" value={jobKind} onChange={event => setJobKind(event.target.value)}><option value="">All jobs</option><option value="data_studio">Data Studio</option><option value="list_tools">List Tools</option></select></label><button onClick={() => void reload()} aria-label="Apply report filters">Apply filters</button></div>
+    <div className="report-boundary" role="note"><strong>Evidence boundary:</strong> local durable observations only. SMTP acceptance is not inbox delivery, and synthetic data does not qualify a real provider.</div>
+    {summaryError && <div className="error" role="alert">{summaryError}</div>}
+    <div className="report-tabs" role="tablist" aria-label="Report sections">{sections.map(([id, label]) => <button key={id} role="tab" aria-selected={section === id} className={section === id ? 'active' : ''} onClick={() => void selectSection(id)}>{label}</button>)}</div>
+    {section === 'summary' ? <>
+      <div className="stat-grid report-stats"><Stat label="Campaigns" value={campaigns.campaign_count ?? 0} tone="teal" /><Stat label="Submission attempts" value={attemptTotal} /><Stat label="Accepted submissions" value={accepted} tone="teal" /><Stat label="Ambiguous outcomes" value={campaigns.attempts?.ambiguous ?? 0} tone="amber" /><Stat label="Pending inbound reviews" value={inbound.pending_reviews ?? 0} tone="amber" /><Stat label="Waiting workflow runs" value={workflows.waiting?.count ?? 0} /></div>
+      {campaignDelta !== null && <p className="report-comparison" role="status">Compared with the previous matching period: campaigns {campaignDelta >= 0 ? '+' : ''}{campaignDelta} ({previousCampaigns ?? 0} previously).</p>}
+      <div className="split report-panels"><section className="panel"><div className="panel-head"><div><h3>Signal coverage</h3><p className="muted">Counts are keyed to the selected range and source timestamp.</p></div></div><dl className="metric-list"><div><dt>Inbound messages</dt><dd>{inbound.messages ?? 0}</dd></div><div><dt>Provider diagnostics</dt><dd>{providers.diagnostics?.reduce((total: number, item: ApiRecord) => total + (item.count || 0), 0) ?? 0}</dd></div><div><dt>Data Studio artifacts</dt><dd>{processing.artifact_count ?? 0}</dd></div><div><dt>Message revisions</dt><dd>{messageStudio.revisions_created ?? 0}</dd></div></dl></section><section className="panel"><div className="panel-head"><div><h3>Deterministic insights</h3><p className="muted">Evidence-linked observations; no opaque recommendations.</p></div></div>{metrics.insights?.length ? <div className="insight-list">{metrics.insights.map((insight: ApiRecord) => <article className={`insight ${insight.severity}`} key={insight.id}><strong>{insight.title}</strong><p>{insight.observation}</p><small>Next: {insight.next_action}</small>{insight.evidence?.record_ids?.length ? <small>Evidence records: {insight.evidence.record_ids.join(', ')}</small> : null}</article>)}</div> : <Empty text="No attention signals in this range." />}</section></div>
+      <section className="panel"><div className="panel-head"><div><h3>Explore the evidence</h3><p className="muted">Open a bounded drilldown without leaving the reporting surface.</p></div></div><div className="button-row report-links"><button onClick={() => void selectSection('campaigns')}>Campaign outcomes</button><button onClick={() => void selectSection('providers')}>Provider evidence</button><button onClick={() => void selectSection('inbound')}>Inbound trust</button><button onClick={() => void selectSection('jobs')}>Processing jobs</button><button onClick={() => onNavigate('activity')}>Open operational ledger</button></div></section>
+    </> : <section className="panel table-panel"><div className="panel-head"><div><h3>{sections.find(([id]) => id === section)?.[1]}</h3><p className="muted">{detailBusy ? 'Loading bounded records…' : 'Paginated durable records; message bodies and credentials are excluded.'}</p></div>{detail && <a className="text-button" href={`/api/v1/reports/export?${exportParams}`}>Export CSV</a>}</div>{detailError && <div className="error" role="alert">{detailError}</div>}{detailBusy ? <div className="loading" role="status">Loading report section…</div> : detailRows.length ? <table><thead><tr><th>Record</th><th>Status</th><th>Observed</th><th>Evidence</th><th>Inspect</th></tr></thead><tbody>{detailRows.map((item: ApiRecord, index: number) => <tr key={item.id || item.ref || index}><td><strong>{item.name || item.display_name || item.source_ref || item.workflow_id || item.id || 'Record'}</strong><small className="table-subline">{item.ref || item.kind || item.profile_ref || item.account_ref || item.id || 'local record'}</small></td><td>{item.status || item.outcome || item.trust_status || 'observed'}</td><td>{item.created_at || item.observed_at || item.acquired_at || item.started_at || '—'}</td><td>{item.evidence_class || 'durable local observation'}</td><td><button className="text-button" onClick={() => onNavigate(workbench)}>Open {workbench.replace('-', ' ')}</button></td></tr>)}</tbody></table> : <Empty text="No durable records match this range." />}{section === 'workflows' && detail?.workflows?.length ? <div className="report-secondary"><h3>Workflow definitions</h3>{detail.workflows.map((item: ApiRecord) => <p key={item.id}><strong>{item.name}</strong> · {item.status} · updated {item.updated_at}</p>)}</div> : null}</section>}
+  </div>
+}
 
 function DataStudio({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void }) {
   const [files, setFiles] = useState<File[]>([])
