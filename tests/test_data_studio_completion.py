@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from mailforge.application.automation import AutomationService
-from mailforge.application.data_studio import DataStudioService
+from mailforge.application.data_studio import DataStudioError, DataStudioService
 from mailforge.infrastructure.campaign_store import CampaignStore
 
 
@@ -305,3 +305,29 @@ def test_data_studio_backup_restores_database_and_artifacts(tmp_path):
     retried = _wait(restored, job["id"])
     assert retried["status"] == "completed"
     restored.close()
+
+
+def test_data_studio_backup_refuses_tampered_artifact(tmp_path: Path) -> None:
+    source = tmp_path / "source.jsonl"
+    source.write_text('{"email":"tamper@example.com"}\n', encoding="utf-8")
+    store = CampaignStore(tmp_path / "state.sqlite3")
+    service = DataStudioService(store, tmp_path / "studio")
+    recipe = service.create_recipe("Integrity", definition={"steps": []})
+    job = service.create_job(source, source.name, recipe["current_revision_id"])
+    service.start(job["id"])
+    job = _wait(service, job["id"])
+    artifact = next(item for item in job["artifacts"] if item["kind"] == "output")
+    artifact_path, _ = service.artifact_path(job["id"], artifact["id"])
+    backup = service.backup_to(tmp_path / "backup")
+    artifact_path.write_bytes(b"tampered\n")
+    with pytest.raises(DataStudioError, match="backup refused"):
+        service.backup_to(tmp_path / "backup-refused")
+    backup_artifact = backup / "data-studio" / artifact_path.relative_to(service.root)
+    backup_artifact.write_bytes(b"tampered backup\n")
+    with pytest.raises(DataStudioError, match="artifact checksum"):
+        DataStudioService.restore_from(
+            backup, tmp_path / "restored.sqlite3", tmp_path / "restored-studio"
+        )
+    assert not (tmp_path / "restored.sqlite3").exists()
+    assert not (tmp_path / "restored-studio").exists()
+    service.close()

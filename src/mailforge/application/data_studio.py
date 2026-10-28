@@ -24,7 +24,7 @@ import tempfile
 import threading
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -526,9 +526,21 @@ class DataStudioService:
                     raise DataStudioError(
                         "backup requires no pending or running Data Studio jobs", "backup_unsafe"
                     )
-                jobs = connection.execute(
-                    "SELECT id,status FROM data_studio_jobs ORDER BY id"
-                ).fetchall()
+                jobs = connection.execute("SELECT * FROM data_studio_jobs ORDER BY id").fetchall()
+                artifacts = connection.execute("SELECT * FROM data_studio_artifacts").fetchall()
+                for artifact in artifacts:
+                    path = Path(artifact["path"])
+                    if not path.is_file() or _sha256(path) != artifact["sha256"]:
+                        raise DataStudioError(
+                            "artifact checksum does not match; backup refused", "backup_integrity"
+                        )
+                for job in jobs:
+                    source = Path(job["source_path"])
+                    if not source.is_file() or _sha256(source) != job["source_sha256"]:
+                        raise DataStudioError(
+                            "source manifest checksum does not match; backup refused",
+                            "backup_integrity",
+                        )
             temporary.mkdir(parents=True)
             try:
                 self.store.backup_to(temporary / "state.sqlite3")
@@ -567,6 +579,7 @@ class DataStudioService:
             raise DataStudioError("backup bundle kind is invalid", "backup_invalid")
         if destination_db.exists() or destination_root.exists():
             raise DataStudioError("restore destination already exists", "restore_exists")
+        DataStudioService._validate_backup_bundle(backup, manifest)
         destination_root.parent.mkdir(parents=True, exist_ok=True)
         CampaignStore.restore_from(backup / "state.sqlite3", destination_db)
         shutil.copytree(backup / "data-studio", destination_root)
@@ -658,6 +671,44 @@ class DataStudioService:
                     "restored artifact checksum does not match", "restore_integrity"
                 )
         return destination_db, destination_root
+
+    @staticmethod
+    def _validate_backup_bundle(backup: Path, manifest: Mapping[str, Any]) -> None:
+        """Validate the copied state before restore creates any destination files."""
+
+        source_root = Path(manifest.get("data_studio_root", backup / "data-studio")).resolve()
+        state = backup / "state.sqlite3"
+        database = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
+        database.row_factory = sqlite3.Row
+        try:
+            jobs = database.execute(
+                "SELECT source_path,source_sha256 FROM data_studio_jobs"
+            ).fetchall()
+            artifacts = database.execute("SELECT path,sha256 FROM data_studio_artifacts").fetchall()
+        finally:
+            database.close()
+
+        def bundled_path(path: str) -> Path:
+            try:
+                relative = Path(path).resolve().relative_to(source_root)
+            except ValueError as error:
+                raise DataStudioError(
+                    "backup path is outside the Data Studio root", "restore_integrity"
+                ) from error
+            return backup / "data-studio" / relative
+
+        for job in jobs:
+            source = bundled_path(job["source_path"])
+            if not source.is_file() or _sha256(source) != job["source_sha256"]:
+                raise DataStudioError(
+                    "backup source manifest checksum does not match", "restore_integrity"
+                )
+        for artifact in artifacts:
+            path = bundled_path(artifact["path"])
+            if not path.is_file() or _sha256(path) != artifact["sha256"]:
+                raise DataStudioError(
+                    "backup artifact checksum does not match", "restore_integrity"
+                )
 
     def create_recipe(
         self, name: str, description: str = "", definition: dict[str, Any] | None = None

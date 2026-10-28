@@ -1232,8 +1232,17 @@ class MessageStudioService:
                     "WHERE campaign_id=? AND run_key=? AND message_revision_id=?",
                     (campaign_id, run_key, revision_id),
                 ).fetchone()
+                any_snapshot = connection.execute(
+                    "SELECT 1 FROM data_studio_campaign_snapshots WHERE campaign_id=? LIMIT 1",
+                    (campaign_id,),
+                ).fetchone()
             if saved_snapshot is not None:
                 data_snapshot_id = saved_snapshot["id"]
+            elif any_snapshot is not None:
+                raise MessageStudioError(
+                    "campaign has a Data Studio snapshot for a different revision or run",
+                    "snapshot_conflict",
+                )
         snapshot = self.campaign_snapshot(campaign_id, revision_id, run_key=run_key)
         document = json.loads(snapshot["document_json"])
         static = []

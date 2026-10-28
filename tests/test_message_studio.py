@@ -253,6 +253,14 @@ def test_data_studio_recipient_batch_freezes_source_context_and_message(tmp_path
                 ref="batch-sender", provider="synthetic", email="sender@example.com"
             ),
         )
+    with pytest.raises(MessageStudioError, match="different revision or run"):
+        studio.prepare_campaign(
+            campaign_id,
+            sender=SenderPolicy(
+                ref="batch-sender", provider="synthetic", email="sender@example.com"
+            ),
+            revision_id="different-published-revision",
+        )
     report = studio.prepare_campaign(
         campaign_id,
         sender=SenderPolicy(ref="batch-sender", provider="synthetic", email="sender@example.com"),
