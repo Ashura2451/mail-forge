@@ -22,6 +22,15 @@ from mailforge.application.inbound_operations import InboundOperations
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import collect_unique_addresses, iter_jsonl_email_field
 from mailforge.application.legacy_migration import rehearse_legacy_migration
+from mailforge.application.local_application import (
+    DEFAULT_PORT,
+    DataDirectory,
+    LocalApplication,
+    create_backup,
+    default_data_directory,
+    restore_backup,
+    validate_backup,
+)
 from mailforge.application.mailer_compat import (
     load_legacy_configuration,
     migrate_legacy_state,
@@ -644,8 +653,33 @@ def build_parser() -> argparse.ArgumentParser:
     data_run.add_argument("--source", type=Path, action="append", default=[])
     data_run.add_argument("--filename", default="data.csv")
     data_run.add_argument("--revision-id", required=True)
+    app = subparsers.add_parser("app", help="start and maintain the local Mailforge application")
+    app_subparsers = app.add_subparsers(dest="app_command", required=True)
+    for command, help_text in (
+        ("init", "initialize the operator data directory"),
+        ("start", "start the local application and open its browser interface"),
+        ("stop", "stop the local application"),
+        ("restart", "restart the local application"),
+        ("status", "show runtime health and data-directory status"),
+        ("open", "open the running application in the browser"),
+    ):
+        command_parser = app_subparsers.add_parser(command, help=help_text)
+        command_parser.add_argument("--data-dir", type=Path, default=default_data_directory())
+        command_parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+        if command in {"start", "restart"}:
+            command_parser.add_argument("--no-open", action="store_true")
+    app_backup = app_subparsers.add_parser("backup", help="create a complete application backup")
+    app_backup.add_argument("--data-dir", type=Path, default=default_data_directory())
+    app_backup.add_argument("--destination", type=Path)
+    app_validate = app_subparsers.add_parser("validate-backup", help="validate a backup archive")
+    app_validate.add_argument("backup", type=Path)
+    app_restore = app_subparsers.add_parser("restore", help="restore into a new data directory")
+    app_restore.add_argument("--backup", type=Path, required=True)
+    app_restore.add_argument("--destination", type=Path, required=True)
+    app_restore.add_argument("--replace", action="store_true")
     serve = subparsers.add_parser("serve", help="run the local browser operator console")
-    serve.add_argument("--database", type=Path, default=Path("state/mailforge.sqlite3"))
+    serve.add_argument("--database", type=Path)
+    serve.add_argument("--data-dir", type=Path)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--frontend-dir", type=Path)
@@ -654,6 +688,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "app":
+        data = DataDirectory.from_path(args.data_dir)
+        if args.app_command == "init":
+            data.initialize()
+            print(json.dumps({"initialized": True, "data_directory_id": data.identity}))
+        elif args.app_command == "backup":
+            print(json.dumps({"backup": str(create_backup(data, args.destination))}))
+        elif args.app_command == "validate-backup":
+            print(json.dumps(validate_backup(args.backup), indent=2))
+        elif args.app_command == "restore":
+            restored = restore_backup(args.backup, args.destination, replace=args.replace)
+            print(json.dumps({"restored": str(restored)}))
+        else:
+            application = LocalApplication(data, port=args.port)
+            if args.app_command == "start":
+                print(json.dumps(application.start(open_browser=not args.no_open), indent=2))
+            elif args.app_command == "stop":
+                print(json.dumps(application.stop(), indent=2))
+            elif args.app_command == "restart":
+                application.stop()
+                print(json.dumps(application.start(open_browser=not args.no_open), indent=2))
+            elif args.app_command == "status":
+                print(json.dumps(application.status(), indent=2))
+            elif args.app_command == "open":
+                print(json.dumps(application.open(), indent=2))
+        return 0
     if args.command == "data-studio":
         if args.data_command == "schema":
             print(json.dumps(detect_schema(args.input, sample_limit=args.sample_limit), indent=2))
@@ -710,6 +770,12 @@ def main(argv: list[str] | None = None) -> int:
 
         from mailforge.interfaces.web import create_app
 
+        database = args.database or (
+            args.data_dir / "mailforge.sqlite3"
+            if args.data_dir
+            else Path("state/mailforge.sqlite3")
+        )
+        data_directory = args.data_dir or database.parent
         frontend_dir = args.frontend_dir
         if frontend_dir is None:
             packaged = Path(__file__).resolve().parents[1] / "web_assets"
@@ -722,9 +788,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.host not in {"127.0.0.1", "localhost", "::1"}:
             raise SystemExit("mailforge serve only binds to a loopback host")
         try:
-            with DatabaseProcessLock(args.database):
+            with DatabaseProcessLock(database):
                 uvicorn.run(
-                    create_app(args.database, frontend_dir=frontend_dir),
+                    create_app(database, frontend_dir=frontend_dir, data_directory=data_directory),
                     host=args.host,
                     port=args.port,
                     log_level="info",

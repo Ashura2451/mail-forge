@@ -42,6 +42,31 @@ def test_local_session_requires_csrf_and_rejects_non_loopback_host(tmp_path: Pat
     assert client.get("/api/v1/status", headers={"host": "evil.example"}).status_code == 400
 
 
+def test_runtime_setup_health_and_application_backup_routes(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    health = client.get("/healthz")
+    setup = client.get("/api/v1/setup")
+    assert health.status_code == 200
+    assert health.json()["loopback_only"] is True
+    assert health.json()["version"]
+    assert setup.json()["complete"] is False
+
+    completed = client.post(
+        "/api/v1/setup/complete",
+        headers=headers,
+        json={"timezone": "UTC", "simulation_mode": True, "sample_data": False},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["complete"] is True
+
+    backup = client.post("/api/v1/runtime/backup", headers=headers)
+    assert backup.status_code == 200
+    assert backup.json()["metadata"]["valid"] is True
+    backups = client.get("/api/v1/runtime/backups")
+    assert backups.status_code == 200
+    assert backups.json()["items"][0]["valid"] is True
+
+
 def test_local_api_runs_contact_campaign_lifecycle(tmp_path: Path) -> None:
     client, headers = _client(tmp_path)
     created = client.post("/api/v1/lists", headers=headers, json={"name": "Audience"})
