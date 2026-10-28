@@ -84,11 +84,7 @@ class ProviderService:
     def validate(self, ref: str) -> dict[str, object]:
         profile = self.profile(ref)
         profile.validate()
-        status = (
-            ProviderDiagnosticStatus.AUTHENTICATION_UNSUPPORTED
-            if profile.auth_method is AuthenticationMethod.OAUTH2
-            else ProviderDiagnosticStatus.CONFIGURATION_VALID
-        )
+        status = ProviderDiagnosticStatus.CONFIGURATION_VALID
         result = {
             "profile_ref": ref,
             "status": status.value,
@@ -102,12 +98,7 @@ class ProviderService:
                 ref,
                 status,
                 "configuration",
-                (
-                    "provider profile is structurally valid but the authentication "
-                    "method is unsupported"
-                    if status is ProviderDiagnosticStatus.AUTHENTICATION_UNSUPPORTED
-                    else "provider profile is structurally valid; no network contact performed"
-                ),
+                "provider profile is structurally valid; no network contact performed",
             )
         )
         return result
@@ -147,10 +138,6 @@ class ProviderService:
             raise ValueError(f"provider profile is not SMTP: {ref}")
         if not profile.enabled:
             raise ValueError(f"provider profile is disabled: {ref}")
-        if profile.auth_method is AuthenticationMethod.OAUTH2:
-            raise UnsupportedAuthenticationMechanism(
-                "SMTP OAuth2 authentication is not implemented"
-            )
         return SMTPConnectionPool(
             [
                 SMTPTransportConfig(
