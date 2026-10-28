@@ -99,7 +99,7 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
         max_concurrency=2,
     )
 
-    assert store.schema_version() == 13
+    assert store.schema_version() == 14
     assert account["display_name"] == "Local fixture"
     assert account["inbound_enabled"] is True
     assert any(item["key"] == "google_workspace" for item in service.capabilities())

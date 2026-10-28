@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1173,6 +1173,21 @@ CREATE TABLE IF NOT EXISTS data_studio_extensions (
 );
 """
 
+MIGRATION_14_SQL = """
+CREATE TABLE IF NOT EXISTS data_studio_consumers (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('contact_import', 'message_preview', 'workflow_run')),
+    job_id TEXT NOT NULL REFERENCES data_studio_jobs(id) ON DELETE CASCADE,
+    artifact_id TEXT NOT NULL REFERENCES data_studio_artifacts(id) ON DELETE CASCADE,
+    reference_id TEXT,
+    configuration_json TEXT NOT NULL DEFAULT '{}',
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_data_studio_consumers_artifact
+ON data_studio_consumers(job_id, artifact_id, kind, created_at DESC);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1416,6 +1431,14 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (13, utc_now()),
                 )
+                current = 13
+            if current < 14:
+                self._apply_migration_14(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (14, utc_now()),
+                )
+                current = 14
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1504,6 +1527,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_13(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_13_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_14(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_14_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

@@ -48,9 +48,10 @@ NODE_KINDS = {
     "REMOVE_FROM_LIST",
     "PREPARE_CAMPAIGN",
     "NOTE",
+    "RUN_DATA_STUDIO",
     "END",
 }
-ACTION_KINDS = {"ADD_TO_LIST", "REMOVE_FROM_LIST", "PREPARE_CAMPAIGN", "NOTE"}
+ACTION_KINDS = {"ADD_TO_LIST", "REMOVE_FROM_LIST", "PREPARE_CAMPAIGN", "NOTE", "RUN_DATA_STUDIO"}
 AUTOMATION_LEASE_SECONDS = 60
 MAX_GRAPH_BYTES = 64 * 1024
 MAX_NODES = 100
@@ -109,11 +110,17 @@ class AutomationService:
     """The sole workflow authority for API, CLI, and in-process workers."""
 
     def __init__(
-        self, store: CampaignStore, *, campaigns: CampaignService | None = None, message_studio=None
+        self,
+        store: CampaignStore,
+        *,
+        campaigns: CampaignService | None = None,
+        message_studio=None,
+        data_studio=None,
     ):
         self.store = store
         self.campaigns = campaigns or CampaignService(store)
         self.message_studio = message_studio
+        self.data_studio = data_studio
         self.segmentation = SegmentationService(store)
         self._event_lock = threading.Lock()
 
@@ -232,6 +239,13 @@ class AutomationService:
                 errors.append(f"action node {node_id} requires list_id")
             if kind == "PREPARE_CAMPAIGN" and not node.get("config", {}).get("campaign_id"):
                 errors.append(f"action node {node_id} requires campaign_id")
+            if kind == "RUN_DATA_STUDIO":
+                config = node.get("config", {})
+                for key in ("recipe_revision_id", "source_job_id", "source_artifact_id"):
+                    if not config.get(key):
+                        errors.append(f"data studio action {node_id} requires {key}")
+                if config.get("destination", "artifact") not in {"artifact"}:
+                    errors.append(f"data studio action {node_id} has an unsupported destination")
             if kind == "NOTE" and len(str(node.get("config", {}).get("note", ""))) > 1000:
                 errors.append(f"note node {node_id} exceeds the 1000 character limit")
             if kind in ACTION_KINDS and node.get("config", {}).get("action") not in {
@@ -678,6 +692,28 @@ class AutomationService:
                             self.message_studio.validate_revision(campaign["message_revision_id"])
                         except Exception as error:
                             raise AutomationError(str(error), "reference_not_found") from error
+                if node["kind"] == "RUN_DATA_STUDIO":
+                    if self.data_studio is None:
+                        raise AutomationError("Data Studio is not available", "reference_not_found")
+                    config = node.get("config", {})
+                    revision = connection.execute(
+                        "SELECT id FROM data_studio_recipe_revisions WHERE id=?",
+                        (config["recipe_revision_id"],),
+                    ).fetchone()
+                    if revision is None:
+                        raise AutomationError(
+                            "data studio action references a missing recipe revision",
+                            "reference_not_found",
+                        )
+                    try:
+                        self.data_studio.artifact_path(
+                            config["source_job_id"], config["source_artifact_id"]
+                        )
+                    except Exception as error:
+                        raise AutomationError(
+                            "data studio action references an unavailable source artifact",
+                            "reference_not_found",
+                        ) from error
                 if node["kind"] == "CONDITION" and config.get("segment_id"):
                     try:
                         self.segmentation.get_segment(
@@ -1410,6 +1446,26 @@ class AutomationService:
             except SError as error:
                 raise AutomationError(str(error), error.code) from error
             output = result
+        elif node["kind"] == "RUN_DATA_STUDIO":
+            if self.data_studio is None:
+                raise AutomationError("Data Studio is not available", "data_studio_unavailable")
+            try:
+                job = self.data_studio.create_job_from_artifact(
+                    config["source_job_id"],
+                    config["source_artifact_id"],
+                    config["recipe_revision_id"],
+                    correlation_id=key,
+                )
+                if job["status"] in {"pending", "failed"}:
+                    self.data_studio.start(job["id"])
+            except Exception as error:
+                raise AutomationError(str(error), "data_studio_job_failed") from error
+            output = {
+                "job_id": job["id"],
+                "recipe_revision_id": config["recipe_revision_id"],
+                "source_artifact_id": config["source_artifact_id"],
+                "destination": config.get("destination", "artifact"),
+            }
         elif node["kind"] == "NOTE":
             with self.store.transaction(immediate=True) as connection:
                 self.store.record_event(

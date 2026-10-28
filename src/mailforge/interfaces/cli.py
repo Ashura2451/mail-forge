@@ -537,11 +537,13 @@ def build_parser() -> argparse.ArgumentParser:
     data_preview = data_commands.add_parser("preview", help="preview a recipe")
     data_preview.add_argument("--database", type=Path, required=True)
     data_preview.add_argument("--input", type=Path, required=True)
+    data_preview.add_argument("--source", type=Path, action="append", default=[])
     data_preview.add_argument("--definition", type=Path, required=True)
     data_preview.add_argument("--limit", type=int, default=50)
     data_run = data_commands.add_parser("run", help="run a pinned recipe")
     data_run.add_argument("--database", type=Path, required=True)
     data_run.add_argument("--input", type=Path, required=True)
+    data_run.add_argument("--source", type=Path, action="append", default=[])
     data_run.add_argument("--filename", default="data.csv")
     data_run.add_argument("--revision-id", required=True)
     serve = subparsers.add_parser("serve", help="run the local browser operator console")
@@ -573,13 +575,28 @@ def main(argv: list[str] | None = None) -> int:
                     print(json.dumps(service.list_recipes(include_archived=True), indent=2))
                 elif args.data_command == "preview":
                     definition = json.loads(args.definition.read_text(encoding="utf-8"))
+                    sources = [args.input, *args.source] if args.source else []
                     print(
                         json.dumps(
-                            service.preview(args.input, definition, limit=args.limit), indent=2
+                            service.preview_sources(
+                                [(path, path.name, path.stem) for path in sources],
+                                definition,
+                                limit=args.limit,
+                            )
+                            if args.source
+                            else service.preview(args.input, definition, limit=args.limit),
+                            indent=2,
                         )
                     )
                 else:
-                    job = service.create_job(args.input, args.filename, args.revision_id)
+                    sources = [args.input, *args.source] if args.source else []
+                    job = (
+                        service.create_multi_source_job(
+                            [(path, path.name, path.stem) for path in sources], args.revision_id
+                        )
+                        if args.source
+                        else service.create_job(args.input, args.filename, args.revision_id)
+                    )
                     service.start(job["id"])
                     while True:
                         job = service.get_job(job["id"])
@@ -817,7 +834,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "automation":
         from mailforge.infrastructure.campaign_store import CampaignStore
 
-        service = AutomationService(CampaignStore(args.database))
+        store = CampaignStore(args.database)
+        data_studio = DataStudioService(store)
+        service = AutomationService(store, data_studio=data_studio)
         if args.automation_command == "list":
             print(json.dumps(service.list_workflows(), indent=2))
         elif args.automation_command == "create":

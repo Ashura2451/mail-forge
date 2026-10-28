@@ -14,14 +14,19 @@ existing owners.
 
 ## Current contract
 
-The implemented slice supports bounded TXT, CSV, TSV, JSON, and JSONL input;
+The implementation supports bounded TXT, CSV, TSV, JSON, and JSONL input;
 typed ordered steps; deterministic previews; immutable revision-pinned jobs;
-source-row validation errors; provider catalog classification; aggregation; and
-atomic JSONL/error artifacts. Standard recipes never evaluate arbitrary code.
+source-row validation errors and provenance; provider catalog classification;
+aggregation; multi-source set operations and bounded INNER/LEFT joins;
+atomic TXT/CSV/TSV/JSON/JSONL artifacts; explicit contact imports; Message
+Studio preview snapshots; and pinned Automation actions. Standard recipes never
+evaluate arbitrary code.
 
 ## Remaining acceptance
 
-Joins, append/intersect/subtract, CSV/TSV/JSON exports, explicit downstream
-destinations, workflow consumption, registered trusted extensions, measured
-10k/100k/1m workloads, and the complete connected scenario remain open. Their
-absence is recorded as partial rather than implied complete.
+Full large-workload qualification, restart/cancellation evidence under load,
+backup/restore during connected processing, complete keyboard/a11y coverage,
+recipient-batch campaign preparation, controlled real-provider qualification,
+and trusted imported-code extensions remain open. The built-in trusted
+extension is deliberately local, disabled by default, and not a generic plugin
+platform. These limits are recorded as partial rather than implied complete.

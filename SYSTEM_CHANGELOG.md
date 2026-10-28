@@ -241,3 +241,18 @@
 - This is a partial local slice. Joins, downstream integrations, multi-format
   exports, trusted extensions, large-workload measurements, and full connected
   acceptance remain open; no external provider or recipient data was used.
+
+## 2026-10-28 — Data Studio 021 completion slice
+
+- Added schema 14 consumer provenance, multi-source append/union/intersect/
+  subtract and indexed INNER/LEFT joins with deterministic provenance and
+  collision handling.
+- Added atomic UTF-8 TXT/CSV/TSV/JSON/JSONL exports with safe filenames,
+  deterministic fields, and spreadsheet formula-injection protection.
+- Added explicit contact-import reconciliation, canonical Message Studio
+  personalization previews, pinned Automation recipe actions, and a narrow
+  disabled-by-default trusted local extension contract.
+- Extended the browser workbench for multi-source selection, combine mode,
+  export choice, downloads, contact destinations, and message previews.
+- Real-provider qualification remains readiness-only; no external action or
+  private recipient/provider data was used.

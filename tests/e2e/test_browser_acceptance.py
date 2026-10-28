@@ -170,6 +170,28 @@ def test_data_studio_browser_recipe_preview(tmp_path: Path) -> None:
             page.get_by_role("button", name="Preview source").click()
             page.get_by_text("Preview only").wait_for()
             assert page.get_by_text("1 removed").is_visible()
+            page.locator("input[aria-label='Data Studio source file']").set_input_files(
+                [
+                    {
+                        "name": "people.csv",
+                        "mimeType": "text/csv",
+                        "buffer": b"email\nada@example.com\n",
+                    },
+                    {
+                        "name": "more-people.csv",
+                        "mimeType": "text/csv",
+                        "buffer": b"email\nbob@example.com\n",
+                    },
+                ]
+            )
+            page.get_by_label("Data Studio combine operation").select_option("append")
+            page.get_by_label("Data Studio export format").select_option("csv")
+            page.get_by_role("button", name="Save current recipe").click()
+            page.get_by_text("Recipe revision saved").wait_for()
+            page.get_by_role("button", name="Start processing").click()
+            page.get_by_text("Processing job completed").wait_for()
+            page.get_by_role("heading", name="Completed output").wait_for()
+            assert page.get_by_role("link", name="Download data-studio-output.csv").is_visible()
             page.set_viewport_size({"width": 390, "height": 844})
             assert page.get_by_role("heading", name="Source and recipe").is_visible()
             browser.close()

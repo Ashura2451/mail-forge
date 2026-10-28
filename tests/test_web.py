@@ -222,6 +222,105 @@ def test_data_studio_api_shares_pinned_recipe_preview_and_job_authority(tmp_path
     assert {item["kind"] for item in detail["artifacts"]} == {"output", "errors"}
 
 
+def test_data_studio_connected_destinations_are_explicit_and_snapshot_pinned(
+    tmp_path: Path,
+) -> None:
+    client, headers = _client(tmp_path)
+    definition = {
+        "output": {"format": "jsonl"},
+        "steps": [{"type": "normalize", "fields": ["email"], "operation": "email"}],
+    }
+    recipe = client.post(
+        "/api/v1/data-studio/recipes",
+        headers=headers,
+        json={"name": "Connected recipe", "definition": definition},
+    )
+    assert recipe.status_code == 200
+    sources = [
+        ("left.csv", b"email\nada@example.com\n", "text/csv"),
+        ("right.csv", b"email\nbob@example.com\n", "text/csv"),
+    ]
+    multi_preview = client.post(
+        "/api/v1/data-studio/preview-multi",
+        headers=headers,
+        data={"definition": json.dumps({"combine": {"operation": "append"}, "steps": []})},
+        files=[("files", source) for source in sources],
+    )
+    assert multi_preview.status_code == 200
+    assert multi_preview.json()["counts"]["output"] == 2
+    job_response = client.post(
+        f"/api/v1/data-studio/jobs-multi?recipe_revision_id={recipe.json()['current_revision_id']}",
+        headers=headers,
+        files=[("files", source) for source in sources],
+    )
+    assert job_response.status_code == 200
+    job_id = job_response.json()["id"]
+    assert (
+        client.post(f"/api/v1/data-studio/jobs/{job_id}/start", headers=headers).status_code == 200
+    )
+    for _ in range(100):
+        detail = client.get(f"/api/v1/data-studio/jobs/{job_id}").json()
+        if detail["status"] not in {"pending", "running"}:
+            break
+        time.sleep(0.02)
+    assert detail["status"] == "completed"
+    output = next(item for item in detail["artifacts"] if item["kind"] == "output")
+
+    list_id = client.post(
+        "/api/v1/lists", headers=headers, json={"name": "Data Studio destination"}
+    ).json()["id"]
+    import_preview = client.post(
+        f"/api/v1/data-studio/jobs/{job_id}/artifacts/{output['id']}/contacts/preview",
+        headers=headers,
+        json={"list_id": list_id, "mappings": {"email": "contact.email"}},
+    )
+    assert import_preview.status_code == 200
+    assert import_preview.json()["valid"] is True
+    imported = client.post(
+        f"/api/v1/data-studio/jobs/{job_id}/artifacts/{output['id']}/contacts",
+        headers=headers,
+        json={"list_id": list_id, "mappings": {"email": "contact.email"}},
+    )
+    assert imported.status_code == 200
+    assert imported.json()["created"] == 2
+    contact_id = client.get("/api/v1/contacts").json()["items"][0]["id"]
+
+    document = client.post(
+        "/api/v1/message-studio/documents",
+        headers=headers,
+        json={"name": "Connected message", "kind": "message"},
+    ).json()
+    published = client.post(
+        f"/api/v1/message-studio/documents/{document['id']}/publish", headers=headers
+    )
+    assert published.status_code == 200
+    revision_id = published.json()["published"]["id"]
+    message_preview = client.post(
+        f"/api/v1/data-studio/jobs/{job_id}/artifacts/{output['id']}/message-preview",
+        headers=headers,
+        json={
+            "revision_id": revision_id,
+            "contact_id": contact_id,
+            "field_mapping": {"email": "email"},
+        },
+    )
+    assert message_preview.status_code == 200
+    assert message_preview.json()["snapshot"]["revision_id"] == revision_id
+
+    assert (
+        client.post(
+            "/api/v1/data-studio/extensions/email_domain_normalizer/register", headers=headers
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/data-studio/extensions/email_domain_normalizer/enable", headers=headers
+        ).json()["enabled"]
+        == 1
+    )
+
+
 def test_compiled_frontend_is_served(tmp_path: Path) -> None:
     frontend = Path(__file__).parents[1] / "src" / "mailforge" / "web_assets"
     client = TestClient(

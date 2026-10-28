@@ -60,6 +60,69 @@ No external authorization or real credentials were supplied for this
 milestone. Therefore `REAL_PROVIDER_QUALIFICATION_NOT_PERFORMED` is the
 correct status. No live campaign endpoint was enabled.
 
+## Controlled qualification readiness — not performed
+
+This is a preparation plan only. It does not authorize network contact, token
+exchange, message submission, mailbox retrieval, or campaign release. Use one
+provider at a time, one owner-controlled destination, one message, and an
+expiring authorization reference. Capture the provider response, Mailforge
+correlation ID, rendered-message hash, and (only if separately authorized) the
+owned mailbox observation. SMTP acceptance is not inbox delivery.
+
+### Preferred order
+
+1. **Mailtrap Email Sandbox** — create a sandbox, copy its SMTP host/port and
+   credentials from the Integration tab, and configure only a symbolic
+   `env:MAILFORGE_MAILTRAP_PASSWORD` reference. Mailtrap documents the sandbox
+   SMTP setup and captured-inbox behavior at [Sandbox SMTP Integration](https://docs.mailtrap.io/email-sandbox/setup/sandbox-smtp-integration).
+   The first check is TLS connection and authentication; the one-message check
+   is provider acceptance plus appearance in the sandbox inbox.
+2. **Dedicated Gmail test account** — create a Google Cloud project, enable
+   Gmail API, register a localhost web OAuth client, and use the server-side
+   authorization-code flow. Request only the minimum approved scope: use
+   `gmail.send` for sending or `gmail.readonly` for inbound retrieval, with
+   `access_type=offline` only when the owner approves refresh-token retention.
+   Google documents server-side OAuth setup at [Using OAuth 2.0 for
+   Web Server Applications](https://developers.google.com/identity/protocols/oauth2/web-server),
+   Gmail server authorization at [Implement server-side
+   authorization](https://developers.google.com/workspace/gmail/api/auth/web-server),
+   and scope sensitivity at [Choose Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes).
+3. **Dedicated Outlook.com test account** — register an application in
+   Microsoft Entra, use authorization code or device flow, and request only
+   `https://outlook.office.com/SMTP.Send` for SMTP or
+   `https://outlook.office.com/IMAP.AccessAsUser.All` for inbound retrieval,
+   plus Microsoft `offline_access` only if approved. Microsoft documents the protocol
+   OAuth permissions at [Authenticate an IMAP, POP or SMTP connection using
+   OAuth](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth).
+4. **Optional SES sandbox** — verify the sender identity and the single
+   owner-controlled recipient, then use the sandbox SMTP credentials. AWS
+   documents that sandbox accounts require verified identities and recipients
+   at [Verified identities in Amazon SES](https://docs.aws.amazon.com/ses/latest/dg/verify-addresses-and-domains.html).
+
+### Operator setup and evidence checklist
+
+- Store OAuth client files, refresh tokens, SMTP passwords, and access tokens
+  outside the repository in the operator's approved secret store or environment
+  variables. Mailforge durable state receives only symbolic `env:` or
+  `keychain:` references; never paste tokens into chat, tests, SQLite, or a
+  PR.
+- Record the exact test sender, one owner-controlled recipient, provider
+  account reference, authorization reference, scope set, message hash, and
+  expiry before any connection attempt. Do not use historical MAILER
+  credentials or private recipient lists.
+- Run in order: local protocol diagnostic, authenticated connection check,
+  one bounded SMTP submission, provider response correlation, and—only when
+  approved—inbound retrieval of that same message. Capture failures such as
+  invalid credentials, consent denial, scope mismatch, TLS/hostname failure,
+  SMTP AUTH disabled, rate/size limits, timeout, duplicate correlation, and
+  ambiguous post-DATA disconnect.
+- Revoke the OAuth grant, rotate or delete the sandbox credential, remove the
+  provider profile, and retain only redacted evidence after the test. No bulk
+  send, campaign release, or real-recipient operation is part of this plan.
+
+**Readiness status:** `QUALIFICATION_READINESS_PREPARED`; actual external
+qualification: `NOT PERFORMED`.
+
 ## Operational commands
 
 ```text

@@ -16,6 +16,8 @@ import json
 import math
 import re
 import shutil
+import sqlite3
+import tempfile
 import threading
 import uuid
 from collections import defaultdict
@@ -32,6 +34,10 @@ from mailforge.infrastructure.providers import ProviderCatalog
 
 MAX_SOURCE_BYTES = 1_073_741_824
 MAX_PREVIEW_ROWS = 500
+MAX_ARTIFACT_ROWS = 100_001
+MAX_JOIN_MATCHES_PER_ROW = 1_000
+MAX_JOIN_OUTPUT_ROWS = 1_000_000
+MAX_AGGREGATE_GROUPS = 100_000
 MAX_OUTPUT_TEXT = 10_000
 SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 MISSING = object()
@@ -94,7 +100,11 @@ def _read_json_records(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def iter_source_records(
-    path: str | Path, *, max_bytes: int = MAX_SOURCE_BYTES
+    path: str | Path,
+    *,
+    max_bytes: int = MAX_SOURCE_BYTES,
+    source_id: str | None = None,
+    source_name: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield normalized record dictionaries without loading text sources wholesale."""
 
@@ -149,6 +159,15 @@ def iter_source_records(
         iterator = text_records()
     for row_number, record in enumerate(iterator, 1):
         record["__source_row"] = row_number
+        record["__source_id"] = source_id or source.stem
+        record["__source_name"] = source_name or source.name
+        record["__provenance"] = [
+            {
+                "source_id": record["__source_id"],
+                "source_name": record["__source_name"],
+                "row": row_number,
+            }
+        ]
         yield record
 
 
@@ -160,7 +179,7 @@ def detect_schema(path: str | Path, *, sample_limit: int = 100) -> dict[str, Any
         if len(samples) < sample_limit:
             samples.append(dict(record))
         for field, value in record.items():
-            if field == "__source_row":
+            if field.startswith("__"):
                 continue
             if field not in fields:
                 fields.append(field)
@@ -319,6 +338,49 @@ def _cast(value: Any, target: str) -> Any:
     raise ValueError(f"unsupported type {target}")
 
 
+def _public_fields(row: dict[str, Any]) -> list[str]:
+    return [field for field in row if not field.startswith("__")]
+
+
+def _join_key(row: dict[str, Any], fields: list[str], normalization: str) -> str | None:
+    values: list[str] = []
+    for field in fields:
+        value = row.get(field)
+        if _is_missing(value):
+            return None
+        text = _text(value)
+        if normalization == "trim":
+            text = text.strip()
+        elif normalization == "lower":
+            text = text.strip().lower()
+        elif normalization == "email":
+            text = normalize_email(text)
+        values.append(text)
+    return _json(values)
+
+
+def _manifest(path: Path) -> dict[str, Any] | None:
+    if path.suffix.lower() != ".json":
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except OSError, UnicodeError, json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) and value.get("kind") == "data_studio_sources" else None
+
+
+def _safe_export_value(value: Any, specification: dict[str, Any]) -> Any:
+    if value is None:
+        return specification.get("null", "")
+    if isinstance(value, (dict, list)):
+        value = _json(value)
+    text = str(value)
+    if text[:1] in {"=", "+", "-", "@"}:
+        return "'" + text
+    return text
+
+
 class DataStudioService:
     """Owns recipes, previews, jobs, and safe artifact publication."""
 
@@ -447,10 +509,57 @@ class DataStudioService:
             "dedupe",
             "provider_classify",
             "aggregate",
+            "extension",
         }
         for step in definition["steps"]:
             if not isinstance(step, dict) or step.get("type") not in allowed:
                 raise DataStudioError("recipe contains an unsupported step", "recipe_invalid")
+            if (
+                step.get("type") == "extension"
+                and step.get("extension_id") != "email_domain_normalizer"
+            ):
+                raise DataStudioError(
+                    "only the registered email_domain_normalizer extension is available",
+                    "extension_invalid",
+                )
+        aggregate_positions = [
+            index for index, step in enumerate(definition["steps"]) if step["type"] == "aggregate"
+        ]
+        if len(aggregate_positions) > 1 or (
+            aggregate_positions and aggregate_positions[0] != len(definition["steps"]) - 1
+        ):
+            raise DataStudioError(
+                "aggregate must be the final recipe step and may appear once",
+                "recipe_invalid",
+            )
+        combine = definition.get("combine")
+        if combine is not None:
+            if not isinstance(combine, dict) or combine.get("operation") not in {
+                "append",
+                "union",
+                "intersect",
+                "subtract",
+                "join",
+            }:
+                raise DataStudioError("combine operation is invalid", "combine_invalid")
+            if combine["operation"] in {"intersect", "subtract", "join"} and not isinstance(
+                combine.get("keys") or combine.get("left_on"), list
+            ):
+                raise DataStudioError("combine keys are required", "combine_invalid")
+            if combine["operation"] == "join" and combine.get("join_type", "inner") not in {
+                "inner",
+                "left",
+            }:
+                raise DataStudioError("only inner and left joins are supported", "combine_invalid")
+        output = definition.get("output", {})
+        if not isinstance(output, dict) or output.get("format", "jsonl") not in {
+            "txt",
+            "csv",
+            "tsv",
+            "json",
+            "jsonl",
+        }:
+            raise DataStudioError("output format is invalid", "output_invalid")
         return json.loads(_json(definition))
 
     def preview(
@@ -465,12 +574,62 @@ class DataStudioService:
         result = self._execute_rows(rows, definition, preview=True)
         return {"preview": True, "schema": detect_schema(source_path), **result}
 
-    def create_job(
-        self, source_path: str | Path, source_filename: str, recipe_revision_id: str
+    def preview_sources(
+        self,
+        sources: list[tuple[str | Path, str, str]],
+        definition: dict[str, Any],
+        *,
+        limit: int = 50,
     ) -> dict[str, Any]:
-        source = Path(source_path).resolve()
-        if not source.is_file():
-            raise DataStudioError("source file was not retained", "source_missing")
+        definition = self.validate_definition(definition)
+        rows: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory(prefix="mailforge-data-preview-") as directory:
+            manifest = Path(directory) / "sources.json"
+            manifest.write_text(
+                _json(
+                    {
+                        "kind": "data_studio_sources",
+                        "sources": [
+                            {"id": source_id, "path": str(Path(path)), "name": name}
+                            for path, name, source_id in sources
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for row in self._iter_job_records(manifest, definition):
+                rows.append(row)
+                if len(rows) >= min(max(1, limit), MAX_PREVIEW_ROWS):
+                    break
+        result = self._execute_rows(rows, definition, preview=True)
+        return {"preview": True, "sources": [name for _, name, _ in sources], **result}
+
+    def create_job(
+        self,
+        source_path: str | Path,
+        source_filename: str,
+        recipe_revision_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.create_multi_source_job(
+            [(source_path, source_filename, Path(source_path).stem)],
+            recipe_revision_id,
+            correlation_id=correlation_id,
+        )
+
+    def create_multi_source_job(
+        self,
+        sources: list[tuple[str | Path, str, str]],
+        recipe_revision_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not sources or len(sources) > 16:
+            raise DataStudioError("between one and sixteen sources are required", "source_limit")
+        for source_path, _, _ in sources:
+            if not Path(source_path).resolve().is_file():
+                raise DataStudioError("source file was not retained", "source_missing")
         with self.store.connect() as connection:
             if (
                 connection.execute(
@@ -479,10 +638,29 @@ class DataStudioService:
                 is None
             ):
                 raise DataStudioError("recipe revision was not found", "revision_not_found")
+            if correlation_id:
+                existing = connection.execute(
+                    "SELECT id FROM data_studio_jobs WHERE correlation_id=?", (correlation_id,)
+                ).fetchone()
+                if existing is not None:
+                    return self.get_job(existing["id"])
         job_id, job_dir = str(uuid.uuid4()), (self.root / str(uuid.uuid4())).resolve()
         job_dir.mkdir(parents=True, exist_ok=False)
-        retained = job_dir / f"input-{_safe_filename(source_filename)}"
-        shutil.copyfile(source, retained)
+        manifest_sources = []
+        for index, (source_path, source_filename, source_id) in enumerate(sources, start=1):
+            retained = job_dir / f"input-{index}-{_safe_filename(source_filename)}"
+            shutil.copyfile(Path(source_path).resolve(), retained)
+            manifest_sources.append(
+                {
+                    "id": _safe_filename(source_id, f"source-{index}"),
+                    "name": _safe_filename(source_filename),
+                    "path": str(retained),
+                }
+            )
+        manifest = job_dir / "sources.json"
+        manifest.write_text(
+            _json({"kind": "data_studio_sources", "sources": manifest_sources}), encoding="utf-8"
+        )
         now = _now()
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
@@ -490,14 +668,14 @@ class DataStudioService:
                 (
                     job_id,
                     recipe_revision_id,
-                    _safe_filename(source_filename),
-                    str(retained),
-                    _sha256(retained),
+                    " + ".join(item["name"] for item in manifest_sources),
+                    str(manifest),
+                    _sha256(manifest),
                     "pending",
                     now,
                     now,
                     str(job_dir),
-                    f"data-studio:{job_id}",
+                    correlation_id or f"data-studio:{job_id}",
                 ),
             )
         return self.get_job(job_id)
@@ -541,6 +719,291 @@ class DataStudioService:
         self.executor.submit(self._run, job_id)
         return self.get_job(job_id)
 
+    def register_extension(self, name: str = "email_domain_normalizer") -> dict[str, Any]:
+        if name != "email_domain_normalizer":
+            raise DataStudioError(
+                "extension is not in the trusted local registry", "extension_invalid"
+            )
+        contract = {
+            "name": name,
+            "version": "1.0",
+            "input": {"field": "email", "type": "text"},
+            "output": {"field": "email_domain", "type": "text"},
+            "capabilities": ["deterministic", "local", "no-network"],
+        }
+        checksum = hashlib.sha256(_json(contract).encode()).hexdigest()
+        now = _now()
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO data_studio_extensions(id,name,version,checksum,input_contract_json,output_contract_json,capabilities_json,enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET checksum=excluded.checksum,updated_at=excluded.updated_at",
+                (
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"mailforge-extension:{name}")),
+                    name,
+                    contract["version"],
+                    checksum,
+                    _json(contract["input"]),
+                    _json(contract["output"]),
+                    _json(contract["capabilities"]),
+                    0,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_extension(name)
+
+    def get_extension(self, name: str) -> dict[str, Any]:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM data_studio_extensions WHERE name=?", (name,)
+            ).fetchone()
+        if row is None:
+            raise DataStudioError("extension was not registered", "extension_not_found")
+        result = dict(row)
+        for key in ("input_contract_json", "output_contract_json", "capabilities_json"):
+            result[key.removesuffix("_json")] = json.loads(result.pop(key))
+        return result
+
+    def set_extension_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        self.get_extension(name)
+        with self.store.transaction(immediate=True) as connection:
+            changed = connection.execute(
+                "UPDATE data_studio_extensions SET enabled=?,updated_at=? WHERE name=?",
+                (int(enabled), _now(), name),
+            ).rowcount
+        if changed != 1:
+            raise DataStudioError("extension was not found", "extension_not_found")
+        return self.get_extension(name)
+
+    def _iter_job_records(
+        self, source_path: str | Path, definition: dict[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        manifest = _manifest(Path(source_path))
+        if manifest is None:
+            yield from iter_source_records(source_path)
+            return
+        sources = manifest.get("sources", [])
+        if not isinstance(sources, list) or not sources:
+            raise DataStudioError("source manifest is empty", "source_invalid")
+        normalized_sources = [
+            {
+                "id": str(item.get("id") or f"source-{index}"),
+                "name": str(item.get("name") or f"source-{index}"),
+                "path": str(item.get("path") or ""),
+            }
+            for index, item in enumerate(sources, start=1)
+            if isinstance(item, dict)
+        ]
+        if any(not Path(item["path"]).is_file() for item in normalized_sources):
+            raise DataStudioError("a source in the manifest is unavailable", "source_missing")
+        combine = definition.get("combine") or {"operation": "append"}
+        yield from self._combine_sources(normalized_sources, combine)
+
+    def _combine_sources(
+        self, sources: list[dict[str, str]], combine: dict[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        operation = combine.get("operation", "append")
+        if operation in {"append", "union"}:
+            if operation == "union":
+                schemas = [detect_schema(source["path"]) for source in sources]
+                types: dict[str, str] = {}
+                for schema in schemas:
+                    for field, field_type in schema.get("types", {}).items():
+                        prior = types.get(field)
+                        if prior and field_type not in {prior, "empty"} and prior != "empty":
+                            raise DataStudioError(
+                                f"union field {field} has incompatible types",
+                                "combine_schema",
+                            )
+                        types[field] = field_type if prior in {None, "empty"} else prior
+            field_order: list[str] = []
+            for source in sources:
+                for row in iter_source_records(
+                    source["path"], source_id=source["id"], source_name=source["name"]
+                ):
+                    if operation == "union":
+                        for field in _public_fields(row):
+                            if field not in field_order:
+                                field_order.append(field)
+                    yield row
+            return
+        if len(sources) < 2:
+            raise DataStudioError("this combine operation needs two sources", "combine_invalid")
+        left_id = combine.get("left_source") or sources[0]["id"]
+        right_id = combine.get("right_source") or sources[1]["id"]
+        by_id = {source["id"]: source for source in sources}
+        left = by_id.get(left_id)
+        right = by_id.get(right_id)
+        if left is None or right is None:
+            raise DataStudioError("combine source id was not found", "combine_invalid")
+        keys = combine.get("keys") or combine.get("left_on") or []
+        right_keys = combine.get("right_on") or keys
+        if (
+            not isinstance(keys, list)
+            or not isinstance(right_keys, list)
+            or len(keys) != len(right_keys)
+        ):
+            raise DataStudioError("combine keys must be matching lists", "combine_invalid")
+        normalization = combine.get("key_normalization", "trim")
+        if normalization not in {"exact", "trim", "lower", "email"}:
+            raise DataStudioError("key normalization is invalid", "combine_invalid")
+        with tempfile.TemporaryDirectory(prefix="mailforge-data-join-") as directory:
+            database = Path(directory) / "index.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.execute("PRAGMA temp_store=FILE")
+            connection.execute(
+                "CREATE TABLE right_rows (join_key TEXT, row_json TEXT NOT NULL, row_order INTEGER NOT NULL)"
+            )
+            connection.execute("CREATE INDEX right_rows_key ON right_rows(join_key)")
+            right_fields: list[str] = []
+            for order, row in enumerate(
+                iter_source_records(
+                    right["path"], source_id=right["id"], source_name=right["name"]
+                ),
+                start=1,
+            ):
+                for field in _public_fields(row):
+                    if field not in right_fields:
+                        right_fields.append(field)
+                key = _join_key(row, right_keys, normalization)
+                if key is not None:
+                    connection.execute(
+                        "INSERT INTO right_rows(join_key,row_json,row_order) VALUES(?,?,?)",
+                        (key, _json(row), order),
+                    )
+            connection.commit()
+            collision = combine.get("collision", "suffix")
+            suffix = str(combine.get("right_suffix", "_right"))[:32] or "_right"
+            output_rows = 0
+            for left_row in iter_source_records(
+                left["path"], source_id=left["id"], source_name=left["name"]
+            ):
+                key = _join_key(left_row, keys, normalization)
+                if operation in {"intersect", "subtract"}:
+                    has_match = (
+                        connection.execute(
+                            "SELECT 1 FROM right_rows WHERE join_key=? LIMIT 1", (key,)
+                        ).fetchone()
+                        if key is not None
+                        else None
+                    )
+                    if (operation == "intersect" and has_match) or (
+                        operation == "subtract" and not has_match
+                    ):
+                        yield left_row
+                    continue
+                matches = (
+                    connection.execute(
+                        "SELECT row_json FROM right_rows WHERE join_key=? ORDER BY row_order",
+                        (key,),
+                    )
+                    if key is not None
+                    else iter(())
+                )
+                match_count = 0
+                emitted_for_left = False
+                for match in matches:
+                    match_count += 1
+                    if match_count > MAX_JOIN_MATCHES_PER_ROW:
+                        raise DataStudioError(
+                            "join key has too many matching rows",
+                            "combine_limit",
+                        )
+                    emitted_for_left = True
+                    right_row = json.loads(match[0])
+                    merged = dict(left_row)
+                    for field in right_fields:
+                        target = field
+                        if target in merged and not field.startswith("__"):
+                            if collision == "error":
+                                raise DataStudioError(
+                                    f"join field collision: {field}", "combine_collision"
+                                )
+                            target = f"{field}{suffix}"
+                            serial = 2
+                            while target in merged:
+                                target = f"{field}{suffix}{serial}"
+                                serial += 1
+                        merged[target] = right_row.get(field) if right_row else None
+                    merged["__provenance"] = list(left_row.get("__provenance", [])) + list(
+                        right_row.get("__provenance", [])
+                    )
+                    output_rows += 1
+                    if output_rows > MAX_JOIN_OUTPUT_ROWS:
+                        raise DataStudioError(
+                            "join output exceeds the bounded result limit",
+                            "combine_limit",
+                        )
+                    yield merged
+                if not emitted_for_left and combine.get("join_type", "inner") == "left":
+                    merged = dict(left_row)
+                    for field in right_fields:
+                        target = field
+                        if target in merged:
+                            if collision == "error":
+                                raise DataStudioError(
+                                    f"join field collision: {field}", "combine_collision"
+                                )
+                            target = f"{field}{suffix}"
+                            serial = 2
+                            while target in merged:
+                                target = f"{field}{suffix}{serial}"
+                                serial += 1
+                        merged[target] = None
+                    merged["__provenance"] = list(left_row.get("__provenance", []))
+                    output_rows += 1
+                    if output_rows > MAX_JOIN_OUTPUT_ROWS:
+                        raise DataStudioError(
+                            "join output exceeds the bounded result limit",
+                            "combine_limit",
+                        )
+                    yield merged
+            connection.close()
+
+    def iter_artifact_records(
+        self, job_id: str, artifact_id: str, *, limit: int = 10_000
+    ) -> Iterator[dict[str, Any]]:
+        path, _ = self.artifact_path(job_id, artifact_id)
+        if limit < 1 or limit > MAX_ARTIFACT_ROWS:
+            raise DataStudioError(
+                f"artifact row limit is between 1 and {MAX_ARTIFACT_ROWS}", "artifact_limit"
+            )
+        suffix = path.suffix.lower()
+        if suffix in {".jsonl", ".ndjson"}:
+            with path.open("r", encoding="utf-8") as handle:
+                for index, line in enumerate(handle):
+                    if index >= limit:
+                        break
+                    if line.strip():
+                        value = json.loads(line)
+                        if not isinstance(value, dict):
+                            raise DataStudioError(
+                                "artifact rows must be objects", "artifact_invalid"
+                            )
+                        yield value
+        elif suffix == ".json":
+            with path.open("r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            if not isinstance(value, list):
+                raise DataStudioError("JSON artifact must contain an array", "artifact_invalid")
+            for item in value[:limit]:
+                if not isinstance(item, dict):
+                    raise DataStudioError("artifact rows must be objects", "artifact_invalid")
+                yield item
+        elif suffix in {".csv", ".tsv"}:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle, delimiter="\t" if suffix == ".tsv" else ",")
+                for index, row in enumerate(reader):
+                    if index >= limit:
+                        break
+                    yield {str(key): value for key, value in row.items() if key is not None}
+        else:
+            with path.open("r", encoding="utf-8") as handle:
+                for index, line in enumerate(handle):
+                    if index >= limit:
+                        break
+                    yield {"value": line.rstrip("\r\n")}
+
     def cancel(self, job_id: str) -> dict[str, Any]:
         with self.store.transaction(immediate=True) as connection:
             changed = connection.execute(
@@ -574,7 +1037,7 @@ class DataStudioService:
             if row is None or revision is None:
                 return
             definition = json.loads(revision["definition_json"])
-            output = Path(row["job_dir"]) / "output.jsonl.tmp"
+            output = Path(row["job_dir"]) / "output.rows.jsonl.tmp"
             errors = Path(row["job_dir"]) / "errors.jsonl.tmp"
             count = rejected = processed = 0
             summary = {"removed": 0, "changed_fields": [], "validation_errors": 0}
@@ -584,11 +1047,19 @@ class DataStudioService:
                 errors.open("w", encoding="utf-8") as error_out,
             ):
                 batch: list[dict[str, Any]] = []
-                for source_row in iter_source_records(row["source_path"]):
+                aggregate_state: dict[str, Any] | None = None
+                if any(step["type"] == "aggregate" for step in definition.get("steps", [])):
+                    aggregate_state = {"step": definition["steps"][-1], "groups": {}}
+                for source_row in self._iter_job_records(row["source_path"], definition):
                     batch.append(source_row)
                     processed += 1
                     if len(batch) >= 500:
-                        result = self._execute_rows(batch, definition, dedupe_seen=dedupe_seen)
+                        result = self._execute_rows(
+                            batch,
+                            definition,
+                            dedupe_seen=dedupe_seen,
+                            aggregate_state=aggregate_state,
+                        )
                         for item in result["rows"]:
                             out.write(_json(item) + "\n")
                             count += 1
@@ -606,7 +1077,12 @@ class DataStudioService:
                     if current is None or current["status"] == "canceled":
                         raise DataStudioError("processing was canceled", "job_canceled")
                 if batch:
-                    result = self._execute_rows(batch, definition, dedupe_seen=dedupe_seen)
+                    result = self._execute_rows(
+                        batch,
+                        definition,
+                        dedupe_seen=dedupe_seen,
+                        aggregate_state=aggregate_state,
+                    )
                     for item in result["rows"]:
                         out.write(_json(item) + "\n")
                         count += 1
@@ -615,9 +1091,23 @@ class DataStudioService:
                         rejected += 1
                     summary["removed"] += result["removed"]
                     summary["validation_errors"] += len(result["errors"])
-            final = Path(row["job_dir"]) / "output.jsonl"
+                if aggregate_state is not None:
+                    for aggregate_row in self._finalize_aggregate(aggregate_state):
+                        out.write(_json(aggregate_row) + "\n")
+                        count += 1
+            output_spec = definition.get("output", {})
+            output_format = output_spec.get("format", "jsonl")
+            requested_name = output_spec.get("filename") or f"data-studio-output.{output_format}"
+            artifact_dir = Path(row["job_dir"]) / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            final = artifact_dir / _safe_filename(requested_name, f"output.{output_format}")
+            if final.suffix.lower() != f".{output_format}":
+                final = final.with_suffix(f".{output_format}")
+            export_tmp = final.with_suffix(final.suffix + ".tmp")
+            self._export_rows(output, export_tmp, output_spec)
+            output.unlink(missing_ok=True)
             error_final = Path(row["job_dir"]) / "errors.jsonl"
-            output.replace(final)
+            export_tmp.replace(final)
             errors.replace(error_final)
             self._publish(
                 job_id,
@@ -657,6 +1147,130 @@ class DataStudioService:
                 "UPDATE data_studio_jobs SET processed_count=?,output_count=?,rejected_count=?,updated_at=? WHERE id=? AND status='running'",
                 (processed, output, rejected, _now(), job_id),
             )
+
+    @staticmethod
+    def _export_rows(source: Path, destination: Path, specification: dict[str, Any]) -> None:
+        output_format = specification.get("format", "jsonl")
+        fields: list[str] = []
+        with source.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                for field in _public_fields(row):
+                    if field not in fields:
+                        fields.append(field)
+                if specification.get("include_provenance", True) and "provenance" not in fields:
+                    fields.append("provenance")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if output_format == "jsonl":
+            with (
+                source.open("r", encoding="utf-8") as input_handle,
+                destination.open("w", encoding="utf-8") as output_handle,
+            ):
+                for line in input_handle:
+                    if line.strip():
+                        row = json.loads(line)
+                        public = {
+                            field: (
+                                row.get("__provenance", [])
+                                if field == "provenance"
+                                else row.get(field)
+                            )
+                            for field in fields
+                        }
+                        output_handle.write(_json(public) + "\n")
+            return
+        with destination.open("w", encoding="utf-8", newline="") as output_handle:
+            if output_format == "json":
+                output_handle.write("[")
+            writer = None
+            if output_format in {"csv", "tsv"}:
+                safe_fields = [_safe_export_value(field, specification) for field in fields]
+                writer = csv.DictWriter(
+                    output_handle,
+                    fieldnames=safe_fields,
+                    delimiter="\t" if output_format == "tsv" else ",",
+                    lineterminator="\n",
+                    extrasaction="ignore",
+                )
+                if specification.get("include_header", True):
+                    writer.writeheader()
+            with source.open("r", encoding="utf-8") as input_handle:
+                first = True
+                for line in input_handle:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    public = {
+                        field: (
+                            row.get("__provenance", []) if field == "provenance" else row.get(field)
+                        )
+                        for field in fields
+                    }
+                    if output_format == "json":
+                        if not first:
+                            output_handle.write(",")
+                        output_handle.write(_json(public))
+                    elif output_format in {"csv", "tsv"}:
+                        assert writer is not None
+                        writer.writerow(
+                            {
+                                safe_field: _safe_export_value(public[field], specification)
+                                for field, safe_field in zip(fields, writer.fieldnames, strict=True)
+                            }
+                        )
+                    else:
+                        value = public.get(specification.get("text_field", "value"))
+                        output_handle.write(_text(value) if value is not None else _json(public))
+                        output_handle.write("\n")
+                    first = False
+            if output_format == "json":
+                output_handle.write("]\n")
+
+    def record_consumer(
+        self,
+        *,
+        kind: str,
+        job_id: str,
+        artifact_id: str,
+        reference_id: str | None,
+        configuration: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = _json(configuration)
+        consumer_id = str(uuid.uuid4())
+        content_hash = hashlib.sha256(
+            _json(
+                {
+                    "artifact_id": artifact_id,
+                    "reference_id": reference_id,
+                    "configuration": configuration,
+                }
+            ).encode()
+        ).hexdigest()
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO data_studio_consumers(id,kind,job_id,artifact_id,reference_id,configuration_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    consumer_id,
+                    kind,
+                    job_id,
+                    artifact_id,
+                    reference_id,
+                    payload,
+                    content_hash,
+                    _now(),
+                ),
+            )
+        return {
+            "id": consumer_id,
+            "kind": kind,
+            "job_id": job_id,
+            "artifact_id": artifact_id,
+            "reference_id": reference_id,
+            "configuration": configuration,
+            "content_hash": content_hash,
+        }
 
     def _publish(
         self,
@@ -702,6 +1316,17 @@ class DataStudioService:
             raise DataStudioError("artifact is not available", "artifact_not_found")
         return path, row["filename"]
 
+    def create_job_from_artifact(
+        self,
+        source_job_id: str,
+        artifact_id: str,
+        recipe_revision_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        path, filename = self.artifact_path(source_job_id, artifact_id)
+        return self.create_job(path, filename, recipe_revision_id, correlation_id=correlation_id)
+
     def _execute_rows(
         self,
         rows: list[dict[str, Any]],
@@ -709,6 +1334,7 @@ class DataStudioService:
         *,
         preview: bool = False,
         dedupe_seen: dict[tuple[str, ...], set[tuple[Any, ...]]] | None = None,
+        aggregate_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         working = [dict(row) for row in rows]
         errors: list[dict[str, Any]] = []
@@ -822,7 +1448,25 @@ class DataStudioService:
                         removed += 1
                 working = unique
             elif kind == "aggregate":
-                working = self._aggregate(working, step)
+                if aggregate_state is None:
+                    working = self._aggregate(working, step)
+                else:
+                    self._accumulate_aggregate(working, step, aggregate_state)
+                    working = []
+            elif kind == "extension":
+                extension_id = step.get("extension_id")
+                try:
+                    extension = self.get_extension(extension_id)
+                except DataStudioError:
+                    extension = self.register_extension(extension_id)
+                if not extension["enabled"]:
+                    raise DataStudioError(
+                        f"trusted extension is disabled: {extension_id}", "extension_disabled"
+                    )
+                for row in working:
+                    source_field = step.get("field", "email")
+                    output_field = step.get("output_field", "email_domain")
+                    row[output_field] = _text(row.get(source_field)).rsplit("@", 1)[-1].lower()
         return {
             "rows": working[:MAX_PREVIEW_ROWS] if preview else working,
             "errors": errors,
@@ -847,5 +1491,40 @@ class DataStudioService:
             record[step.get("count_field", "count")] = len(items)
             for field in step.get("sum", []):
                 record[f"{field}_sum"] = sum(float(item.get(field) or 0) for item in items)
+            result.append(record)
+        return result
+
+    @staticmethod
+    def _accumulate_aggregate(
+        rows: list[dict[str, Any]], step: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        group_fields = step.get("group_by", [])
+        groups: dict[tuple[Any, ...], dict[str, Any]] = state["groups"]
+        for row in rows:
+            key = tuple(row.get(field) for field in group_fields)
+            if key not in groups:
+                if len(groups) >= MAX_AGGREGATE_GROUPS:
+                    raise DataStudioError(
+                        "aggregate exceeds the bounded group limit", "aggregate_limit"
+                    )
+                groups[key] = {
+                    "count": 0,
+                    "sums": {field: 0.0 for field in step.get("sum", [])},
+                }
+            group = groups[key]
+            group["count"] += 1
+            for field in step.get("sum", []):
+                group["sums"][field] += float(row.get(field) or 0)
+
+    @staticmethod
+    def _finalize_aggregate(state: dict[str, Any]) -> list[dict[str, Any]]:
+        step = state["step"]
+        group_fields = step.get("group_by", [])
+        result = []
+        for key, values in state["groups"].items():
+            record = dict(zip(group_fields, key, strict=False))
+            record[step.get("count_field", "count")] = values["count"]
+            for field, total in values["sums"].items():
+                record[f"{field}_sum"] = total
             result.append(record)
         return result

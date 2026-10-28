@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, bootstrapSession, upload, uploadWithFields, type ApiRecord } from './api/client'
+import { api, bootstrapSession, upload, uploadMany, uploadWithFields, type ApiRecord } from './api/client'
 import './App.css'
 
 const nav = [
@@ -49,16 +49,30 @@ function Dashboard({ data, onNavigate }: { data: ApiRecord, onNavigate: (view: s
 function Stat({ label, value, tone = '' }: { label: string, value: string | number, tone?: string }) { return <div className={`stat-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>durable local state</small></div> }
 
 function DataStudio({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void }) {
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [recipeName, setRecipeName] = useState('Normalize and classify contacts')
   const [selected, setSelected] = useState<ApiRecord | null>(null)
+  const [savedFingerprint, setSavedFingerprint] = useState('')
   const [definition, setDefinition] = useState<ApiRecord>({ steps: [{ type: 'normalize', fields: ['email'], operation: 'email' }, { type: 'dedupe', fields: ['email'] }] })
   const [preview, setPreview] = useState<ApiRecord | null>(null)
+  const [job, setJob] = useState<ApiRecord | null>(null)
+  const [lists, setLists] = useState<ApiRecord[]>([])
+  const [destinationList, setDestinationList] = useState('')
+  const [messageDocuments, setMessageDocuments] = useState<ApiRecord[]>([])
+  const [messageRevision, setMessageRevision] = useState('')
+  const [messagePreview, setMessagePreview] = useState<ApiRecord | null>(null)
+  const [combineMode, setCombineMode] = useState('append')
+  const [joinKey, setJoinKey] = useState('email')
+  const [outputFormat, setOutputFormat] = useState('jsonl')
   const recipes: ApiRecord[] = data.items || []
   const steps: ApiRecord[] = definition.steps || []
+  useEffect(() => {
+    void api<ApiRecord>('/lists').then(result => setLists(result.items || []))
+    void api<ApiRecord>('/message-studio/documents').then(async result => setMessageDocuments(await Promise.all((result.items || []).map((item: ApiRecord) => api<ApiRecord>(`/message-studio/documents/${item.id}`)))))
+  }, [])
   const reloadRecipe = async (id: string) => {
     const result = await api<ApiRecord>(`/data-studio/recipes/${id}`)
-    setSelected(result); setDefinition(result.revision.definition)
+    setSelected(result); setDefinition(result.revision.definition); setSavedFingerprint(JSON.stringify(result.revision.definition))
   }
   const updateStep = (index: number, changes: ApiRecord) => setDefinition(current => ({ ...current, steps: current.steps.map((step: ApiRecord, position: number) => position === index ? { ...step, ...changes } : step) }))
   const addStep = (type: string) => {
@@ -72,16 +86,41 @@ function DataStudio({ data, onRun }: { data: ApiRecord, onRun: (action: () => Pr
     }
     setDefinition(current => ({ ...current, steps: [...(current.steps || []), defaults[type]] }))
   }
+  const effectiveDefinition = { ...definition, output: { ...(definition.output || {}), format: outputFormat }, ...(files.length > 1 ? { combine: { operation: combineMode, keys: [joinKey], join_type: 'left', key_normalization: joinKey === 'email' ? 'email' : 'trim' } } : {}) }
+  const recipeDirty = Boolean(
+    selected && savedFingerprint && savedFingerprint !== JSON.stringify(effectiveDefinition),
+  )
   const saveRecipe = () => onRun(async () => {
-    const result = selected ? await api<ApiRecord>(`/data-studio/recipes/${selected.id}/revisions`, { method: 'POST', body: JSON.stringify({ definition, expected_revision_id: selected.current_revision_id }) }) : await api<ApiRecord>('/data-studio/recipes', { method: 'POST', body: JSON.stringify({ name: recipeName, description: 'Pinned local transformation recipe', definition }) })
-    setSelected(result)
+    const result = selected ? await api<ApiRecord>(`/data-studio/recipes/${selected.id}/revisions`, { method: 'POST', body: JSON.stringify({ definition: effectiveDefinition, expected_revision_id: selected.current_revision_id }) }) : await api<ApiRecord>('/data-studio/recipes', { method: 'POST', body: JSON.stringify({ name: recipeName, description: 'Pinned local transformation recipe', definition: effectiveDefinition }) })
+    const saved = result.revision?.definition || effectiveDefinition
+    setSelected(result); setDefinition(saved); setSavedFingerprint(JSON.stringify(saved))
   }, selected ? 'Recipe revision saved' : 'Recipe saved')
-  const inspect = () => file && onRun(async () => { setPreview(await uploadWithFields('/data-studio/preview', file, { definition: JSON.stringify(definition) })) }, 'Preview ready')
-  const run = () => file && selected && onRun(async () => { const job = await upload('/data-studio/jobs', file, '?recipe_revision_id=' + encodeURIComponent(selected.current_revision_id)); await api(`/data-studio/jobs/${job.id}/start`, { method: 'POST' }) }, 'Processing job started')
+  const inspect = () => files.length && onRun(async () => { setPreview(files.length > 1 ? await uploadMany('/data-studio/preview-multi', files, { definition: JSON.stringify(effectiveDefinition) }) : await uploadWithFields('/data-studio/preview', files[0], { definition: JSON.stringify(effectiveDefinition) })) }, 'Preview ready')
+  const run = () => files.length && selected && onRun(async () => {
+    const created = files.length > 1 ? await uploadMany('/data-studio/jobs-multi?recipe_revision_id=' + encodeURIComponent(selected.current_revision_id), files) : await upload('/data-studio/jobs', files[0], '?recipe_revision_id=' + encodeURIComponent(selected.current_revision_id))
+    await api(`/data-studio/jobs/${created.id}/start`, { method: 'POST' })
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const current = await api<ApiRecord>(`/data-studio/jobs/${created.id}`)
+      if (!['pending', 'running'].includes(current.status)) {
+        setJob(current)
+        if (current.status !== 'completed') throw new Error(current.error_message || `Processing job ${current.status}`)
+        return
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 50))
+    }
+    const current = await api<ApiRecord>(`/data-studio/jobs/${created.id}`)
+    setJob(current)
+    throw new Error('Processing is still running; refresh the job to inspect progress')
+  }, 'Processing job completed')
+  const outputArtifact = job?.artifacts?.find((artifact: ApiRecord) => artifact.kind === 'output')
+  const importContacts = () => job && outputArtifact && destinationList && onRun(() => api(`/data-studio/jobs/${job.id}/artifacts/${outputArtifact.id}/contacts`, { method: 'POST', body: JSON.stringify({ list_id: destinationList, mappings: { email: 'contact.email' }, source_ref: `data-studio:${job.id}` }) }), 'Contacts imported with explicit reconciliation policy')
+  const previewMessage = () => job && outputArtifact && messageRevision && onRun(async () => setMessagePreview(await api(`/data-studio/jobs/${job.id}/artifacts/${outputArtifact.id}/message-preview`, { method: 'POST', body: JSON.stringify({ revision_id: messageRevision, field_mapping: { email: 'email', name: 'name' } }) })), 'Message personalization preview rendered')
   return <div className="content"><div className="toolbar"><div><p className="eyebrow teal">DATA STUDIO</p><p className="muted">Transform local structured data with a pinned, explainable recipe. Preview never changes the source.</p></div><span className="status-chip">{recipes.length} recipes</span></div>
-    <div className="split"><section className="panel"><div className="panel-head"><div><h3>Source and recipe</h3><p className="muted">CSV, TSV, JSON, JSONL, or line-based TXT · bounded local processing</p></div></div><label className="file-drop">{file ? file.name : 'Choose a structured data file'}<input aria-label="Data Studio source file" type="file" accept=".csv,.tsv,.json,.jsonl,.txt" onChange={event => setFile(event.target.files?.[0] || null)} /></label><label>Recipe name<input value={recipeName} onChange={event => setRecipeName(event.target.value)} /></label><div className="button-row"><button disabled={!file} onClick={inspect}>Preview source</button><button className="primary" disabled={!file || !selected} onClick={run}>Start processing</button></div></section><section className="panel"><div className="panel-head"><div><h3>Saved recipes</h3><p className="muted">Runs pin the selected revision.</p></div></div>{recipes.length ? <div className="list-stack">{recipes.map(recipe => <button className={selected?.id === recipe.id ? 'list-row selected' : 'list-row'} key={recipe.id} onClick={() => void reloadRecipe(recipe.id)}><span><strong>{recipe.name}</strong><small>{recipe.status} · {recipe.current_revision_id?.slice(0, 8)}</small></span><b>Open →</b></button>)}</div> : <Empty text="Save a recipe after choosing your first steps." />}<button className="primary full" onClick={saveRecipe}>Save current recipe</button></section></div>
+    <div className="split"><section className="panel"><div className="panel-head"><div><h3>Source and recipe</h3><p className="muted">CSV, TSV, JSON, JSONL, or line-based TXT · bounded local processing</p></div></div><label className="file-drop">{files.length ? `${files.length} source${files.length === 1 ? '' : 's'} selected` : 'Choose one or more structured data files'}<input aria-label="Data Studio source file" multiple type="file" accept=".csv,.tsv,.json,.jsonl,.txt" onChange={event => setFiles(Array.from(event.target.files || []))} /></label>{files.length > 1 && <div className="inline-fields"><label>Combine operation<select aria-label="Data Studio combine operation" value={combineMode} onChange={event => setCombineMode(event.target.value)}><option value="append">Append</option><option value="union">Compatible union</option><option value="join">Left join</option><option value="intersect">Intersect</option><option value="subtract">Subtract</option></select></label><label>Key field<input aria-label="Data Studio join key" value={joinKey} onChange={event => setJoinKey(event.target.value)} /></label></div>}<div className="inline-fields"><label>Export format<select aria-label="Data Studio export format" value={outputFormat} onChange={event => setOutputFormat(event.target.value)}><option value="jsonl">JSONL</option><option value="json">JSON</option><option value="csv">CSV</option><option value="tsv">TSV</option><option value="txt">TXT</option></select></label><label>Recipe name<input value={recipeName} onChange={event => setRecipeName(event.target.value)} /></label></div>{recipeDirty && <p className="warning-copy" role="status">Preview reflects unsaved controls; processing uses the selected saved revision.</p>}<div className="button-row"><button disabled={!files.length} onClick={inspect}>Preview source</button><button className="primary" disabled={!files.length || !selected} title={recipeDirty ? 'Processing uses the selected saved revision; save changes to process the previewed recipe' : undefined} onClick={run}>Start processing</button></div></section><section className="panel"><div className="panel-head"><div><h3>Saved recipes</h3><p className="muted">Runs pin the selected revision.</p></div></div>{recipes.length ? <div className="list-stack">{recipes.map(recipe => <button className={selected?.id === recipe.id ? 'list-row selected' : 'list-row'} key={recipe.id} onClick={() => void reloadRecipe(recipe.id)}><span><strong>{recipe.name}</strong><small>{recipe.status} · {recipe.current_revision_id?.slice(0, 8)}</small></span><b>Open →</b></button>)}</div> : <Empty text="Save a recipe after choosing your first steps." />}<button className="primary full" onClick={saveRecipe}>Save current recipe</button></section></div>
     <section className="panel"><div className="panel-head"><div><h3>Ordered processing steps</h3><p className="muted">Each step is typed and reviewed before execution; no expressions run as Python or JavaScript.</p></div><select aria-label="Add Data Studio step" defaultValue="" onChange={event => { if (event.target.value) { addStep(event.target.value); event.target.value = '' } }}><option value="">+ Add step</option><option value="normalize">Normalize</option><option value="filter">Filter</option><option value="computed">Computed field</option><option value="dedupe">Remove duplicates</option><option value="provider_classify">Classify provider</option><option value="validate">Validate fields</option></select></div>{steps.map((step, index) => <article className="studio-block" key={index}><div className="studio-block-head"><strong>{index + 1}. {step.type}</strong><button aria-label={`Remove step ${index + 1}`} onClick={() => setDefinition(current => ({ ...current, steps: current.steps.filter((_: ApiRecord, position: number) => position !== index) }))}>×</button></div>{step.type === 'normalize' && <div className="inline-fields"><label>Fields<input value={(step.fields || []).join(', ')} onChange={event => updateStep(index, { fields: event.target.value.split(',').map((value: string) => value.trim()).filter(Boolean) })} /></label><label>Operation<select value={step.operation || 'whitespace'} onChange={event => updateStep(index, { operation: event.target.value })}><option value="email">Email address</option><option value="whitespace">Trim whitespace</option><option value="lower">Lowercase</option><option value="upper">Uppercase</option></select></label></div>}{step.type === 'dedupe' && <label>Key fields<input value={(step.fields || []).join(', ')} onChange={event => updateStep(index, { fields: event.target.value.split(',').map((value: string) => value.trim()) })} /></label>}{step.type === 'computed' && <div className="inline-fields"><label>Output field<input value={step.field || ''} onChange={event => updateStep(index, { field: event.target.value })} /></label><label>Expression<select value={step.expression?.kind || 'concat'} onChange={event => updateStep(index, { expression: { ...step.expression, kind: event.target.value } })}><option value="concat">Combine fields</option><option value="email_domain">Email domain</option><option value="provider_classify">Provider classification</option></select></label></div>}{step.type === 'filter' && <div className="inline-fields"><label>Field<input value={step.condition?.field || ''} onChange={event => updateStep(index, { condition: { ...step.condition, field: event.target.value } })} /></label><label>Operator<select value={step.condition?.op || 'present'} onChange={event => updateStep(index, { condition: { ...step.condition, op: event.target.value } })}><option value="present">Present</option><option value="missing">Missing</option><option value="contains">Contains</option><option value="equals">Equals</option></select></label></div>}{step.type === 'provider_classify' && <label>Email field<input value={step.field || 'email'} onChange={event => updateStep(index, { field: event.target.value })} /></label>}{step.type === 'validate' && <label>Required fields<input value={(step.required || []).join(', ')} onChange={event => updateStep(index, { required: event.target.value.split(',').map((value: string) => value.trim()).filter(Boolean) })} /></label>}</article>)}</section>
-    {preview && <section className="panel table-panel"><div className="panel-head"><div><h3>Preview</h3><p className="muted">Preview only · {preview.counts?.input || 0} input · {preview.counts?.output || 0} output · {preview.counts?.removed || 0} removed · {preview.counts?.errors || 0} validation errors</p></div></div><table><thead><tr>{Object.keys(preview.rows?.[0] || {}).filter(key => key !== '__source_row').map(key => <th key={key}>{key}</th>)}</tr></thead><tbody>{(preview.rows || []).slice(0, 20).map((row: ApiRecord, index: number) => <tr key={index}>{Object.keys(preview.rows?.[0] || {}).filter(key => key !== '__source_row').map(key => <td key={key}>{typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></section>}
+    {job && outputArtifact && <section className="panel"><div className="panel-head"><div><h3>Completed output</h3><p className="muted">{job.output_count} rows · {job.rejected_count} rejected · revision {job.recipe_revision_id?.slice(0, 8)}</p></div><a className="button primary" href={`/api/v1/data-studio/jobs/${job.id}/artifacts/${outputArtifact.id}`}>Download {outputArtifact.filename}</a></div><div className="inline-fields"><label>Contact destination<select aria-label="Contact destination list" value={destinationList} onChange={event => setDestinationList(event.target.value)}><option value="">Choose a list</option>{lists.map(list => <option key={list.id} value={list.id}>{list.name}</option>)}</select></label><button className="primary" disabled={!destinationList} onClick={importContacts}>Import contacts</button><label>Message revision<select aria-label="Message Studio revision" value={messageRevision} onChange={event => setMessageRevision(event.target.value)}><option value="">Choose a published message</option>{messageDocuments.flatMap(document => document.published ? [{ id: document.published.id, label: document.name }] : []).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label><button disabled={!messageRevision} onClick={previewMessage}>Preview personalization</button></div></section>}
+    {messagePreview && <section className="panel"><div className="panel-head"><div><h3>Message Studio preview</h3><p className="muted">Snapshot pinned to the selected artifact and published message revision.</p></div></div><p><strong>{messagePreview.subject}</strong></p><pre className="preview-json">{messagePreview.text}</pre></section>}
+    {preview && <section className="panel table-panel"><div className="panel-head"><div><h3>Preview</h3><p className="muted">Preview only · {preview.counts?.input || 0} input · {preview.counts?.output || 0} output · {preview.counts?.removed || 0} removed · {preview.counts?.errors || 0} validation errors</p></div></div><table><thead><tr>{Object.keys(preview.rows?.[0] || {}).filter(key => !key.startsWith('__')).map(key => <th key={key}>{key}</th>)}</tr></thead><tbody>{(preview.rows || []).slice(0, 20).map((row: ApiRecord, index: number) => <tr key={index}>{Object.keys(preview.rows?.[0] || {}).filter(key => !key.startsWith('__')).map(key => <td key={key}>{typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></section>}
   </div>
 }
 
@@ -146,6 +185,7 @@ const nodeDefaults: Record<string, WorkflowNode> = {
   ADD_TO_LIST: { id: '', kind: 'ADD_TO_LIST', label: 'Add to list', config: { list_id: '' } },
   REMOVE_FROM_LIST: { id: '', kind: 'REMOVE_FROM_LIST', label: 'Remove from list', config: { list_id: '' } },
   PREPARE_CAMPAIGN: { id: '', kind: 'PREPARE_CAMPAIGN', label: 'Prepare synthetic campaign', config: { campaign_id: '' } },
+  RUN_DATA_STUDIO: { id: '', kind: 'RUN_DATA_STUDIO', label: 'Run Data Studio recipe', config: { recipe_revision_id: '', source_job_id: '', source_artifact_id: '', destination: 'artifact' } },
   NOTE: { id: '', kind: 'NOTE', label: 'Record operator note', config: { note: '' } },
   END: { id: '', kind: 'END', label: 'End', config: {} },
 }
@@ -159,6 +199,9 @@ function Automations({ data, onRun }: { data: ApiRecord, onRun: (action: () => P
   const [segments, setSegments] = useState<ApiRecord[]>([])
   const [campaigns, setCampaigns] = useState<ApiRecord[]>([])
   const [contacts, setContacts] = useState<ApiRecord[]>([])
+  const [dataRecipes, setDataRecipes] = useState<ApiRecord[]>([])
+  const [dataJobs, setDataJobs] = useState<ApiRecord[]>([])
+  const [dataArtifacts, setDataArtifacts] = useState<Record<string, ApiRecord[]>>({})
   const [contactId, setContactId] = useState('')
   const [runs, setRuns] = useState<ApiRecord[]>([])
   const items: ApiRecord[] = data.items || []
@@ -177,6 +220,8 @@ function Automations({ data, onRun }: { data: ApiRecord, onRun: (action: () => P
     void api<ApiRecord>('/segments').then(result => setSegments(result.items || []))
     void api<ApiRecord>('/campaigns').then(result => setCampaigns(result.items || []))
     void api<ApiRecord>('/contacts').then(result => setContacts(result.items || []))
+    void api<ApiRecord>('/data-studio/recipes').then(result => setDataRecipes(result.items || []))
+    void api<ApiRecord>('/data-studio/jobs?limit=100').then(result => setDataJobs(result.items || []))
   }, [])
   useEffect(() => { if (selected) void refresh(selected) }, [selected])
 
@@ -201,6 +246,11 @@ function Automations({ data, onRun }: { data: ApiRecord, onRun: (action: () => P
       nodes: current.nodes.filter((node: WorkflowNode) => node.id !== id),
       edges: current.edges.filter((edge: WorkflowEdge) => edge.source !== id && edge.target !== id),
     }))
+  }
+  const loadDataArtifacts = async (jobId: string) => {
+    if (!jobId || dataArtifacts[jobId]) return
+    const result = await api<ApiRecord>(`/data-studio/jobs/${jobId}`)
+    setDataArtifacts(current => ({ ...current, [jobId]: result.artifacts || [] }))
   }
   const create = () => onRun(async () => {
     const created = await api<ApiRecord>('/automations', { method: 'POST', body: JSON.stringify({ name }) })
@@ -253,10 +303,11 @@ function Automations({ data, onRun }: { data: ApiRecord, onRun: (action: () => P
             {node.kind === 'WAIT' && <label>Wait seconds<input type="number" min="0" max="604800" value={node.config.seconds || 0} onChange={event => updateNode(node.id, { config: { ...node.config, seconds: Number(event.target.value) } })} /></label>}
             {['ADD_TO_LIST', 'REMOVE_FROM_LIST'].includes(node.kind) && <label>Static list<select value={node.config.list_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, list_id: event.target.value } })}><option value="">Choose a list</option>{lists.map(list => <option key={list.id} value={list.id}>{list.name}</option>)}</select></label>}
             {node.kind === 'PREPARE_CAMPAIGN' && <label>Synthetic campaign<select value={node.config.campaign_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, campaign_id: event.target.value } })}><option value="">Choose a campaign</option>{campaigns.map(campaign => <option key={campaign.id} value={campaign.id}>{campaign.name} · {campaign.status}</option>)}</select></label>}
+            {node.kind === 'RUN_DATA_STUDIO' && <><label>Data Studio recipe revision<select value={node.config.recipe_revision_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, recipe_revision_id: event.target.value } })}><option value="">Choose a pinned revision</option>{dataRecipes.map(recipe => <option key={recipe.current_revision_id} value={recipe.current_revision_id}>{recipe.name} · {recipe.current_revision_id?.slice(0, 8)}</option>)}</select></label><label>Source job<select value={node.config.source_job_id || ''} onChange={event => { updateNode(node.id, { config: { ...node.config, source_job_id: event.target.value, source_artifact_id: '' } }); void loadDataArtifacts(event.target.value) }}><option value="">Choose a completed job</option>{dataJobs.filter(job => job.status === 'completed').map(job => <option key={job.id} value={job.id}>{job.source_filename} · {job.id.slice(0, 8)}</option>)}</select></label><label>Source artifact<select value={node.config.source_artifact_id || ''} onChange={event => updateNode(node.id, { config: { ...node.config, source_artifact_id: event.target.value } })}><option value="">Choose an artifact</option>{(dataArtifacts[node.config.source_job_id] || []).filter(artifact => artifact.kind === 'output').map(artifact => <option key={artifact.id} value={artifact.id}>{artifact.filename} · {artifact.id.slice(0, 8)}</option>)}</select></label></>}
             {node.kind === 'NOTE' && <label>Operator note<input value={node.config.note || ''} onChange={event => updateNode(node.id, { config: { ...node.config, note: event.target.value } })} /></label>}
           </div>)}
         </div>
-        <div className="button-row"><select aria-label="Add workflow node" defaultValue="" onChange={event => { if (event.target.value) { addNode(event.target.value); event.target.value = '' } }}><option value="">+ Add node</option><option value="CONDITION">Check condition</option><option value="WAIT">Wait</option><option value="ADD_TO_LIST">Add to list</option><option value="REMOVE_FROM_LIST">Remove from list</option><option value="PREPARE_CAMPAIGN">Prepare synthetic campaign</option><option value="NOTE">Record note</option><option value="END">End</option></select><button onClick={save}>Save draft</button><button onClick={() => action('validate', 'Workflow validated')}>Validate</button><button onClick={() => action('publish', 'Revision published')}>Publish</button><button className="primary" onClick={() => action('activate', 'Workflow activated')}>Activate</button><button onClick={() => action('pause', 'Workflow paused')}>Pause</button></div>
+        <div className="button-row"><select aria-label="Add workflow node" defaultValue="" onChange={event => { if (event.target.value) { addNode(event.target.value); event.target.value = '' } }}><option value="">+ Add node</option><option value="CONDITION">Check condition</option><option value="WAIT">Wait</option><option value="ADD_TO_LIST">Add to list</option><option value="REMOVE_FROM_LIST">Remove from list</option><option value="PREPARE_CAMPAIGN">Prepare synthetic campaign</option><option value="RUN_DATA_STUDIO">Run Data Studio recipe</option><option value="NOTE">Record note</option><option value="END">End</option></select><button onClick={save}>Save draft</button><button onClick={() => action('validate', 'Workflow validated')}>Validate</button><button onClick={() => action('publish', 'Revision published')}>Publish</button><button className="primary" onClick={() => action('activate', 'Workflow activated')}>Activate</button><button onClick={() => action('pause', 'Workflow paused')}>Pause</button></div>
         <div className="edge-editor"><div className="panel-head"><h3>Connections</h3><span className="muted">Keyboard-accessible edge editor</span></div>
           {nodes.map(node => { const outgoing = edges.filter(edge => edge.source === node.id); return <div className="edge-row" key={'edges-' + node.id}><strong>{node.label}</strong>{node.kind === 'CONDITION' ? ['true', 'false'].map(branch => <label key={branch}>{branch.toUpperCase()}<select aria-label={branch + ' connection from ' + node.label} value={outgoing.find(edge => edge.branch === branch)?.target || ''} onChange={event => connect(node.id, event.target.value || undefined, branch)}><option value="">Choose next node</option>{nodes.filter(target => target.id !== node.id).map(target => <option key={target.id} value={target.id}>{target.label}</option>)}</select></label>) : <select aria-label={'Connection from ' + node.label} value={outgoing.find(edge => edge.branch === 'default')?.target || ''} onChange={event => connect(node.id, event.target.value || undefined, 'default')}><option value="">Choose next node</option>{nodes.filter(target => target.id !== node.id).map(target => <option key={target.id} value={target.id}>{target.label}</option>)}</select>}</div>})}
           {edges.length > 0 && <p className="muted">{edges.length} explicit connections · {edges.map(edge => edge.source + ' → ' + edge.target + ' (' + (edge.branch || 'default') + ')').join(' · ')}</p>}
