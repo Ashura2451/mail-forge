@@ -1,5 +1,22 @@
 # System changelog
 
+## 2026-10-28 — Campaign operations workspace
+
+- Added `CampaignOperationsService` as the shared browser/API/CLI orchestration
+  boundary for campaign drafts, audience and message preparation, sender
+  account preflight, schedules, synthetic controls, drilldowns, and bounded
+  exports.
+- Added optimistic draft editing, explicit schedule audit events, IANA/DST
+  validation, provider readiness findings, durable audience preparation, and
+  formula-safe recipient CSV export without creating a second campaign engine.
+- Added the responsive Campaign Operations browser workspace and CLI parity
+  commands. The execution boundary remains local synthetic simulation only;
+  no live provider or unrestricted delivery path was added.
+- Focused and full local validation pass: 224 Python tests, type compilation,
+  and Oxlint (with the existing five React effect warnings). Vite build remains
+  environment-blocked here because the installed Vite/Rolldown requires Node
+  20+ while this runner provides Node 18.
+
 ## 2026-10-28 — Operational intelligence and reporting
 
 - Added schema-free `ReportingService` metric definitions and bounded,

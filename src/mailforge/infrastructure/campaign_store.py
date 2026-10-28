@@ -2230,6 +2230,17 @@ class CampaignStore:
                     now,
                 ),
             )
+            self.record_event(
+                connection,
+                "campaign",
+                campaign_id,
+                "campaign_schedule_saved",
+                {
+                    "mode": schedule.mode.value,
+                    "timezone": schedule.timezone,
+                    "catch_up_policy": schedule.catch_up_policy.value,
+                },
+            )
 
     def get_schedule(self, campaign_id: str) -> sqlite3.Row | None:
         with self.connect() as connection:
@@ -3130,6 +3141,73 @@ class CampaignStore:
         if row is None:
             raise KeyError(f"campaign not found: {campaign_id}")
         return row
+
+    def update_campaign_draft(
+        self,
+        campaign_id: str,
+        *,
+        expected_updated_at: str | None,
+        name: str,
+        description: str,
+        sender_config_ref: str,
+        template_ref: str,
+        audience_list_id: str,
+        audience_source_type: str,
+        audience_source_id: str,
+        audience_revision_id: str | None,
+        audience_run_key: str,
+        message_revision_id: str | None,
+        provider_account_ref: str | None,
+        configuration: dict[str, Any],
+    ) -> None:
+        """Atomically update editable campaign configuration while still a draft."""
+        _assert_no_secrets(configuration, "campaign")
+        _assert_safe_reference(sender_config_ref, "sender_config_ref")
+        _assert_safe_reference(template_ref, "template_ref")
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT status, updated_at FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"campaign not found: {campaign_id}")
+            if row["status"] != CampaignStatus.DRAFT.value:
+                raise ValueError("only draft campaigns can be edited")
+            if expected_updated_at is not None and row["updated_at"] != expected_updated_at:
+                raise ValueError("campaign changed since it was loaded; reload before saving")
+            now = utc_now()
+            if now <= row["updated_at"]:
+                now = (
+                    datetime.fromisoformat(row["updated_at"]) + timedelta(microseconds=1)
+                ).isoformat()
+            connection.execute(
+                "UPDATE campaigns SET name=?, description=?, sender_config_ref=?, template_ref=?, "
+                "audience_list_id=?, audience_source_type=?, audience_source_id=?, "
+                "audience_revision_id=?, audience_run_key=?, message_revision_id=?, "
+                "provider_account_ref=?, configuration_json=?, updated_at=? WHERE id=?",
+                (
+                    name,
+                    description,
+                    sender_config_ref,
+                    template_ref,
+                    audience_list_id,
+                    audience_source_type,
+                    audience_source_id,
+                    audience_revision_id,
+                    audience_run_key,
+                    message_revision_id,
+                    provider_account_ref,
+                    _json(configuration),
+                    now,
+                    campaign_id,
+                ),
+            )
+            self.record_event(
+                connection,
+                "campaign",
+                campaign_id,
+                "campaign_draft_updated",
+                {"name": name, "audience_source_type": audience_source_type},
+            )
 
     def transition_campaign(
         self,
