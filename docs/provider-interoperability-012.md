@@ -7,7 +7,7 @@ or production-send authorization.
 
 ## Implemented boundary
 
-`ProviderProfile` is a secret-free durable record in `CampaignStore` schema 6.
+`ProviderProfile` is a secret-free durable record in `CampaignStore` schema 11.
 It identifies SMTP or IMAP, endpoint, TLS mode, authentication method,
 mailbox, sender-policy reference, limits, and a symbolic credential reference.
 `ProviderService` turns that record into runtime adapters; it does not own
@@ -16,8 +16,10 @@ campaign, contact, suppression, or inbound-processing state.
 Credential values are resolved only at runtime by an injected resolver. The
 local resolver supports `env:NAME`; tests use an in-memory `test:NAME` resolver.
 SQLite rows, backups, diagnostics, CLI output, campaign state, and provider
-profiles contain references and redacted status only. OAuth2 is represented as
-an explicit unsupported authentication method; no OAuth token flow is claimed.
+profiles contain references and redacted status only. Provider Operations adds
+OAuth2 authorization-code/PKCE state handling, token-expiry and refresh seams,
+and XOAUTH2 transport support; token exchange and commercial-provider
+qualification remain external or fixture-only unless separately authorized.
 
 The CLI exposes safe profile operations:
 
@@ -30,9 +32,11 @@ mailforge provider local-diagnostic --database PATH --ref PROFILE
 mailforge provider diagnostics --database PATH [--ref PROFILE]
 ```
 
-`local-diagnostic` accepts loopback endpoints only. There is no provider CLI
-send command. The existing campaign coordinator remains the only route from a
-prepared campaign to an SMTP transport and still requires campaign
+`local-diagnostic` accepts loopback endpoints only. Provider Operations also
+exposes account listing, capability inspection, explicit external diagnostics,
+and a separately authorized one-shot `test-send`. The existing campaign
+coordinator remains the only route from a prepared campaign to an SMTP
+transport and still requires campaign
 authorization, eligibility, the provider's exact sender-policy association,
 leases, pacing, and the live-send gate. Arbitrary profile metadata is rejected
 instead of being persisted, keeping the durable profile schema explicit and
@@ -83,14 +87,17 @@ execution. No public endpoint, mailbox, credential file, or real recipient was
 used.
 
 IMAP STARTTLS is rejected explicitly rather than being treated as implicit TLS.
-The following remain external or explicitly pending: provider-specific OAuth2,
-provider-advertised or actual quota discovery, Gmail/Microsoft 365 behavior,
+The following remain external or explicitly pending: commercial-provider OAuth
+consent/token exchange, provider-advertised or actual quota discovery,
+Gmail/Microsoft 365 qualification,
 DKIM signing, SPF/DMARC verification, inbox placement, remote mailbox
 acknowledgment, production worker supervision, and controlled real-provider
 qualification. Future qualification requires a separately authorized,
 single-destination workflow with an approved provider sandbox, credential
 source, sender identity, rollback/reconciliation evidence, and operator
 approval.
+
+The 019 implementation record is [`docs/provider-operations-019.md`](provider-operations-019.md).
 
 Relevant protocol references are [RFC 6409](https://www.rfc-editor.org/rfc/rfc6409),
 [RFC 8314](https://www.rfc-editor.org/rfc/rfc8314),

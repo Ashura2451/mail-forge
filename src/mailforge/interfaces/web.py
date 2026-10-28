@@ -30,6 +30,7 @@ from mailforge.application.ingest import iter_raw_values
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
+from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.domain.campaign import CampaignStatus, ContactCandidate
@@ -37,7 +38,9 @@ from mailforge.domain.email import extract_addresses, normalize_email, validate_
 from mailforge.domain.outbound import SenderPolicy, TemplateDefinition
 from mailforge.domain.provider import (
     AuthenticationMethod,
+    ExternalOperationGrant,
     ProviderKind,
+    ProviderOperation,
     ProviderProfile,
     TLSMode,
 )
@@ -64,6 +67,7 @@ class CampaignInput(BaseModel):
     subject: str = Field(default="Synthetic Mailforge campaign", max_length=200)
     text: str = Field(default="Hello {{ email }}", max_length=100_000)
     message_revision_id: str | None = None
+    provider_account_ref: str | None = None
 
 
 class MessageDocumentInput(BaseModel):
@@ -133,6 +137,61 @@ class ProviderInput(BaseModel):
     auth_method: AuthenticationMethod = AuthenticationMethod.PASSWORD
     mailbox: str = "INBOX"
     sender_policy_ref: str | None = None
+    display_name: str | None = Field(default=None, max_length=160)
+    sender_email: str | None = None
+    pacing_per_minute: int = Field(default=60, ge=1, le=100_000)
+    max_concurrency: int = Field(default=1, ge=1, le=100)
+    inbound_enabled: bool = False
+
+
+class ProviderAccountUpdateInput(BaseModel):
+    status: str | None = Field(default=None, max_length=64)
+    enabled: bool | None = None
+    outbound_enabled: bool | None = None
+    inbound_enabled: bool | None = None
+    display_name: str | None = Field(default=None, max_length=160)
+
+
+class ProviderDiagnosticInput(BaseModel):
+    operation: ProviderOperation
+    authorization_ref: str | None = Field(default=None, max_length=200)
+    purpose: str | None = Field(default=None, max_length=500)
+    sender: str | None = None
+    recipient: str | None = None
+    max_submissions: int = Field(default=0, ge=0, le=1)
+    expires_at: str | None = None
+
+
+class ProviderInboundInput(BaseModel):
+    mailbox: str = Field(min_length=1, max_length=240)
+    max_fetch: int = Field(default=100, ge=1, le=10_000)
+
+
+class ProviderTestSendInput(BaseModel):
+    sender: str
+    recipient: str
+    message: str = Field(min_length=1, max_length=10_000_000)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    authorization_ref: str = Field(min_length=1, max_length=200)
+    purpose: str = Field(min_length=1, max_length=500)
+    expires_at: str
+    message_revision_id: str | None = None
+
+
+class ProviderOAuthStartInput(BaseModel):
+    provider_key: str = Field(min_length=1, max_length=80)
+    client_id: str = Field(min_length=1, max_length=300)
+    redirect_uri: str = Field(min_length=1, max_length=500)
+    scopes: list[str] = Field(default_factory=list, max_length=20)
+    authorization_endpoint: str = Field(min_length=1, max_length=500)
+    token_endpoint: str = Field(min_length=1, max_length=500)
+
+
+class ProviderOAuthCallbackInput(BaseModel):
+    state: str = Field(min_length=1, max_length=300)
+    redirect_uri: str = Field(min_length=1, max_length=500)
+    code: str = Field(min_length=1, max_length=4096)
+    identity: str | None = Field(default=None, max_length=320)
 
 
 class ReviewDecision(BaseModel):
@@ -356,6 +415,7 @@ class WebRuntime:
         )
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
+        self.provider_operations = ProviderOperationsService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
         self.automation = AutomationService(
             self.store, campaigns=self.campaigns, message_studio=self.message_studio
@@ -1102,6 +1162,7 @@ def create_app(
                 audience_source_id=source_id,
                 audience_revision_id=payload.segment_revision_id,
                 message_revision_id=payload.message_revision_id,
+                provider_account_ref=payload.provider_account_ref,
             )
         except KeyError:
             return _error(404, "list_not_found", "audience list was not found")
@@ -1459,9 +1520,17 @@ def create_app(
     @app.get(f"{API_PREFIX}/providers")
     async def providers():
         return {
-            "items": runtime.providers.list_profiles(),
-            "diagnostics": runtime.providers.diagnostics(None),
+            "items": runtime.provider_operations.accounts(),
+            "diagnostics": runtime.provider_operations.diagnostics(None),
         }
+
+    @app.get(f"{API_PREFIX}/providers/capabilities")
+    async def provider_capabilities():
+        return {"items": runtime.provider_operations.capabilities()}
+
+    @app.get(f"{API_PREFIX}/providers/accounts")
+    async def provider_accounts():
+        return {"items": runtime.provider_operations.accounts()}
 
     @app.get(f"{API_PREFIX}/providers/{{provider_ref}}/credentials")
     async def provider_credentials(provider_ref: str):
@@ -1475,17 +1544,161 @@ def create_app(
     @app.post(f"{API_PREFIX}/providers")
     async def register_provider(payload: ProviderInput):
         try:
-            profile = ProviderProfile(**payload.model_dump())
+            values = payload.model_dump()
+            account_options = {
+                "display_name": values.pop("display_name"),
+                "sender_email": values.pop("sender_email"),
+                "pacing_per_minute": values.pop("pacing_per_minute"),
+                "max_concurrency": values.pop("max_concurrency"),
+                "inbound_enabled": values.pop("inbound_enabled"),
+            }
+            profile = ProviderProfile(**values)
             profile.validate()
-            runtime.store.register_provider_profile(profile)
-            return {"ref": profile.ref, "registered": True}
-        except ValueError as error:
+            return {
+                "account": runtime.provider_operations.register(profile, **account_options),
+                "registered": True,
+            }
+        except (KeyError, ValueError) as error:
             return _error(400, "provider_invalid", str(error))
+
+    @app.patch(f"{API_PREFIX}/providers/{{provider_ref}}")
+    async def update_provider(provider_ref: str, payload: ProviderAccountUpdateInput):
+        try:
+            values = payload.model_dump(exclude_none=True)
+            account = runtime.provider_operations.account(provider_ref)
+            if "status" in values or "enabled" in values:
+                account = runtime.store.set_provider_account_status(
+                    provider_ref,
+                    values.pop("status", account["status"]),
+                    enabled=values.pop("enabled", None),
+                )
+            if values:
+                profile = runtime.provider_operations.providers.profile(provider_ref)
+                runtime.provider_operations.register(
+                    profile,
+                    display_name=values.get("display_name", account["display_name"]),
+                    sender_email=account.get("sender_email"),
+                    pacing_per_minute=account["pacing_per_minute"],
+                    max_concurrency=account["max_concurrency"],
+                    outbound_enabled=values.get("outbound_enabled", account["outbound_enabled"]),
+                    inbound_enabled=values.get("inbound_enabled", account["inbound_enabled"]),
+                )
+            return runtime.provider_operations.account(provider_ref)
+        except (KeyError, ValueError) as error:
+            return _error(400, "provider_update_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/diagnostics")
+    async def provider_diagnostic(provider_ref: str, payload: ProviderDiagnosticInput):
+        try:
+            account = runtime.provider_operations.account(provider_ref)
+            grant = None
+            if payload.authorization_ref:
+                if not payload.expires_at or not payload.purpose:
+                    return _error(
+                        400,
+                        "authorization_incomplete",
+                        "external diagnostics require purpose and expiry",
+                    )
+                grant = ExternalOperationGrant(
+                    account_ref=provider_ref,
+                    operation=payload.operation,
+                    host=account["host"],
+                    port=account["port"],
+                    purpose=payload.purpose,
+                    sender=payload.sender,
+                    recipient=payload.recipient,
+                    max_submissions=payload.max_submissions,
+                    expires_at=payload.expires_at,
+                    authorization_ref=payload.authorization_ref,
+                )
+            return runtime.provider_operations.diagnostic(
+                provider_ref, payload.operation, grant=grant
+            )
+        except (KeyError, ValueError, PermissionError) as error:
+            return _error(400, "provider_diagnostic_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/inbound")
+    async def configure_provider_inbound(provider_ref: str, payload: ProviderInboundInput):
+        try:
+            return runtime.provider_operations.configure_inbound(
+                provider_ref, mailbox=payload.mailbox, max_fetch=payload.max_fetch
+            )
+        except (KeyError, ValueError) as error:
+            return _error(400, "provider_inbound_invalid", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/oauth/start")
+    async def provider_oauth_start(provider_ref: str, payload: ProviderOAuthStartInput):
+        try:
+            runtime.provider_operations.account(provider_ref)
+            return runtime.provider_operations.oauth.start(
+                account_ref=provider_ref,
+                provider_key=payload.provider_key,
+                client_id=payload.client_id,
+                redirect_uri=payload.redirect_uri,
+                scopes=tuple(payload.scopes),
+                authorization_endpoint=payload.authorization_endpoint,
+                token_endpoint=payload.token_endpoint,
+            )
+        except (KeyError, ValueError) as error:
+            return _error(400, "provider_oauth_start_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/oauth/callback")
+    async def provider_oauth_callback(provider_ref: str, payload: ProviderOAuthCallbackInput):
+        try:
+            result = runtime.provider_operations.oauth.complete(
+                state=payload.state,
+                redirect_uri=payload.redirect_uri,
+                code=payload.code,
+                identity=payload.identity,
+            )
+            if result["account_ref"] != provider_ref:
+                return _error(
+                    400, "provider_oauth_identity_mismatch", "OAuth flow belongs to another account"
+                )
+            return result
+        except ValueError as error:
+            return _error(400, "provider_oauth_callback_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/test-send")
+    async def provider_test_send(provider_ref: str, payload: ProviderTestSendInput):
+        try:
+            account = runtime.provider_operations.account(provider_ref)
+            grant = ExternalOperationGrant(
+                account_ref=provider_ref,
+                operation=ProviderOperation.CONTROLLED_TEST_SEND,
+                host=account["host"],
+                port=account["port"],
+                purpose=payload.purpose,
+                sender=payload.sender,
+                recipient=payload.recipient,
+                max_submissions=1,
+                expires_at=payload.expires_at,
+                authorization_ref=payload.authorization_ref,
+            )
+            return runtime.provider_operations.controlled_test_send(
+                ref=provider_ref,
+                sender=payload.sender,
+                recipient=payload.recipient,
+                message=payload.message,
+                idempotency_key=payload.idempotency_key,
+                grant=grant,
+                message_revision_id=payload.message_revision_id,
+            )
+        except (KeyError, ValueError, PermissionError) as error:
+            return _error(400, "provider_test_send_failed", str(error))
+
+    @app.get(f"{API_PREFIX}/providers/{{provider_ref}}/tests")
+    async def provider_tests(provider_ref: str):
+        try:
+            runtime.provider_operations.account(provider_ref)
+            return {"items": runtime.store.list_provider_tests(provider_ref)}
+        except KeyError as error:
+            return _error(404, "provider_not_found", str(error))
 
     @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/validate")
     async def validate_provider(provider_ref: str):
         try:
-            return runtime.providers.validate(provider_ref)
+            return runtime.provider_operations.validate(provider_ref)
         except (KeyError, ValueError) as error:
             return _error(400, "provider_invalid", str(error))
 

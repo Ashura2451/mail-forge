@@ -1,5 +1,22 @@
 # System changelog
 
+## 2026-10-28 — Provider Operations
+
+- Added schema 11 provider accounts, separate inbound settings, expiring
+  operation grants, OAuth-flow metadata, and durable controlled-test evidence.
+- Added the canonical `ProviderOperationsService` with generic SMTP/IMAP,
+  Google Workspace/Gmail, and Microsoft 365/Outlook capability presets;
+  authorization-code/PKCE state handling; OAuth refresh seams; XOAUTH2 SMTP
+  and IMAP authentication; account lifecycle; diagnostics; and inbound setup.
+- Added one-shot, idempotent controlled test-send semantics with explicit
+  sender/recipient authorization and phase-aware SMTP evidence. Simulation and
+  live campaign paths remain separate; ambiguous post-DATA outcomes are not
+  replayed automatically.
+- Added provider account API/CLI operations and a browser account workspace.
+- Validation is local and synthetic/fixture-based. No real provider,
+  credential, mailbox, or recipient data was accessed; real-provider
+  qualification was not performed.
+
 ## 2026-10-28 — Message Studio
 
 - Added schema 10 durable Message Studio documents, immutable revisions,

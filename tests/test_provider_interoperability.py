@@ -26,10 +26,7 @@ from mailforge.domain.provider import (
     TLSMode,
 )
 from mailforge.infrastructure.campaign_store import CampaignStore
-from mailforge.infrastructure.credentials import (
-    MappingCredentialResolver,
-    UnsupportedAuthenticationMechanism,
-)
+from mailforge.infrastructure.credentials import MappingCredentialResolver
 from mailforge.infrastructure.smtp import (
     DeliveryStatus,
     LiveSendGate,
@@ -578,7 +575,7 @@ def test_unsupported_imap_starttls_profile_is_rejected_explicitly(tmp_path):
         )
 
 
-def test_unsupported_oauth2_fails_before_smtp_connection(tmp_path):
+def test_oauth2_profile_is_validated_before_smtp_connection(tmp_path):
     store = CampaignStore(tmp_path / "oauth.sqlite3")
     store.register_provider_profile(
         ProviderProfile(
@@ -592,12 +589,10 @@ def test_unsupported_oauth2_fails_before_smtp_connection(tmp_path):
             tls_mode=TLSMode.STARTTLS,
         )
     )
-    assert ProviderService(store).validate("smtp-oauth")["status"] == "authentication_unsupported"
-    with pytest.raises(
-        UnsupportedAuthenticationMechanism, match="OAuth2 authentication is not implemented"
-    ):
-        ProviderService(store).smtp_pool(
-            "smtp-oauth",
-            MappingCredentialResolver({"test:oauth": "synthetic-token"}),
-            gate=LiveSendGate(enabled=True),
-        )
+    assert ProviderService(store).validate("smtp-oauth")["status"] == "configuration_valid"
+    pool = ProviderService(store).smtp_pool(
+        "smtp-oauth",
+        MappingCredentialResolver({"test:oauth": '{"access_token":"synthetic-token"}'}),
+        gate=LiveSendGate(enabled=True),
+    )
+    assert pool.configs[0].auth_method is AuthenticationMethod.OAUTH2

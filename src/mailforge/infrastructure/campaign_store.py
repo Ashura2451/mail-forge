@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -934,6 +934,88 @@ CREATE INDEX IF NOT EXISTS idx_message_campaign_snapshots_campaign
 ON message_campaign_snapshots(campaign_id, run_key);
 """
 
+MIGRATION_11_SQL = """
+CREATE TABLE IF NOT EXISTS provider_accounts (
+    ref TEXT PRIMARY KEY REFERENCES provider_profiles(ref) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    sender_email TEXT,
+    status TEXT NOT NULL DEFAULT 'not_configured' CHECK(status IN (
+        'not_configured', 'configuration_validated', 'locally_protocol_tested',
+        'external_connected', 'authentication_verified', 'ready', 'suspended',
+        'failed', 'reauthorization_required', 'external_qualification_pending'
+    )),
+    pacing_per_minute INTEGER NOT NULL DEFAULT 60 CHECK(pacing_per_minute > 0),
+    max_concurrency INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrency > 0),
+    outbound_enabled INTEGER NOT NULL DEFAULT 1 CHECK(outbound_enabled IN (0, 1)),
+    inbound_enabled INTEGER NOT NULL DEFAULT 0 CHECK(inbound_enabled IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_inbound_settings (
+    account_ref TEXT PRIMARY KEY REFERENCES provider_accounts(ref) ON DELETE CASCADE,
+    mailbox TEXT NOT NULL DEFAULT 'INBOX',
+    read_only INTEGER NOT NULL DEFAULT 1 CHECK(read_only IN (0, 1)),
+    max_fetch INTEGER NOT NULL DEFAULT 100 CHECK(max_fetch > 0),
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_operation_grants (
+    id TEXT PRIMARY KEY,
+    account_ref TEXT NOT NULL REFERENCES provider_accounts(ref) ON DELETE CASCADE,
+    operation TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    purpose TEXT NOT NULL,
+    sender TEXT,
+    recipient TEXT,
+    max_submissions INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    authorization_ref TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_grants_account
+ON provider_operation_grants(account_ref, expires_at DESC);
+CREATE TABLE IF NOT EXISTS provider_test_submissions (
+    id TEXT PRIMARY KEY,
+    account_ref TEXT NOT NULL REFERENCES provider_accounts(ref),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    sender TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    message_revision_id TEXT,
+    status TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    response_code INTEGER,
+    external_access INTEGER NOT NULL DEFAULT 0 CHECK(external_access IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_tests_account
+ON provider_test_submissions(account_ref, created_at DESC);
+CREATE TABLE IF NOT EXISTS provider_oauth_flows (
+    id TEXT PRIMARY KEY,
+    account_ref TEXT NOT NULL REFERENCES provider_accounts(ref) ON DELETE CASCADE,
+    state_hash TEXT NOT NULL UNIQUE,
+    pkce_challenge TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    scopes_json TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    identity TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_provider_oauth_flows_expiry
+ON provider_oauth_flows(expires_at, status);
+INSERT OR IGNORE INTO provider_accounts(
+    ref, display_name, sender_email, status, pacing_per_minute, max_concurrency,
+    outbound_enabled, inbound_enabled, created_at, updated_at
+)
+SELECT ref, ref, NULL, 'not_configured', 60, 1, enabled, 0, created_at, updated_at
+FROM provider_profiles;
+INSERT OR IGNORE INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at)
+SELECT ref, COALESCE(mailbox, 'INBOX'), 1, 100, updated_at FROM provider_profiles;
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1118,6 +1200,38 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (10, utc_now()),
                 )
+                current = 10
+            if current < 11:
+                columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(campaigns)")
+                }
+                if "provider_account_ref" not in columns:
+                    connection.execute("ALTER TABLE campaigns ADD COLUMN provider_account_ref TEXT")
+                diagnostic_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(provider_diagnostics)")
+                }
+                if "operation" not in diagnostic_columns:
+                    connection.execute(
+                        "ALTER TABLE provider_diagnostics ADD COLUMN operation TEXT NOT NULL DEFAULT 'local_protocol'"
+                    )
+                if "external_access" not in diagnostic_columns:
+                    connection.execute(
+                        "ALTER TABLE provider_diagnostics ADD COLUMN external_access INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "correlation_id" not in diagnostic_columns:
+                    connection.execute(
+                        "ALTER TABLE provider_diagnostics ADD COLUMN correlation_id TEXT"
+                    )
+                if "metadata_json" not in diagnostic_columns:
+                    connection.execute(
+                        "ALTER TABLE provider_diagnostics ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                    )
+                self._apply_migration_11(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (11, utc_now()),
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1185,6 +1299,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_10(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_10_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_11(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_11_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
@@ -1359,6 +1480,204 @@ class CampaignStore:
                 ),
             )
 
+    def upsert_provider_account(
+        self,
+        ref: str,
+        *,
+        display_name: str | None = None,
+        sender_email: str | None = None,
+        status: str = "not_configured",
+        pacing_per_minute: int = 60,
+        max_concurrency: int = 1,
+        outbound_enabled: bool = True,
+        inbound_enabled: bool = False,
+    ) -> dict[str, Any]:
+        _assert_safe_reference(ref, "provider_account.ref")
+        if not display_name or not display_name.strip():
+            display_name = ref
+        if sender_email is not None:
+            sender_email = _validated_email(sender_email)
+        if pacing_per_minute <= 0 or max_concurrency <= 0:
+            raise ValueError("provider account limits must be positive")
+        now = utc_now()
+        with self.transaction(immediate=True) as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM provider_profiles WHERE ref = ?", (ref,)
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(f"provider profile not found: {ref}")
+            connection.execute(
+                "INSERT INTO provider_accounts(ref, display_name, sender_email, status, pacing_per_minute, "
+                "max_concurrency, outbound_enabled, inbound_enabled, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(ref) DO UPDATE SET display_name=excluded.display_name, "
+                "sender_email=excluded.sender_email, status=excluded.status, "
+                "pacing_per_minute=excluded.pacing_per_minute, max_concurrency=excluded.max_concurrency, "
+                "outbound_enabled=excluded.outbound_enabled, inbound_enabled=excluded.inbound_enabled, "
+                "updated_at=excluded.updated_at",
+                (
+                    ref,
+                    display_name.strip(),
+                    sender_email,
+                    status,
+                    pacing_per_minute,
+                    max_concurrency,
+                    int(outbound_enabled),
+                    int(inbound_enabled),
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
+                "VALUES (?, 'INBOX', 1, 100, ?) ON CONFLICT(account_ref) DO NOTHING",
+                (ref, now),
+            )
+        return self.get_provider_account(ref)
+
+    def get_provider_account(self, ref: str) -> dict[str, Any]:
+        _assert_safe_reference(ref, "provider_account.ref")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT a.*, p.kind, p.host, p.port, p.username, p.credential_ref, p.tls_mode, "
+                "p.auth_method, p.mailbox, p.sender_policy_ref, p.timeout_seconds, "
+                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled "
+                "FROM provider_accounts a JOIN provider_profiles p ON p.ref = a.ref WHERE a.ref = ?",
+                (ref,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"provider account not found: {ref}")
+            inbound = connection.execute(
+                "SELECT * FROM provider_inbound_settings WHERE account_ref = ?", (ref,)
+            ).fetchone()
+        result = dict(row)
+        if inbound is not None:
+            result["inbound"] = dict(inbound)
+        result["profile_enabled"] = bool(result["profile_enabled"])
+        result["outbound_enabled"] = bool(result["outbound_enabled"])
+        result["inbound_enabled"] = bool(result["inbound_enabled"])
+        return result
+
+    def list_provider_accounts(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            refs = [
+                row["ref"]
+                for row in connection.execute(
+                    "SELECT ref FROM provider_accounts ORDER BY display_name, ref"
+                )
+            ]
+        return [self.get_provider_account(ref) for ref in refs]
+
+    def set_provider_account_status(
+        self, ref: str, status: str, *, enabled: bool | None = None
+    ) -> dict[str, Any]:
+        _assert_safe_reference(ref, "provider_account.ref")
+        with self.transaction(immediate=True) as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM provider_accounts WHERE ref = ?", (ref,)
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(f"provider account not found: {ref}")
+            connection.execute(
+                "UPDATE provider_accounts SET status = ?, updated_at = ? WHERE ref = ?",
+                (status, utc_now(), ref),
+            )
+            if enabled is not None:
+                connection.execute(
+                    "UPDATE provider_profiles SET enabled = ?, updated_at = ? WHERE ref = ?",
+                    (int(enabled), utc_now(), ref),
+                )
+        return self.get_provider_account(ref)
+
+    def upsert_provider_inbound_settings(
+        self, ref: str, *, mailbox: str, read_only: bool = True, max_fetch: int = 100
+    ) -> dict[str, Any]:
+        _assert_safe_reference(ref, "provider_inbound.account_ref")
+        if not mailbox.strip() or max_fetch <= 0:
+            raise ValueError("inbound mailbox and fetch limit are required")
+        with self.transaction(immediate=True) as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM provider_accounts WHERE ref = ?", (ref,)
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(f"provider account not found: {ref}")
+            connection.execute(
+                "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_ref) DO UPDATE SET mailbox=excluded.mailbox, "
+                "read_only=excluded.read_only, max_fetch=excluded.max_fetch, updated_at=excluded.updated_at",
+                (ref, mailbox.strip(), int(read_only), max_fetch, utc_now()),
+            )
+        return self.get_provider_account(ref)["inbound"]
+
+    def record_provider_operation_grant(
+        self,
+        *,
+        account_ref: str,
+        operation: str,
+        host: str,
+        port: int,
+        purpose: str,
+        sender: str | None,
+        recipient: str | None,
+        max_submissions: int,
+        expires_at: str,
+        authorization_ref: str,
+    ) -> str:
+        _assert_safe_reference(account_ref, "provider_grant.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
+        _assert_no_secrets(
+            {
+                "operation": operation,
+                "host": host,
+                "purpose": purpose,
+                "sender": sender,
+                "recipient": recipient,
+            },
+            "provider_grant",
+        )
+        grant_id = str(uuid.uuid4())
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO provider_operation_grants "
+                "(id, account_ref, operation, host, port, purpose, sender, recipient, "
+                "max_submissions, expires_at, created_at, authorization_ref) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    grant_id,
+                    account_ref,
+                    operation,
+                    host,
+                    port,
+                    purpose,
+                    sender,
+                    recipient,
+                    max_submissions,
+                    expires_at,
+                    utc_now(),
+                    authorization_ref,
+                ),
+            )
+        return grant_id
+
+    def list_provider_operation_grants(
+        self, account_ref: str | None = None
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM provider_operation_grants"
+        parameters: tuple[Any, ...] = ()
+        if account_ref is not None:
+            _assert_safe_reference(account_ref, "provider_grant.account_ref")
+            query += " WHERE account_ref = ?"
+            parameters = (account_ref,)
+        query += " ORDER BY created_at DESC, id DESC"
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute(query, parameters)]
+
     def get_provider_profile(self, ref: str) -> sqlite3.Row:
         _assert_safe_reference(ref, "provider_profile.ref")
         with self.connect() as connection:
@@ -1389,8 +1708,8 @@ class CampaignStore:
         with self.transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT INTO provider_diagnostics "
-                "(id, profile_ref, status, phase, detail, capabilities_json, observed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(id, profile_ref, status, phase, detail, capabilities_json, observed_at, operation, "
+                "external_access, correlation_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     diagnostic_id,
                     diagnostic.profile_ref,
@@ -1399,6 +1718,10 @@ class CampaignStore:
                     diagnostic.detail,
                     _json(list(diagnostic.capabilities)),
                     occurred_at,
+                    diagnostic.operation.value,
+                    int(diagnostic.external_access),
+                    diagnostic.correlation_id,
+                    _json(dict(diagnostic.metadata)),
                 ),
             )
         return diagnostic_id
@@ -1413,6 +1736,122 @@ class CampaignStore:
         query += " ORDER BY observed_at DESC, id DESC"
         with self.connect() as connection:
             return list(connection.execute(query, parameters))
+
+    def record_provider_oauth_flow(
+        self,
+        *,
+        flow_id: str,
+        account_ref: str,
+        state_hash: str,
+        pkce_challenge: str,
+        redirect_uri: str,
+        scopes: tuple[str, ...],
+        expires_at: str,
+    ) -> None:
+        _assert_safe_reference(account_ref, "provider_oauth.account_ref")
+        _assert_no_secrets(
+            {
+                "state_hash": state_hash,
+                "pkce_challenge": pkce_challenge,
+                "redirect_uri": redirect_uri,
+            },
+            "provider_oauth",
+        )
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO provider_oauth_flows(id, account_ref, state_hash, pkce_challenge, redirect_uri, "
+                "scopes_json, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    flow_id,
+                    account_ref,
+                    state_hash,
+                    pkce_challenge,
+                    redirect_uri,
+                    _json(list(scopes)),
+                    expires_at,
+                    utc_now(),
+                ),
+            )
+
+    def complete_provider_oauth_flow(self, flow_id: str, *, identity: str) -> None:
+        _assert_safe_reference(flow_id, "provider_oauth.flow_id")
+        _assert_safe_reference(identity, "provider_oauth.identity")
+        with self.transaction(immediate=True) as connection:
+            result = connection.execute(
+                "UPDATE provider_oauth_flows SET status = 'code_received', identity = ?, completed_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (identity, utc_now(), flow_id),
+            )
+            if result.rowcount != 1:
+                raise ValueError("OAuth flow is not pending")
+
+    def create_provider_test_submission(
+        self,
+        *,
+        account_ref: str,
+        idempotency_key: str,
+        sender: str,
+        recipient: str,
+        message_revision_id: str | None,
+        status: str,
+        phase: str,
+        detail: str,
+        response_code: int | None = None,
+        external_access: bool = False,
+    ) -> dict[str, Any]:
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        _assert_no_secrets({"detail": detail}, "provider_test")
+        now = utc_now()
+        submission_id = str(uuid.uuid4())
+        with self.transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return dict(existing)
+            connection.execute(
+                "INSERT INTO provider_test_submissions(id, account_ref, idempotency_key, sender, recipient, "
+                "message_revision_id, status, phase, detail, response_code, external_access, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    submission_id,
+                    account_ref,
+                    idempotency_key,
+                    sender,
+                    recipient,
+                    message_revision_id,
+                    status,
+                    phase,
+                    detail,
+                    response_code,
+                    int(external_access),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_provider_test_submission(idempotency_key)
+
+    def get_provider_test_submission(self, idempotency_key: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"provider test submission not found: {idempotency_key}")
+        return dict(row)
+
+    def list_provider_tests(self, account_ref: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM provider_test_submissions"
+        params: tuple[Any, ...] = ()
+        if account_ref is not None:
+            query += " WHERE account_ref = ?"
+            params = (account_ref,)
+        query += " ORDER BY created_at DESC, id DESC"
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute(query, params)]
 
     def sender_policy_outcome_counts(
         self, policy_ref: str, *, domain: str | None = None, since: str | None = None
@@ -2314,6 +2753,7 @@ class CampaignStore:
         audience_revision_id: str | None = None,
         audience_run_key: str = "primary",
         message_revision_id: str | None = None,
+        provider_account_ref: str | None = None,
     ) -> str:
         _assert_no_secrets({"name": name, "description": description}, "campaign")
         _assert_safe_reference(sender_config_ref, "sender_config_ref")
@@ -2327,8 +2767,8 @@ class CampaignStore:
                 "INSERT INTO campaigns "
                 "(id, name, description, sender_config_ref, template_ref, audience_list_id, "
                 "audience_source_type, audience_source_id, audience_revision_id, audience_run_key, "
-                "message_revision_id, status, authorization, configuration_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "message_revision_id, provider_account_ref, status, authorization, configuration_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
                     name,
@@ -2341,6 +2781,7 @@ class CampaignStore:
                     audience_revision_id,
                     audience_run_key,
                     message_revision_id,
+                    provider_account_ref,
                     CampaignStatus.DRAFT.value,
                     ExecutionAuthorization.UNAUTHORIZED.value,
                     _json(configuration),

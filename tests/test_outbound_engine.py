@@ -421,7 +421,7 @@ def test_schema_v1_database_migrates_to_outbound_schema(tmp_path):
     connection.close()
 
     store = CampaignStore(database)
-    assert store.schema_version() == 10
+    assert store.schema_version() == 11
     assert store.integrity_check()
     with store.connect() as migrated:
         columns = {row["name"] for row in migrated.execute("PRAGMA table_info(delivery_intents)")}
@@ -436,4 +436,12 @@ def test_schema_v1_database_migrates_to_outbound_schema(tmp_path):
         }
     assert {"lease_owner", "lease_expires_at", "not_before_utc"} <= columns
     assert "response_code" in attempt_columns
-    assert provider_tables == {"provider_profiles", "provider_diagnostics"}
+    assert {
+        "provider_profiles",
+        "provider_diagnostics",
+        "provider_accounts",
+        "provider_inbound_settings",
+        "provider_operation_grants",
+        "provider_test_submissions",
+        "provider_oauth_flows",
+    } <= provider_tables

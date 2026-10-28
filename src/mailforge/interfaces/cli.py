@@ -25,6 +25,7 @@ from mailforge.application.mailer_compat import (
 )
 from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import run_outbound_demo
+from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationService
 from mailforge.application.sorting import EmailSorter, SortConfig
@@ -39,7 +40,9 @@ from mailforge.domain.outbound import ReconciliationDecision
 from mailforge.domain.policy import CommunicationPurpose, EvidenceStatus, PreferenceState
 from mailforge.domain.provider import (
     AuthenticationMethod,
+    ExternalOperationGrant,
     ProviderKind,
+    ProviderOperation,
     ProviderProfile,
     TLSMode,
 )
@@ -424,6 +427,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_diagnostics.add_argument("--database", type=Path, required=True)
     provider_diagnostics.add_argument("--ref")
+    provider_accounts = provider_commands.add_parser(
+        "accounts", help="list named provider accounts"
+    )
+    provider_accounts.add_argument("--database", type=Path, required=True)
+    provider_capabilities = provider_commands.add_parser(
+        "capabilities", help="show provider capability presets"
+    )
+    provider_capabilities.add_argument("--database", type=Path, required=True)
+    provider_suspend = provider_commands.add_parser("suspend", help="suspend a provider account")
+    provider_suspend.add_argument("--database", type=Path, required=True)
+    provider_suspend.add_argument("--ref", required=True)
+    provider_diagnostic = provider_commands.add_parser(
+        "diagnostic", help="run an explicit provider diagnostic"
+    )
+    provider_diagnostic.add_argument("--database", type=Path, required=True)
+    provider_diagnostic.add_argument("--ref", required=True)
+    provider_diagnostic.add_argument(
+        "--operation", choices=[item.value for item in ProviderOperation], required=True
+    )
+    provider_diagnostic.add_argument("--authorization-ref")
+    provider_diagnostic.add_argument("--purpose")
+    provider_diagnostic.add_argument("--expires-at")
+    provider_test_send = provider_commands.add_parser(
+        "test-send", help="submit one explicitly authorized test message"
+    )
+    provider_test_send.add_argument("--database", type=Path, required=True)
+    provider_test_send.add_argument("--ref", required=True)
+    provider_test_send.add_argument("--sender", required=True)
+    provider_test_send.add_argument("--recipient", required=True)
+    provider_test_send.add_argument("--message", type=Path, required=True)
+    provider_test_send.add_argument("--idempotency-key", required=True)
+    provider_test_send.add_argument("--authorization-ref", required=True)
+    provider_test_send.add_argument("--purpose", required=True)
+    provider_test_send.add_argument("--expires-at", required=True)
     automation = subparsers.add_parser("automation", help="manage durable visual workflows")
     automation_commands = automation.add_subparsers(dest="automation_command", required=True)
     automation_list = automation_commands.add_parser("list")
@@ -928,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
         from mailforge.infrastructure.credentials import EnvironmentCredentialResolver
 
         provider_service = ProviderService(CampaignStore(args.database))
+        provider_operations = ProviderOperationsService(provider_service.store)
         if args.provider_command == "list":
             kind = ProviderKind(args.kind) if args.kind else None
             print(json.dumps(provider_service.list_profiles(kind=kind), indent=2))
@@ -970,6 +1008,68 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.provider_command == "diagnostics":
             print(json.dumps(provider_service.diagnostics(args.ref), indent=2))
+        elif args.provider_command == "accounts":
+            print(json.dumps(provider_operations.accounts(), indent=2))
+        elif args.provider_command == "capabilities":
+            print(json.dumps(provider_operations.capabilities(), indent=2))
+        elif args.provider_command == "suspend":
+            print(
+                json.dumps(
+                    provider_operations.store.set_provider_account_status(
+                        args.ref, "suspended", enabled=False
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.provider_command == "diagnostic":
+            operation = ProviderOperation(args.operation)
+            grant = None
+            if args.authorization_ref:
+                account = provider_operations.account(args.ref)
+                if not args.purpose or not args.expires_at:
+                    raise SystemExit("external diagnostic requires --purpose and --expires-at")
+                grant = ExternalOperationGrant(
+                    account_ref=args.ref,
+                    operation=operation,
+                    host=account["host"],
+                    port=account["port"],
+                    purpose=args.purpose,
+                    max_submissions=0,
+                    expires_at=args.expires_at,
+                    authorization_ref=args.authorization_ref,
+                )
+            print(
+                json.dumps(
+                    provider_operations.diagnostic(args.ref, operation, grant=grant), indent=2
+                )
+            )
+        elif args.provider_command == "test-send":
+            account = provider_operations.account(args.ref)
+            grant = ExternalOperationGrant(
+                account_ref=args.ref,
+                operation=ProviderOperation.CONTROLLED_TEST_SEND,
+                host=account["host"],
+                port=account["port"],
+                purpose=args.purpose,
+                sender=args.sender,
+                recipient=args.recipient,
+                max_submissions=1,
+                expires_at=args.expires_at,
+                authorization_ref=args.authorization_ref,
+            )
+            print(
+                json.dumps(
+                    provider_operations.controlled_test_send(
+                        ref=args.ref,
+                        sender=args.sender,
+                        recipient=args.recipient,
+                        message=args.message.read_text(encoding="utf-8"),
+                        idempotency_key=args.idempotency_key,
+                        grant=grant,
+                    ),
+                    indent=2,
+                )
+            )
     elif args.command == "inbound":
         if args.inbound_command == "synthetic-demo":
             print(json.dumps(run_inbound_demo(args.database), indent=2, default=str))

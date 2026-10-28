@@ -18,7 +18,9 @@ from mailforge.infrastructure.credentials import (
     CredentialResolver,
     EnvironmentCredentialResolver,
     UnsupportedAuthenticationMechanism,
+    oauth_token_from_material,
 )
+from mailforge.infrastructure.smtp import xoauth2_initial_response
 
 
 class SourceError(RuntimeError):
@@ -195,8 +197,8 @@ class IMAPConnectionConfig:
             raise ValueError("IMAP port must be between 1 and 65535")
         if not self.username or not (self.password or self.credential_ref):
             raise ValueError("IMAP authenticated access requires username and credential_ref")
-        if self.auth_method is AuthenticationMethod.OAUTH2:
-            raise ValueError("IMAP OAuth2 authentication is not implemented")
+        if self.auth_method is AuthenticationMethod.OAUTH2 and not self.credential_ref:
+            raise ValueError("IMAP OAuth2 authentication requires credential_ref")
         if not self.mailbox.strip():
             raise ValueError("IMAP mailbox must not be empty")
         if self.timeout <= 0:
@@ -236,6 +238,16 @@ class ImapSource:
                 raise CredentialError("IMAP credential is unavailable") from error
         return self.config.password or ""
 
+    def _oauth_response(self) -> bytes:
+        if not self.config.credential_ref:
+            raise CredentialError("OAuth credential is unavailable")
+        token = oauth_token_from_material(
+            self.credential_resolver.resolve(self.config.credential_ref)
+        )
+        if token.expired:
+            raise CredentialError("OAuth access token is expired")
+        return xoauth2_initial_response(self.config.username or "", token.access_token).encode()
+
     @staticmethod
     def _capability_names(data: object) -> tuple[str, ...]:
         values: list[str] = []
@@ -269,10 +281,12 @@ class ImapSource:
                 raise SourceError("IMAP CAPABILITY failed")
             self.last_capabilities = self._capability_names(capabilities)
             if self.config.auth_method is AuthenticationMethod.OAUTH2:
-                raise UnsupportedAuthenticationMechanism(
-                    "IMAP OAuth2 authentication is not implemented"
-                )
-            login_status, _ = client.login(self.config.username or "", self._credential())
+                authenticate = getattr(client, "authenticate", None)
+                if not callable(authenticate):
+                    raise UnsupportedAuthenticationMechanism("IMAP client does not support XOAUTH2")
+                login_status, _ = authenticate("XOAUTH2", lambda _challenge: self._oauth_response())
+            else:
+                login_status, _ = client.login(self.config.username or "", self._credential())
             if login_status != "OK":
                 raise SourceError("IMAP authentication failed")
             select_status, _ = client.select(self.config.mailbox, readonly=True)

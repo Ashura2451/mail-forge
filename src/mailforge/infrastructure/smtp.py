@@ -22,6 +22,7 @@ from mailforge.infrastructure.credentials import (
     CredentialResolver,
     EnvironmentCredentialResolver,
     UnsupportedAuthenticationMechanism,
+    oauth_token_from_material,
 )
 
 
@@ -120,6 +121,12 @@ class LiveSendAuthorizationRequired(RuntimeError):
 
 class SMTPPolicyViolation(ValueError):
     """Raised when a sender is outside the configured SMTP account policy."""
+
+
+def xoauth2_initial_response(username: str, access_token: str) -> str:
+    """Build the raw SASL XOAUTH2 response; stdlib clients base64-encode it."""
+
+    return f"user={username}\x01auth=Bearer {access_token}\x01\x01"
 
 
 @dataclass(frozen=True)
@@ -308,9 +315,7 @@ class SmtpTransport:
 
     def _credential(self) -> str | None:
         if self.config.auth_method is AuthenticationMethod.OAUTH2:
-            raise UnsupportedAuthenticationMechanism(
-                "SMTP OAuth2 authentication is not implemented"
-            )
+            raise CredentialError("OAuth credential requires the XOAUTH2 authentication path")
         if self.config.credential_ref:
             try:
                 return self.credential_resolver.resolve(self.config.credential_ref).secret
@@ -325,10 +330,6 @@ class SmtpTransport:
 
     def sendmail(self, sender: str, recipient: str, message: str) -> object:
         self.gate.require()
-        if self.config.auth_method is AuthenticationMethod.OAUTH2:
-            raise UnsupportedAuthenticationMechanism(
-                "SMTP OAuth2 authentication is not implemented"
-            )
         connector = smtplib.SMTP_SSL if self.config.implicit_tls else smtplib.SMTP
         context = self._context()
         self.last_transaction = SMTPTransaction(
@@ -363,7 +364,25 @@ class SmtpTransport:
                     tls_active=True,
                     authenticated=False,
                 )
-                client.login(self.config.username, self._credential() or "")
+                if self.config.auth_method is AuthenticationMethod.OAUTH2:
+                    token = oauth_token_from_material(
+                        self.credential_resolver.resolve(self.config.credential_ref or "")
+                    )
+                    if token.expired:
+                        raise CredentialError("OAuth access token is expired")
+                    auth = getattr(client, "auth", None)
+                    if not callable(auth):
+                        raise UnsupportedAuthenticationMechanism(
+                            "SMTP client does not support XOAUTH2"
+                        )
+                    auth(
+                        "XOAUTH2",
+                        lambda _challenge=None: xoauth2_initial_response(
+                            self.config.username or "", token.access_token
+                        ),
+                    )
+                else:
+                    client.login(self.config.username, self._credential() or "")
             self.last_transaction = SMTPTransaction(
                 self.config.provider_ref,
                 SMTPPhase.DATA_TRANSMISSION,
@@ -476,10 +495,6 @@ class SMTPConnectionPool:
     def _connect(self, index: int) -> object:
         self.gate.require()
         config = self.configs[index]
-        if config.auth_method is AuthenticationMethod.OAUTH2:
-            raise UnsupportedAuthenticationMechanism(
-                "SMTP OAuth2 authentication is not implemented"
-            )
         self.last_transaction = SMTPTransaction(config.provider_ref, SMTPPhase.CONNECT)
         if config.implicit_tls:
             self.last_transaction = SMTPTransaction(
@@ -520,16 +535,38 @@ class SMTPConnectionPool:
                     tls_active=config.use_tls or config.implicit_tls,
                     capabilities=tuple(getattr(client, "esmtp_features", {}).keys()),
                 )
-                login = getattr(client, "login", None)
-                if not callable(login):
-                    raise RuntimeError("SMTP client does not support authentication")
-                password = config.password
-                if config.credential_ref:
-                    try:
-                        password = self.credential_resolver.resolve(config.credential_ref).secret
-                    except CredentialError as error:
-                        raise CredentialError("SMTP credential is unavailable") from error
-                login(config.username, password or "")
+                if config.auth_method is AuthenticationMethod.OAUTH2:
+                    if not config.credential_ref:
+                        raise CredentialError("OAuth credential is unavailable")
+                    token = oauth_token_from_material(
+                        self.credential_resolver.resolve(config.credential_ref)
+                    )
+                    if token.expired:
+                        raise CredentialError("OAuth access token is expired")
+                    auth = getattr(client, "auth", None)
+                    if not callable(auth):
+                        raise UnsupportedAuthenticationMechanism(
+                            "SMTP client does not support XOAUTH2"
+                        )
+                    auth(
+                        "XOAUTH2",
+                        lambda _challenge=None: xoauth2_initial_response(
+                            config.username or "", token.access_token
+                        ),
+                    )
+                else:
+                    login = getattr(client, "login", None)
+                    if not callable(login):
+                        raise RuntimeError("SMTP client does not support authentication")
+                    password = config.password
+                    if config.credential_ref:
+                        try:
+                            password = self.credential_resolver.resolve(
+                                config.credential_ref
+                            ).secret
+                        except CredentialError as error:
+                            raise CredentialError("SMTP credential is unavailable") from error
+                    login(config.username, password or "")
                 self.last_transaction = SMTPTransaction(
                     config.provider_ref,
                     SMTPPhase.AUTHENTICATION,
