@@ -1,0 +1,357 @@
+"""Read-only inbound acquisition adapters and a deterministic IMAP seam."""
+
+from __future__ import annotations
+
+import hashlib
+import imaplib
+import mailbox
+import ssl
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from mailforge.domain.inbound import InboundSourceType, SourceMessage
+from mailforge.domain.provider import AuthenticationMethod
+from mailforge.infrastructure.credentials import (
+    CredentialError,
+    CredentialResolver,
+    EnvironmentCredentialResolver,
+    UnsupportedAuthenticationMechanism,
+)
+
+
+class SourceError(RuntimeError):
+    pass
+
+
+class CursorInvalidated(SourceError):
+    pass
+
+
+class ExternalSourceDisabled(SourceError):
+    pass
+
+
+class InboundSource(Protocol):
+    source_ref: str
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]: ...
+
+
+class EmlFileSource:
+    source_type = InboundSourceType.EML
+
+    def __init__(
+        self,
+        source_ref: str,
+        path: str | Path,
+        *,
+        max_bytes: int = 10 * 1024 * 1024,
+        stable_identity: str | None = None,
+    ):
+        self.source_ref = source_ref
+        self.path = Path(path)
+        self.max_bytes = max_bytes
+        self.stable_identity = stable_identity
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        if self.path.stat().st_size > self.max_bytes:
+            raise SourceError("EML exceeds configured acquisition limit")
+        raw = self.path.read_bytes()
+        identity = self.stable_identity or (
+            f"{self.path.resolve()}:{hashlib.sha256(raw).hexdigest()}"
+        )
+        if cursor and cursor == identity:
+            return
+        yield SourceMessage(self.source_ref, identity, raw, mailbox=str(self.path))
+
+
+class MboxSource:
+    source_type = InboundSourceType.MBOX
+
+    def __init__(self, source_ref: str, path: str | Path, *, max_bytes: int = 10 * 1024 * 1024):
+        self.source_ref = source_ref
+        self.path = Path(path)
+        self.max_bytes = max_bytes
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        box = mailbox.mbox(self.path, create=False)
+        try:
+            count = 0
+            for key in box.iterkeys():
+                if cursor is not None and str(key) <= cursor:
+                    continue
+                with box.get_file(key) as handle:
+                    raw = handle.read(self.max_bytes + 1)
+                if len(raw) > self.max_bytes:
+                    raise SourceError("MBOX message exceeds configured acquisition limit")
+                yield SourceMessage(
+                    self.source_ref,
+                    str(key),
+                    raw,
+                    mailbox=str(self.path),
+                    uid=str(key),
+                )
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+        finally:
+            box.close()
+
+
+@dataclass(frozen=True)
+class SyntheticMailboxSource:
+    source_ref: str
+    items: tuple[bytes, ...]
+    source_type: InboundSourceType = InboundSourceType.SYNTHETIC
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        start = int(cursor) + 1 if cursor is not None else 0
+        stop = len(self.items) if limit is None else min(len(self.items), start + limit)
+        for index in range(start, stop):
+            raw = self.items[index]
+            yield SourceMessage(
+                self.source_ref,
+                str(index),
+                raw,
+                mailbox="synthetic",
+                uid=str(index),
+            )
+
+
+class FakeImapEndpoint(Protocol):
+    def select(self, mailbox_name: str, readonly: bool = True) -> tuple[str, tuple[str, ...]]: ...
+
+    def fetch(self, uid: str) -> bytes: ...
+
+    def uids(self) -> Iterable[str]: ...
+
+
+class SimulatedImapSource:
+    source_type = InboundSourceType.IMAP
+
+    def __init__(self, source_ref: str, endpoint: FakeImapEndpoint, mailbox_name: str = "INBOX"):
+        self.source_ref = source_ref
+        self.endpoint = endpoint
+        self.mailbox_name = mailbox_name
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        uidvalidity, _ = self.endpoint.select(self.mailbox_name, readonly=True)
+        if cursor:
+            previous_uidvalidity, previous_uid = cursor.split(":", 1)
+            if previous_uidvalidity != uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed")
+        count = 0
+        for uid in self.endpoint.uids():
+            if cursor and int(uid) <= int(previous_uid):
+                continue
+            try:
+                raw = self.endpoint.fetch(uid)
+            except KeyError:
+                continue
+            yield SourceMessage(
+                self.source_ref,
+                f"{uidvalidity}:{uid}",
+                raw,
+                mailbox=self.mailbox_name,
+                uidvalidity=uidvalidity,
+                uid=uid,
+            )
+            count += 1
+            if limit is not None and count >= limit:
+                break
+
+
+@dataclass(frozen=True)
+class IMAPConnectionConfig:
+    """Secret-free IMAP connection settings supplied to the runtime adapter."""
+
+    host: str
+    port: int = 993
+    username: str | None = None
+    password: str | None = None
+    credential_ref: str | None = None
+    auth_method: AuthenticationMethod = AuthenticationMethod.PASSWORD
+    mailbox: str = "INBOX"
+    timeout: float = 30.0
+    ca_file: str | None = None
+    max_message_bytes: int = 10 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if not self.host.strip():
+            raise ValueError("IMAP host must not be empty")
+        if not 1 <= self.port <= 65_535:
+            raise ValueError("IMAP port must be between 1 and 65535")
+        if not self.username or not (self.password or self.credential_ref):
+            raise ValueError("IMAP authenticated access requires username and credential_ref")
+        if self.auth_method is AuthenticationMethod.OAUTH2:
+            raise ValueError("IMAP OAuth2 authentication is not implemented")
+        if not self.mailbox.strip():
+            raise ValueError("IMAP mailbox must not be empty")
+        if self.timeout <= 0:
+            raise ValueError("IMAP timeout must be positive")
+        if self.max_message_bytes <= 0:
+            raise ValueError("IMAP message limit must be positive")
+
+
+class ImapSource:
+    """Read-only IMAP UID acquisition through Python's standard-library client."""
+
+    source_type = InboundSourceType.IMAP
+
+    def __init__(
+        self,
+        source_ref: str,
+        config: IMAPConnectionConfig,
+        *,
+        credential_resolver: CredentialResolver | None = None,
+    ):
+        self.source_ref = source_ref
+        self.config = config
+        self.credential_resolver = credential_resolver or EnvironmentCredentialResolver()
+        self.mailbox_name = config.mailbox
+        self.last_capabilities: tuple[str, ...] = ()
+
+    def _context(self) -> ssl.SSLContext:
+        context = ssl.create_default_context(cafile=self.config.ca_file)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        return context
+
+    def _credential(self) -> str:
+        if self.config.credential_ref:
+            try:
+                return self.credential_resolver.resolve(self.config.credential_ref).secret
+            except CredentialError as error:
+                raise CredentialError("IMAP credential is unavailable") from error
+        return self.config.password or ""
+
+    @staticmethod
+    def _capability_names(data: object) -> tuple[str, ...]:
+        values: list[str] = []
+        if isinstance(data, (list, tuple)):
+            for item in data:
+                if isinstance(item, bytes):
+                    values.extend(item.decode("ascii", "replace").split())
+                elif isinstance(item, str):
+                    values.extend(item.split())
+        return tuple(sorted({value.upper() for value in values}))
+
+    @staticmethod
+    def _uidvalidity(client: imaplib.IMAP4) -> str:
+        response = client.response("UIDVALIDITY")
+        values = response[1] if isinstance(response, tuple) and len(response) > 1 else None
+        if not values:
+            raise SourceError("IMAP SELECT did not return UIDVALIDITY")
+        value = values[0]
+        return value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
+
+    def _connect(self) -> tuple[imaplib.IMAP4, str]:
+        client = imaplib.IMAP4_SSL(
+            self.config.host,
+            self.config.port,
+            ssl_context=self._context(),
+            timeout=self.config.timeout,
+        )
+        try:
+            status, capabilities = client.capability()
+            if status != "OK":
+                raise SourceError("IMAP CAPABILITY failed")
+            self.last_capabilities = self._capability_names(capabilities)
+            if self.config.auth_method is AuthenticationMethod.OAUTH2:
+                raise UnsupportedAuthenticationMechanism(
+                    "IMAP OAuth2 authentication is not implemented"
+                )
+            login_status, _ = client.login(self.config.username or "", self._credential())
+            if login_status != "OK":
+                raise SourceError("IMAP authentication failed")
+            select_status, _ = client.select(self.config.mailbox, readonly=True)
+            if select_status != "OK":
+                raise SourceError("IMAP read-only mailbox selection failed")
+            return client, self._uidvalidity(client)
+        except BaseException:
+            try:
+                client.logout()
+            except Exception:
+                pass
+            raise
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        previous_uidvalidity: str | None = None
+        previous_uid = 0
+        if cursor:
+            try:
+                previous_uidvalidity, previous_uid_text = cursor.split(":", 1)
+                previous_uid = int(previous_uid_text)
+            except ValueError as error:
+                raise CursorInvalidated("invalid IMAP cursor") from error
+        client, uidvalidity = self._connect()
+        try:
+            if previous_uidvalidity is not None and previous_uidvalidity != uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed")
+            status, data = client.uid("SEARCH", None, "ALL")
+            if status != "OK":
+                raise SourceError("IMAP UID SEARCH failed")
+            if limit == 0:
+                return
+            raw_uids = data[0] if data else b""
+            uid_values = [int(value) for value in raw_uids.split() if value.isdigit()]
+            count = 0
+            for uid in uid_values:
+                if uid <= previous_uid:
+                    continue
+                status, fetched = client.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                if status != "OK":
+                    raise SourceError(f"IMAP UID FETCH failed for {uid}")
+                raw = next(
+                    (
+                        item[1]
+                        for item in fetched
+                        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes)
+                    ),
+                    None,
+                )
+                if raw is None:
+                    raise SourceError(f"IMAP UID FETCH returned no message for {uid}")
+                if len(raw) > self.config.max_message_bytes:
+                    raise SourceError(f"IMAP message {uid} exceeds configured acquisition limit")
+                yield SourceMessage(
+                    self.source_ref,
+                    f"{uidvalidity}:{uid}",
+                    raw,
+                    mailbox=self.config.mailbox,
+                    uidvalidity=uidvalidity,
+                    uid=str(uid),
+                )
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+
+class DisabledImapSource:
+    source_type = InboundSourceType.IMAP
+
+    def __init__(self, source_ref: str):
+        self.source_ref = source_ref
+
+    def messages(
+        self, cursor: str | None = None, limit: int | None = None
+    ) -> Iterator[SourceMessage]:
+        raise ExternalSourceDisabled("real IMAP acquisition is disabled; use a qualified adapter")

@@ -1,0 +1,17 @@
+campaigns: []
+smtp_pool: []
+tracking:
+  enabled: false
+logging:
+  log_file: "/tmp/mailforge-foundation-mailer.log"
+  log_level: "INFO"
+  format: "text"
+targets:
+  file: ""
+  fallback_file: "synthetic_targets.txt"
+files:
+  sent_file: "/tmp/mailforge-foundation-sent.txt"
+  failed_file: "/tmp/mailforge-foundation-failed.txt"
+  bounce_file: "/tmp/mailforge-foundation-bounces.txt"
+health_check:
+  enabled: true

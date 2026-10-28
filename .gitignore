@@ -1,0 +1,39 @@
+# Consumer-local canonical truth; never commit.
+.aios/
+# Consumer-local generated Executor context; never commit.
+.orchestra/
+
+# Local credentials and runtime environment files. Keep safe examples tracked.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python caches, local environments, and test/tool state.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+.coverage
+htmlcov/
+
+# Local runtime data and logs. Tracked historical files remain tracked.
+logs/
+**/logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor, operating-system, browser, and temporary artifacts.
+.DS_Store
+.idea/
+.vscode/
+playwright-report/
+test-results/
+*.tmp

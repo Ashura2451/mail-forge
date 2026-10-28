@@ -1,0 +1,769 @@
+{
+  "gmail": {
+    "output_file": "gmail.txt",
+    "aliases": ["gmail.com", "googlemail.com"],
+    "type": "global",
+    "note": "Google consumer email"
+  },
+
+  "outlook": {
+    "output_file": "outlook.txt",
+    "aliases": [
+      "outlook.com",
+      "outlook.co.uk",
+      "outlook.fr",
+      "outlook.de",
+      "outlook.it",
+      "outlook.es",
+      "outlook.nl",
+      "outlook.be",
+      "outlook.ca",
+      "outlook.com.au",
+      "outlook.com.br",
+      "outlook.co.jp",
+      "outlook.kr",
+      "outlook.sg",
+      "outlook.my",
+      "outlook.ph",
+      "outlook.co.th",
+      "outlook.co.nz",
+      "outlook.co.za",
+      "outlook.co.id",
+      "outlook.com.tr",
+      "outlook.in",
+      "outlook.com.mx",
+      "outlook.com.ar",
+      "outlook.cl",
+      "outlook.at",
+      "outlook.dk",
+      "outlook.ie",
+      "outlook.pt",
+      "outlook.se",
+      "outlook.no",
+      "outlook.fi",
+      "outlook.sa",
+      "outlook.ae",
+      "outlook.com.vn",
+      "outlook.com.pe",
+      "outlook.jp",
+      "hotmail.com",
+      "hotmail.co.uk",
+      "hotmail.fr",
+      "hotmail.de",
+      "hotmail.it",
+      "hotmail.es",
+      "hotmail.nl",
+      "hotmail.be",
+      "hotmail.ca",
+      "hotmail.com.au",
+      "hotmail.com.br",
+      "hotmail.co.jp",
+      "hotmail.co.th",
+      "hotmail.co.kr",
+      "hotmail.co.za",
+      "hotmail.co.nz",
+      "hotmail.co.id",
+      "hotmail.com.mx",
+      "hotmail.com.ar",
+      "hotmail.com.co",
+      "hotmail.com.tw",
+      "hotmail.com.hk",
+      "hotmail.gr",
+      "hotmail.se",
+      "hotmail.no",
+      "hotmail.dk",
+      "hotmail.fi",
+      "hotmail.ch",
+      "hotmail.at",
+      "hotmail.cl",
+      "hotmail.ro",
+      "hotmail.hu",
+      "hotmail.cz",
+      "hotmail.sg",
+      "hotmail.ph",
+      "hotmail.my",
+      "hotmail.ru",
+      "hotmail.com.tr",
+      "hotmail.co.il",
+      "hotmail.com.pe",
+      "hotmail.com.ve",
+      "hotmail.com.ec",
+      "live.com",
+      "live.co.uk",
+      "live.fr",
+      "live.de",
+      "live.it",
+      "live.nl",
+      "live.be",
+      "live.ca",
+      "live.com.au",
+      "live.com.br",
+      "live.co.jp",
+      "live.com.mx",
+      "live.com.ar",
+      "live.se",
+      "live.no",
+      "live.dk",
+      "live.fi",
+      "live.at",
+      "live.ch",
+      "live.ie",
+      "live.co.za",
+      "live.com.pt",
+      "live.cl",
+      "live.hk",
+      "live.com.sg",
+      "live.com.ph",
+      "live.com.my",
+      "live.co.kr",
+      "live.cn",
+      "live.jp",
+      "live.ru",
+      "live.in",
+      "msn.com",
+      "msn.co.uk",
+      "msn.cn",
+      "windowslive.com"
+    ],
+    "type": "global",
+    "note": "Microsoft consumer email (Outlook/Hotmail/Live/MSN)"
+  },
+
+  "yahoo": {
+    "output_file": "yahoo.txt",
+    "aliases": [
+      "yahoo.com",
+      "yahoo.co.uk",
+      "yahoo.co.jp",
+      "yahoo.co.in",
+      "yahoo.co.id",
+      "yahoo.ca",
+      "yahoo.com.au",
+      "yahoo.com.br",
+      "yahoo.com.mx",
+      "yahoo.com.ar",
+      "yahoo.com.co",
+      "yahoo.com.sg",
+      "yahoo.com.hk",
+      "yahoo.com.tw",
+      "yahoo.com.ph",
+      "yahoo.com.my",
+      "yahoo.com.vn",
+      "yahoo.com.pe",
+      "yahoo.com.ve",
+      "yahoo.com.tr",
+      "yahoo.fr",
+      "yahoo.de",
+      "yahoo.it",
+      "yahoo.es",
+      "yahoo.se",
+      "yahoo.no",
+      "yahoo.dk",
+      "yahoo.fi",
+      "yahoo.ie",
+      "yahoo.at",
+      "yahoo.nl",
+      "yahoo.be",
+      "yahoo.pt",
+      "yahoo.gr",
+      "yahoo.pl",
+      "yahoo.ro",
+      "yahoo.hu",
+      "yahoo.cz",
+      "yahoo.co.za",
+      "yahoo.co.nz",
+      "yahoo.co.th",
+      "yahoo.co.kr",
+      "ymail.com",
+      "rocketmail.com",
+      "yahoo.com.cn",
+      "yahoo.com.ng"
+    ],
+    "type": "global",
+    "note": "Yahoo consumer email (all regional variants)"
+  },
+
+  "icloud": {
+    "output_file": "icloud.txt",
+    "aliases": ["icloud.com", "me.com", "mac.com"],
+    "type": "global",
+    "note": "Apple iCloud Mail"
+  },
+
+  "proton": {
+    "output_file": "proton.txt",
+    "aliases": ["protonmail.com", "protonmail.ch", "proton.me", "pm.me"],
+    "type": "privacy",
+    "note": "ProtonMail / Proton consumer"
+  },
+
+  "aol": {
+    "output_file": "aol.txt",
+    "aliases": [
+      "aol.com",
+      "aol.co.uk",
+      "aol.de",
+      "aol.fr",
+      "aol.jp",
+      "aol.it",
+      "aol.es",
+      "aim.com",
+      "verizon.net",
+      "compuserve.com",
+      "netscape.net"
+    ],
+    "type": "legacy",
+    "note": "AOL / Verizon / legacy services"
+  },
+
+  "mailru": {
+    "output_file": "mailru.txt",
+    "aliases": ["mail.ru", "bk.ru", "inbox.ru", "list.ru", "internet.ru"],
+    "type": "regional",
+    "country": "RU",
+    "note": "Mail.ru Group consumer email"
+  },
+
+  "yandex": {
+    "output_file": "yandex.txt",
+    "aliases": [
+      "yandex.ru",
+      "yandex.com",
+      "yandex.ua",
+      "yandex.by",
+      "yandex.kz",
+      "yandex.uz",
+      "ya.ru"
+    ],
+    "type": "regional",
+    "country": "RU",
+    "note": "Yandex consumer email"
+  },
+
+  "rambler": {
+    "output_file": "rambler.txt",
+    "aliases": [
+      "rambler.ru",
+      "lenta.ru",
+      "autorambler.ru",
+      "myrambler.ru",
+      "ro.ru"
+    ],
+    "type": "regional",
+    "country": "RU"
+  },
+
+  "qq": {
+    "output_file": "qq.txt",
+    "aliases": ["qq.com", "foxmail.com", "vip.qq.com"],
+    "type": "regional",
+    "country": "CN",
+    "note": "Tencent QQ Mail"
+  },
+
+  "163": {
+    "output_file": "163.txt",
+    "aliases": ["163.com", "126.com", "yeah.net", "vip.163.com", "188.com"],
+    "type": "regional",
+    "country": "CN",
+    "note": "NetEase 163 / 126"
+  },
+
+  "sina": {
+    "output_file": "sina.txt",
+    "aliases": ["sina.com", "sina.cn", "sina.com.cn", "vip.sina.com"],
+    "type": "regional",
+    "country": "CN"
+  },
+
+  "sohu": {
+    "output_file": "sohu.txt",
+    "aliases": ["sohu.com"],
+    "type": "regional",
+    "country": "CN"
+  },
+
+  "aliyun": {
+    "output_file": "aliyun.txt",
+    "aliases": ["aliyun.com"],
+    "type": "regional",
+    "country": "CN",
+    "note": "Alibaba Cloud Mail"
+  },
+
+  "naver": {
+    "output_file": "naver.txt",
+    "aliases": ["naver.com"],
+    "type": "regional",
+    "country": "KR"
+  },
+
+  "daum": {
+    "output_file": "daum.txt",
+    "aliases": ["daum.net", "hanmail.net"],
+    "type": "regional",
+    "country": "KR",
+    "note": "Kakao / Daum"
+  },
+
+  "gmx": {
+    "output_file": "gmx.txt",
+    "aliases": [
+      "gmx.de",
+      "gmx.net",
+      "gmx.at",
+      "gmx.ch",
+      "gmx.com",
+      "gmx.fr",
+      "gmx.es",
+      "gmx.co.uk"
+    ],
+    "type": "regional",
+    "country": "DE",
+    "note": "GMX (all regional)"
+  },
+
+  "web_de": {
+    "output_file": "web.txt",
+    "aliases": ["web.de"],
+    "type": "regional",
+    "country": "DE"
+  },
+
+  "t_online": {
+    "output_file": "t-online.txt",
+    "aliases": ["t-online.de"],
+    "type": "regional",
+    "country": "DE",
+    "note": "Deutsche Telekom"
+  },
+
+  "freenet": {
+    "output_file": "freenet.txt",
+    "aliases": ["freenet.de"],
+    "type": "regional",
+    "country": "DE"
+  },
+
+  "posteo": {
+    "output_file": "posteo.txt",
+    "aliases": [
+      "posteo.de",
+      "posteo.net",
+      "posteo.at",
+      "posteo.ch",
+      "posteo.eu",
+      "posteo.org"
+    ],
+    "type": "privacy",
+    "country": "DE",
+    "note": "Posteo privacy-focused mail"
+  },
+
+  "tutanota": {
+    "output_file": "tutanota.txt",
+    "aliases": [
+      "tutanota.com",
+      "tutanota.de",
+      "tutamail.com",
+      "tuta.io",
+      "keemail.me",
+      "tuta.com"
+    ],
+    "type": "privacy",
+    "country": "DE",
+    "note": "Tutanota / Tuta encrypted mail"
+  },
+
+  "orange": {
+    "output_file": "orange.txt",
+    "aliases": ["orange.fr", "wanadoo.fr", "voila.fr"],
+    "type": "regional",
+    "country": "FR"
+  },
+
+  "free_fr": {
+    "output_file": "free_fr.txt",
+    "aliases": ["free.fr"],
+    "type": "regional",
+    "country": "FR"
+  },
+
+  "laposte": {
+    "output_file": "laposte.txt",
+    "aliases": ["laposte.net"],
+    "type": "regional",
+    "country": "FR"
+  },
+
+  "sfr": {
+    "output_file": "sfr.txt",
+    "aliases": ["sfr.fr", "neuf.fr", "club-internet.fr"],
+    "type": "regional",
+    "country": "FR"
+  },
+
+  "libero": {
+    "output_file": "libero.txt",
+    "aliases": ["libero.it", "inwind.it", "iol.it", "blu.it"],
+    "type": "regional",
+    "country": "IT"
+  },
+
+  "virgilio": {
+    "output_file": "virgilio.txt",
+    "aliases": ["virgilio.it", "tin.it"],
+    "type": "regional",
+    "country": "IT"
+  },
+
+  "tiscali": {
+    "output_file": "tiscali.txt",
+    "aliases": ["tiscali.it", "tiscali.co.uk"],
+    "type": "regional",
+    "country": "IT"
+  },
+
+  "alice_it": {
+    "output_file": "alice.txt",
+    "aliases": ["alice.it", "tim.it"],
+    "type": "regional",
+    "country": "IT"
+  },
+
+  "seznam": {
+    "output_file": "seznam.txt",
+    "aliases": ["seznam.cz", "email.cz", "post.cz"],
+    "type": "regional",
+    "country": "CZ"
+  },
+
+  "centrum": {
+    "output_file": "centrum.txt",
+    "aliases": ["centrum.cz", "centrum.sk", "atlas.sk", "atlas.cz", "azet.sk"],
+    "type": "regional",
+    "country": "CZ"
+  },
+
+  "wp_pl": {
+    "output_file": "wp.txt",
+    "aliases": ["wp.pl", "poczta.wp.pl"],
+    "type": "regional",
+    "country": "PL"
+  },
+
+  "onet": {
+    "output_file": "onet.txt",
+    "aliases": [
+      "onet.pl",
+      "onet.eu",
+      "op.pl",
+      "vp.pl",
+      "autograf.pl",
+      "buziaczek.pl"
+    ],
+    "type": "regional",
+    "country": "PL"
+  },
+
+  "interia": {
+    "output_file": "interia.txt",
+    "aliases": ["interia.pl", "poczta.fm", "interia.eu"],
+    "type": "regional",
+    "country": "PL"
+  },
+
+  "o2_pl": {
+    "output_file": "o2_pl.txt",
+    "aliases": ["o2.pl", "go2.pl", "tlen.pl"],
+    "type": "regional",
+    "country": "PL"
+  },
+
+  "uol": {
+    "output_file": "uol.txt",
+    "aliases": ["uol.com.br", "bol.com.br"],
+    "type": "regional",
+    "country": "BR"
+  },
+
+  "terra": {
+    "output_file": "terra.txt",
+    "aliases": ["terra.com.br", "terra.es", "terra.cl", "terra.com.mx"],
+    "type": "regional",
+    "country": "BR"
+  },
+
+  "globo": {
+    "output_file": "globo.txt",
+    "aliases": ["globo.com", "globomail.com"],
+    "type": "regional",
+    "country": "BR"
+  },
+
+  "ig": {
+    "output_file": "ig.txt",
+    "aliases": ["ig.com.br"],
+    "type": "regional",
+    "country": "BR"
+  },
+
+  "rediffmail": {
+    "output_file": "rediffmail.txt",
+    "aliases": ["rediffmail.com", "rediff.com"],
+    "type": "regional",
+    "country": "IN"
+  },
+
+  "btinternet": {
+    "output_file": "btinternet.txt",
+    "aliases": ["btinternet.com", "btopenworld.com", "talk21.com"],
+    "type": "isp",
+    "country": "UK"
+  },
+
+  "sky_uk": {
+    "output_file": "sky.txt",
+    "aliases": ["sky.com"],
+    "type": "isp",
+    "country": "UK"
+  },
+
+  "virgin": {
+    "output_file": "virgin.txt",
+    "aliases": [
+      "virginmedia.com",
+      "virgin.net",
+      "ntlworld.com",
+      "blueyonder.co.uk"
+    ],
+    "type": "isp",
+    "country": "UK"
+  },
+
+  "att": {
+    "output_file": "att.txt",
+    "aliases": [
+      "att.net",
+      "sbcglobal.net",
+      "bellsouth.net",
+      "ameritech.net",
+      "pacbell.net",
+      "swbell.net",
+      "nvbell.net",
+      "flash.net"
+    ],
+    "type": "isp",
+    "country": "US",
+    "note": "AT&T consumer email"
+  },
+
+  "comcast": {
+    "output_file": "comcast.txt",
+    "aliases": ["comcast.net", "xfinity.com"],
+    "type": "isp",
+    "country": "US"
+  },
+
+  "cox": {
+    "output_file": "cox.txt",
+    "aliases": ["cox.net"],
+    "type": "isp",
+    "country": "US"
+  },
+
+  "spectrum": {
+    "output_file": "spectrum.txt",
+    "aliases": [
+      "charter.net",
+      "roadrunner.com",
+      "rr.com",
+      "twc.com",
+      "tampabay.rr.com",
+      "nycap.rr.com",
+      "sc.rr.com",
+      "neo.rr.com",
+      "cfl.rr.com",
+      "rochester.rr.com",
+      "triad.rr.com",
+      "socal.rr.com",
+      "stny.rr.com"
+    ],
+    "type": "isp",
+    "country": "US",
+    "note": "Spectrum / Charter / Time Warner Cable / RR"
+  },
+
+  "zoho": {
+    "output_file": "zoho.txt",
+    "aliases": ["zoho.com", "zohomail.com"],
+    "type": "business",
+    "note": "Zoho consumer email"
+  },
+
+  "fastmail": {
+    "output_file": "fastmail.txt",
+    "aliases": ["fastmail.com", "fastmail.fm", "fastmail.net", "fastmail.org"],
+    "type": "privacy",
+    "note": "FastMail (premium privacy email)"
+  },
+
+  "hushmail": {
+    "output_file": "hushmail.txt",
+    "aliases": ["hushmail.com", "hush.com", "hush.ai"],
+    "type": "privacy"
+  },
+
+  "mailfence": {
+    "output_file": "mailfence.txt",
+    "aliases": ["mailfence.com"],
+    "type": "privacy"
+  },
+
+  "startmail": {
+    "output_file": "startmail.txt",
+    "aliases": ["startmail.com"],
+    "type": "privacy"
+  },
+
+  "runbox": {
+    "output_file": "runbox.txt",
+    "aliases": ["runbox.com"],
+    "type": "privacy"
+  },
+
+  "disroot": {
+    "output_file": "disroot.txt",
+    "aliases": ["disroot.org"],
+    "type": "privacy"
+  },
+
+  "riseup": {
+    "output_file": "riseup.txt",
+    "aliases": ["riseup.net"],
+    "type": "privacy"
+  },
+
+  "cock_li": {
+    "output_file": "cock_li.txt",
+    "aliases": [
+      "cock.li",
+      "420blaze.it",
+      "aaathats3as.com",
+      "airmail.cc",
+      "memeware.net",
+      "national.shitposting.agency",
+      "tfwno.gf",
+      "horsefucker.org",
+      "waifu.club",
+      "getbackinthe.kitchen"
+    ],
+    "type": "privacy",
+    "note": "cock.li anonymous mail"
+  },
+
+  "docomo": {
+    "output_file": "docomo.txt",
+    "aliases": ["docomo.ne.jp"],
+    "type": "isp",
+    "country": "JP"
+  },
+
+  "softbank": {
+    "output_file": "softbank.txt",
+    "aliases": ["softbank.ne.jp", "i.softbank.jp"],
+    "type": "isp",
+    "country": "JP"
+  },
+
+  "ezweb": {
+    "output_file": "ezweb.txt",
+    "aliases": ["ezweb.ne.jp", "au.com"],
+    "type": "isp",
+    "country": "JP"
+  },
+
+  "ziggo": {
+    "output_file": "ziggo.txt",
+    "aliases": ["ziggo.nl"],
+    "type": "isp",
+    "country": "NL"
+  },
+
+  "kpn": {
+    "output_file": "kpn.txt",
+    "aliases": ["kpnmail.nl", "kpn.com", "planet.nl", "hetnet.nl", "xs4all.nl"],
+    "type": "isp",
+    "country": "NL"
+  },
+
+  "bluewin": {
+    "output_file": "bluewin.txt",
+    "aliases": ["bluewin.ch"],
+    "type": "isp",
+    "country": "CH"
+  },
+
+  "rogers": {
+    "output_file": "rogers.txt",
+    "aliases": ["rogers.com"],
+    "type": "isp",
+    "country": "CA"
+  },
+
+  "shaw": {
+    "output_file": "shaw.txt",
+    "aliases": ["shaw.ca"],
+    "type": "isp",
+    "country": "CA"
+  },
+
+  "telus": {
+    "output_file": "telus.txt",
+    "aliases": ["telus.net"],
+    "type": "isp",
+    "country": "CA"
+  },
+
+  "mail_com": {
+    "output_file": "mail_com.txt",
+    "aliases": [
+      "mail.com",
+      "email.com",
+      "usa.com",
+      "post.com",
+      "europe.com",
+      "asia.com",
+      "consultant.com",
+      "engineer.com",
+      "writeme.com",
+      "dr.com",
+      "musician.org",
+      "cheerful.com",
+      "techie.com"
+    ],
+    "type": "global",
+    "note": "Mail.com (GMX/United Internet vanity domains)"
+  },
+
+  "sympatico": {
+    "output_file": "sympatico.txt",
+    "aliases": ["sympatico.ca"],
+    "type": "isp",
+    "country": "CA"
+  },
+
+  "bigpond": {
+    "output_file": "bigpond.txt",
+    "aliases": ["bigpond.com", "bigpond.net.au"],
+    "type": "isp",
+    "country": "AU"
+  },
+
+  "optusnet": {
+    "output_file": "optusnet.txt",
+    "aliases": ["optusnet.com.au"],
+    "type": "isp",
+    "country": "AU"
+  }
+}

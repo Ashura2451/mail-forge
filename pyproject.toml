@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mailforge"
+version = "0.1.0"
+description = "Local-first email operations foundation and compatibility boundaries"
+readme = "README.md"
+requires-python = ">=3.15.2,<3.16"
+dependencies = [
+  "aiodns>=3.2,<4",
+  "dnspython>=2.7,<3",
+  "email-validator>=2.2,<3",
+  "fastapi>=0.115,<1",
+  "ijson>=3.3,<4",
+  "jinja2>=3.1,<4",
+  "python-multipart>=0.0.20,<1",
+  "pyyaml>=6,<7",
+  "tldextract>=5,<6",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+mailforge = "mailforge.interfaces.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mailforge"]
+
+[tool.hatch.build]
+exclude = [
+  "/.venv",
+  "/.agents",
+  "/.git",
+  "/.history",
+  "/.aios",
+  "/.orchestra",
+  "/MAILER",
+  "/MAILER/**",
+  "/MAILER/.env.example",
+  "/MSORTER",
+  "/MSORTER/**",
+  "/SORTER",
+  "/SORTER/**",
+  "/tests",
+  "/logs",
+  "/results",
+  "/config",
+  "/AGENTS.md",
+  "/**/.env",
+  "/**/venv",
+  "/**/.DS_Store",
+  "/**/__pycache__",
+  "/**/*.pyc",
+]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.venv",
+  "/.agents",
+  "/.git",
+  "/.history",
+  "/.aios",
+  "/.orchestra",
+  "/MAILER",
+  "/MAILER/**",
+  "/MAILER/.env.example",
+  "/MSORTER",
+  "/MSORTER/**",
+  "/SORTER",
+  "/SORTER/**",
+  "/tests",
+  "/logs",
+  "/results",
+  "/config",
+  "/AGENTS.md",
+  "/**/.env",
+  "/**/venv",
+  "/**/.DS_Store",
+  "/**/__pycache__",
+  "/**/*.pyc",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py315"
+exclude = ["MAILER"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest-playwright>=0.7,<1",
+]

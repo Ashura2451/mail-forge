@@ -1,0 +1,14 @@
+campaigns:
+  - name: invoice
+    template: synthetic_body.html
+    subject: Synthetic invoice
+    from_name: Synthetic Billing
+smtp_pool: []
+tracking:
+  enabled: false
+targets:
+  file: synthetic_targets.csv
+files:
+  sent_file: sent.txt
+  failed_file: failed.txt
+  bounce_file: hard_bounces.txt

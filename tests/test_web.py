@@ -1,0 +1,336 @@
+"""Acceptance checks for the local browser API boundary."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from email.message import EmailMessage
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from mailforge.domain.campaign import CampaignStatus
+from mailforge.interfaces.process_lock import DatabaseProcessLock, ProcessLockError
+from mailforge.interfaces.web import WebRuntime, create_app
+
+
+def _client(tmp_path: Path) -> tuple[TestClient, dict[str, str]]:
+    client = TestClient(
+        create_app(
+            tmp_path / "mailforge.sqlite3",
+            allowed_hosts={"testserver", "127.0.0.1", "localhost", "::1"},
+        )
+    )
+    session = client.get("/api/v1/session")
+    return client, {"x-mailforge-csrf": session.json()["csrf_token"]}
+
+
+def test_local_session_requires_csrf_and_rejects_non_loopback_host(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    assert client.post("/api/v1/lists", json={"name": "blocked"}).status_code == 403
+    assert (
+        client.post(
+            "/api/v1/lists",
+            headers={**headers, "origin": "https://attacker.invalid"},
+            json={"name": "blocked"},
+        ).status_code
+        == 403
+    )
+    assert client.get("/api/v1/status", headers={"host": "evil.example"}).status_code == 400
+
+
+def test_local_api_runs_contact_campaign_lifecycle(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    created = client.post("/api/v1/lists", headers=headers, json={"name": "Audience"})
+    assert created.status_code == 200
+    list_id = created.json()["id"]
+
+    upload = {
+        "file": (
+            "audience.txt",
+            b"alice@example.com\nbob@example.com\nalice@example.com\nnot-an-email",
+            "text/plain",
+        )
+    }
+    preview = client.post("/api/v1/imports/preview", headers=headers, files=upload)
+    assert preview.json()["accepted"] == 2
+    assert preview.json()["duplicates"] == 1
+    imported = client.post(f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload)
+    assert imported.status_code == 200
+    assert imported.json()["unique_contacts"] == 2
+
+    campaign = client.post(
+        "/api/v1/campaigns",
+        headers=headers,
+        json={"name": "Synthetic acceptance", "list_id": list_id},
+    )
+    campaign_id = campaign.json()["id"]
+    prepared = client.post(
+        f"/api/v1/campaigns/{campaign_id}/prepare",
+        headers=headers,
+        json={"sender_email": "sender@example.com", "subject": "Test"},
+    )
+    assert prepared.status_code == 200
+    assert prepared.json()["prepared"] == 2
+    assert (
+        client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code
+        == 200
+    )
+    assert (
+        client.post(f"/api/v1/campaigns/{campaign_id}/simulate", headers=headers).status_code == 200
+    )
+
+    for _ in range(20):
+        progress = client.get(f"/api/v1/campaigns/{campaign_id}/progress").json()
+        if progress["campaign_status"] == "completed":
+            break
+        time.sleep(0.025)
+    assert progress["campaign_status"] == "completed"
+    assert progress["counts"]["accepted"] == 2
+    assert client.get("/api/v1/activity").json()["items"]
+
+
+def test_local_api_supports_typed_segments_and_recurring_snapshots(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Segments"}).json()["id"]
+    field = client.post(
+        "/api/v1/fields",
+        headers=headers,
+        json={"machine_key": "plan", "label": "Plan", "field_type": "TEXT"},
+    )
+    assert field.status_code == 200
+    field_id = field.json()["id"]
+    invalid_preview = client.post(
+        "/api/v1/imports/structured/preview",
+        headers=headers,
+        json={
+            "list_id": list_id,
+            "rows": [{"email": "not-an-email", "plan": "pro"}],
+            "mappings": {"email": "contact.email", "plan": field_id},
+        },
+    )
+    assert invalid_preview.status_code == 200
+    assert invalid_preview.json()["valid"] is False
+    imported = client.post(
+        "/api/v1/imports/structured",
+        headers=headers,
+        json={
+            "list_id": list_id,
+            "rows": [{"email": "a@example.com", "plan": "pro"}],
+            "mappings": {"email": "contact.email", "plan": field_id},
+        },
+    )
+    assert imported.status_code == 200
+    definition = {
+        "version": 1,
+        "root": {
+            "kind": "PREDICATE",
+            "field_id": field_id,
+            "operator": "EQUALS",
+            "value": "pro",
+        },
+    }
+    segment = client.post(
+        "/api/v1/segments", headers=headers, json={"name": "Pro", "definition": definition}
+    )
+    assert segment.status_code == 200
+    segment_body = segment.json()
+    campaign = client.post(
+        "/api/v1/campaigns",
+        headers=headers,
+        json={
+            "name": "Segment campaign",
+            "segment_id": segment_body["id"],
+            "segment_revision_id": segment_body["revision"]["id"],
+        },
+    )
+    assert campaign.status_code == 200
+    campaign_id = campaign.json()["id"]
+    prepared = client.post(f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={})
+    assert prepared.status_code == 200
+    assert (
+        client.get(f"/api/v1/campaigns/{campaign_id}/audience").json()["audience"]["status"]
+        == "prepared"
+    )
+    recurring = client.post(
+        f"/api/v1/campaigns/{campaign_id}/prepare",
+        headers=headers,
+        json={"run_key": "occurrence-1"},
+    )
+    assert recurring.status_code == 200
+    assert recurring.json()["audience"]["run_key"] == "occurrence-1"
+    assert (
+        len(
+            client.get(f"/api/v1/campaigns/{campaign_id}/audience?run_key=occurrence-1").json()[
+                "items"
+            ]
+        )
+        == 1
+    )
+    type_change = client.patch(
+        f"/api/v1/fields/{field_id}", headers=headers, json={"field_type": "NUMBER"}
+    )
+    assert type_change.status_code == 400
+    assert type_change.json()["error"]["code"] == "field_type_migration_required"
+
+
+def test_compiled_frontend_is_served(tmp_path: Path) -> None:
+    frontend = Path(__file__).parents[1] / "src" / "mailforge" / "web_assets"
+    client = TestClient(
+        create_app(
+            tmp_path / "mailforge.sqlite3",
+            frontend_dir=frontend,
+            allowed_hosts={"testserver"},
+        )
+    )
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Mailforge" in response.text
+    assert response.headers["content-security-policy"].startswith("default-src 'self'")
+
+
+def test_campaign_preview_outcomes_and_resume_are_versioned(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Preview"}).json()["id"]
+    campaign_id = client.post(
+        "/api/v1/campaigns", headers=headers, json={"name": "Preview", "list_id": list_id}
+    ).json()["id"]
+    assert client.get(f"/api/v1/campaigns/{campaign_id}/preview").status_code == 200
+    assert client.get(f"/api/v1/campaigns/{campaign_id}/outcomes").status_code == 200
+    assert (
+        client.post(f"/api/v1/campaigns/{campaign_id}/resume", headers=headers).status_code == 400
+    )
+
+
+def test_inbound_eml_import_and_review_updates_eligibility(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Inbound"}).json()["id"]
+    upload = {"file": ("audience.txt", b"alice@example.com\n", "text/plain")}
+    client.post(f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload)
+    campaign_id = client.post(
+        "/api/v1/campaigns", headers=headers, json={"name": "Inbound", "list_id": list_id}
+    ).json()["id"]
+    assert (
+        client.post(f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers).status_code == 200
+    )
+    preview = client.get(f"/api/v1/campaigns/{campaign_id}/preview").json()
+    message_id = preview["messages"][0]["message_id"]
+
+    message = EmailMessage()
+    message["From"] = "alice@example.com"
+    message["To"] = "sender@example.com"
+    message["Subject"] = "unsubscribe"
+    message["In-Reply-To"] = message_id
+    message.set_content("Please unsubscribe me")
+    inbound = {"file": ("unsubscribe.eml", message.as_bytes(), "message/rfc822")}
+    imported = client.post("/api/v1/inbound/import", headers=headers, files=inbound)
+    assert imported.status_code == 200
+    assert imported.json()["report"]["processed"] == 1
+    duplicate = client.post("/api/v1/inbound/import", headers=headers, files=inbound)
+    assert duplicate.status_code == 200
+    assert duplicate.json()["report"]["acquired"] == 0
+    assert duplicate.json()["stats"]["messages"] == 1
+    review = client.get("/api/v1/inbound").json()
+    assert review["items"][0]["action_type"] == "create_unsubscribe"
+    assert review["messages"][0]["classification"] == "unsubscribe"
+    assert review["messages"][0]["correlations"][0]["match_kind"] == "exact"
+    action_id = review["items"][0]["action_id"]
+    decided = client.post(
+        f"/api/v1/inbound/reviews/{action_id}",
+        headers=headers,
+        json={"decision": "approve", "reason": "Synthetic operator acceptance"},
+    )
+    assert decided.status_code == 200
+    eligibility = client.get(f"/api/v1/campaigns/{campaign_id}/eligibility").json()["items"]
+    assert eligibility[0]["status"] == "excluded"
+    assert "unsubscribe" in eligibility[0]["reasons"][0]
+    assert client.get("/api/v1/inbound").json()["items"] == []
+
+
+def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    first = DatabaseProcessLock(database)
+    second = DatabaseProcessLock(database)
+    first.acquire()
+    try:
+        try:
+            second.acquire()
+        except ProcessLockError as error:
+            assert "already owns database" in str(error)
+        else:
+            raise AssertionError("a second local runtime acquired the database lock")
+    finally:
+        first.release()
+        second.release()
+
+
+def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
+    database = tmp_path / "cross-process.sqlite3"
+    marker = tmp_path / "holder.ready"
+    holder_code = (
+        "import time; "
+        "from pathlib import Path; "
+        "from mailforge.interfaces.process_lock import DatabaseProcessLock; "
+        f"lock=DatabaseProcessLock(r'{database}'); lock.acquire(); "
+        f"Path(r'{marker}').write_text('ready'); time.sleep(2); lock.release()"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    holder = subprocess.Popen([sys.executable, "-c", holder_code], env=environment)
+    try:
+        for _ in range(40):
+            if marker.is_file():
+                break
+            time.sleep(0.025)
+        assert marker.is_file()
+        contender = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"from mailforge.interfaces.process_lock import DatabaseProcessLock; "
+                f"DatabaseProcessLock(r'{database}').acquire()",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        assert contender.returncode != 0
+        assert "already owns database" in contender.stderr
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+
+def test_web_runtime_reconciles_running_campaign_after_restart(tmp_path: Path) -> None:
+    database = tmp_path / "restart.sqlite3"
+    first = WebRuntime(database)
+    list_id = first.store.create_list("restart-audience")
+    campaign_id = first.store.create_campaign(
+        name="restart-campaign",
+        description="restart",
+        sender_config_ref="sender",
+        template_ref="template",
+        audience_list_id=list_id,
+    )
+    first.store.transition_campaign(campaign_id, CampaignStatus.VALIDATING, "test")
+    first.store.transition_campaign(campaign_id, CampaignStatus.READY, "test")
+    first.store.transition_campaign(campaign_id, CampaignStatus.RUNNING, "test")
+    first.close()
+
+    second = WebRuntime(database)
+    try:
+        assert second.store.get_campaign(campaign_id)["status"] == "paused"
+        with second.store.connect() as connection:
+            transition = connection.execute(
+                "SELECT from_status, to_status, reason FROM campaign_transitions "
+                "WHERE campaign_id = ? AND reason = 'application_restarted'",
+                (campaign_id,),
+            ).fetchall()
+        assert [(row["from_status"], row["to_status"]) for row in transition] == [
+            ("running", "pausing"),
+            ("pausing", "paused"),
+        ]
+    finally:
+        second.close()
