@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -174,6 +175,51 @@ def test_local_api_supports_typed_segments_and_recurring_snapshots(tmp_path: Pat
     )
     assert type_change.status_code == 400
     assert type_change.json()["error"]["code"] == "field_type_migration_required"
+
+
+def test_data_studio_api_shares_pinned_recipe_preview_and_job_authority(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    definition = {
+        "steps": [
+            {"type": "normalize", "fields": ["email"], "operation": "email"},
+            {"type": "dedupe", "fields": ["email"]},
+        ]
+    }
+    recipe = client.post(
+        "/api/v1/data-studio/recipes",
+        headers=headers,
+        json={"name": "API recipe", "definition": definition},
+    )
+    assert recipe.status_code == 200
+    source = {
+        "file": ("contacts.csv", b"email\nALICE@example.com\nalice@example.com\n", "text/csv")
+    }
+    schema = client.post("/api/v1/data-studio/schema", headers=headers, files=source)
+    assert schema.status_code == 200
+    assert schema.json()["fields"] == ["email"]
+    preview = client.post(
+        "/api/v1/data-studio/preview",
+        headers=headers,
+        data={"definition": json.dumps(definition)},
+        files=source,
+    )
+    assert preview.status_code == 200
+    assert preview.json()["counts"]["removed"] == 1
+    job = client.post(
+        f"/api/v1/data-studio/jobs?recipe_revision_id={recipe.json()['current_revision_id']}",
+        headers=headers,
+        files=source,
+    )
+    assert job.status_code == 200
+    started = client.post(f"/api/v1/data-studio/jobs/{job.json()['id']}/start", headers=headers)
+    assert started.status_code == 200
+    for _ in range(50):
+        detail = client.get(f"/api/v1/data-studio/jobs/{job.json()['id']}").json()
+        if detail["status"] not in {"pending", "running"}:
+            break
+        time.sleep(0.02)
+    assert detail["status"] == "completed"
+    assert {item["kind"] for item in detail["artifacts"]} == {"output", "errors"}
 
 
 def test_compiled_frontend_is_served(tmp_path: Path) -> None:

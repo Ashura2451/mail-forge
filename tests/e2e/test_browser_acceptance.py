@@ -128,6 +128,56 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
+def test_data_studio_browser_recipe_preview(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "data-studio-browser.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        "from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="Data Studio").click()
+            page.locator("input[aria-label='Data Studio source file']").set_input_files(
+                {
+                    "name": "contacts.csv",
+                    "mimeType": "text/csv",
+                    "buffer": (
+                        b"email,first,last\n"
+                        b"Alice@example.com,Alice,One\n"
+                        b"alice@example.com,Alice,One\n"
+                    ),
+                }
+            )
+            page.get_by_role("button", name="Save current recipe").click()
+            page.get_by_text("Recipe saved").wait_for()
+            page.get_by_role("button", name="Preview source").click()
+            page.get_by_text("Preview only").wait_for()
+            assert page.get_by_text("1 removed").is_visible()
+            page.set_viewport_size({"width": 390, "height": 844})
+            assert page.get_by_role("heading", name="Source and recipe").is_visible()
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Path) -> None:
     executable = _chromium_executable()
     if executable is None:

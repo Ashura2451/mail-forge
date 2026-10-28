@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, bootstrapSession, upload, type ApiRecord } from './api/client'
+import { api, bootstrapSession, upload, uploadWithFields, type ApiRecord } from './api/client'
 import './App.css'
 
 const nav = [
-  ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['message-studio', 'Message Studio', '✎'], ['campaigns', 'Campaigns', '↗'], ['automations', 'Automations', '✦'], ['list-tools', 'List Tools', '▦'],
+  ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['data-studio', 'Data Studio', '◆'], ['message-studio', 'Message Studio', '✎'], ['campaigns', 'Campaigns', '↗'], ['automations', 'Automations', '✦'], ['list-tools', 'List Tools', '▦'],
   ['inbound', 'Inbound', '↘'], ['providers', 'Providers', '◈'], ['activity', 'Activity', '≡'],
 ]
 
@@ -19,7 +19,7 @@ function App() {
     const sequence = ++loadSequence.current
     setBusy(true); setError('')
     try {
-      const next = await api(target === 'dashboard' ? '/dashboard' : target === 'list-tools' ? '/list-tools/jobs' : target === 'message-studio' ? '/message-studio/documents' : `/${target}`)
+      const next = await api(target === 'dashboard' ? '/dashboard' : target === 'list-tools' ? '/list-tools/jobs' : target === 'message-studio' ? '/message-studio/documents' : target === 'data-studio' ? '/data-studio/recipes' : `/${target}`)
       if (sequence === loadSequence.current) setData(next)
     }
     catch (err) { setError(err instanceof Error ? err.message : 'Unable to load this view') }
@@ -40,13 +40,50 @@ function App() {
     </aside>
     <main className="main"><header className="topbar"><div><p className="eyebrow">WORKSPACE / {view.toUpperCase()}</p><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div><div className="top-actions"><span className="status-chip"><span className="live-dot" /> Local</span><button className="icon-button" aria-label="Refresh" onClick={() => load()}>↻</button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}{error && <div className="error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
-      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
+      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
     </main>
   </div>
 }
 
 function Dashboard({ data, onNavigate }: { data: ApiRecord, onNavigate: (view: string) => void }) { const counts = data.counts || {}; return <div className="content"><div className="hero-copy"><div><p className="eyebrow teal">OPERATOR OVERVIEW</p><h2>Make every send<br /><em>accountable.</em></h2><p className="lede">A calm, local control room for contacts, policy-aware campaigns, and inbound signals.</p></div><div className="hero-note"><span className="stamp">LOCAL<br />FIRST</span><p>Durable actions<br />stay in your SQLite<br />authority.</p></div></div><div className="stat-grid"><Stat label="Contacts" value={counts.contacts ?? 0} tone="teal" /><Stat label="Lists" value={counts.lists ?? 0} /><Stat label="Inbound reviews" value={counts.inbound?.pending_reviews ?? 0} tone="amber" /><Stat label="Schema" value={`v${data.schema_version ?? '—'}`} /></div><section className="section-head"><div><p className="eyebrow">RECENT WORK</p><h3>Campaign pulse</h3></div><button className="text-button" onClick={() => onNavigate('campaigns')}>View campaigns ↗</button></section><CampaignTable items={data.campaigns || []} empty="No campaigns yet. Create a list and launch a synthetic campaign to begin." /></div> }
 function Stat({ label, value, tone = '' }: { label: string, value: string | number, tone?: string }) { return <div className={`stat-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>durable local state</small></div> }
+
+function DataStudio({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void }) {
+  const [file, setFile] = useState<File | null>(null)
+  const [recipeName, setRecipeName] = useState('Normalize and classify contacts')
+  const [selected, setSelected] = useState<ApiRecord | null>(null)
+  const [definition, setDefinition] = useState<ApiRecord>({ steps: [{ type: 'normalize', fields: ['email'], operation: 'email' }, { type: 'dedupe', fields: ['email'] }] })
+  const [preview, setPreview] = useState<ApiRecord | null>(null)
+  const recipes: ApiRecord[] = data.items || []
+  const steps: ApiRecord[] = definition.steps || []
+  const reloadRecipe = async (id: string) => {
+    const result = await api<ApiRecord>(`/data-studio/recipes/${id}`)
+    setSelected(result); setDefinition(result.revision.definition)
+  }
+  const updateStep = (index: number, changes: ApiRecord) => setDefinition(current => ({ ...current, steps: current.steps.map((step: ApiRecord, position: number) => position === index ? { ...step, ...changes } : step) }))
+  const addStep = (type: string) => {
+    const defaults: Record<string, ApiRecord> = {
+      normalize: { type, fields: ['email'], operation: 'email' },
+      dedupe: { type, fields: ['email'] },
+      filter: { type, condition: { field: 'email', op: 'present' } },
+      computed: { type, field: 'full_name', expression: { kind: 'concat', fields: ['first', 'last'], separator: ' ' } },
+      provider_classify: { type, field: 'email', output_field: 'provider' },
+      validate: { type, required: ['email'], allowed: {} },
+    }
+    setDefinition(current => ({ ...current, steps: [...(current.steps || []), defaults[type]] }))
+  }
+  const saveRecipe = () => onRun(async () => {
+    const result = selected ? await api<ApiRecord>(`/data-studio/recipes/${selected.id}/revisions`, { method: 'POST', body: JSON.stringify({ definition, expected_revision_id: selected.current_revision_id }) }) : await api<ApiRecord>('/data-studio/recipes', { method: 'POST', body: JSON.stringify({ name: recipeName, description: 'Pinned local transformation recipe', definition }) })
+    setSelected(result)
+  }, selected ? 'Recipe revision saved' : 'Recipe saved')
+  const inspect = () => file && onRun(async () => { setPreview(await uploadWithFields('/data-studio/preview', file, { definition: JSON.stringify(definition) })) }, 'Preview ready')
+  const run = () => file && selected && onRun(async () => { const job = await upload('/data-studio/jobs', file, '?recipe_revision_id=' + encodeURIComponent(selected.current_revision_id)); await api(`/data-studio/jobs/${job.id}/start`, { method: 'POST' }) }, 'Processing job started')
+  return <div className="content"><div className="toolbar"><div><p className="eyebrow teal">DATA STUDIO</p><p className="muted">Transform local structured data with a pinned, explainable recipe. Preview never changes the source.</p></div><span className="status-chip">{recipes.length} recipes</span></div>
+    <div className="split"><section className="panel"><div className="panel-head"><div><h3>Source and recipe</h3><p className="muted">CSV, TSV, JSON, JSONL, or line-based TXT · bounded local processing</p></div></div><label className="file-drop">{file ? file.name : 'Choose a structured data file'}<input aria-label="Data Studio source file" type="file" accept=".csv,.tsv,.json,.jsonl,.txt" onChange={event => setFile(event.target.files?.[0] || null)} /></label><label>Recipe name<input value={recipeName} onChange={event => setRecipeName(event.target.value)} /></label><div className="button-row"><button disabled={!file} onClick={inspect}>Preview source</button><button className="primary" disabled={!file || !selected} onClick={run}>Start processing</button></div></section><section className="panel"><div className="panel-head"><div><h3>Saved recipes</h3><p className="muted">Runs pin the selected revision.</p></div></div>{recipes.length ? <div className="list-stack">{recipes.map(recipe => <button className={selected?.id === recipe.id ? 'list-row selected' : 'list-row'} key={recipe.id} onClick={() => void reloadRecipe(recipe.id)}><span><strong>{recipe.name}</strong><small>{recipe.status} · {recipe.current_revision_id?.slice(0, 8)}</small></span><b>Open →</b></button>)}</div> : <Empty text="Save a recipe after choosing your first steps." />}<button className="primary full" onClick={saveRecipe}>Save current recipe</button></section></div>
+    <section className="panel"><div className="panel-head"><div><h3>Ordered processing steps</h3><p className="muted">Each step is typed and reviewed before execution; no expressions run as Python or JavaScript.</p></div><select aria-label="Add Data Studio step" defaultValue="" onChange={event => { if (event.target.value) { addStep(event.target.value); event.target.value = '' } }}><option value="">+ Add step</option><option value="normalize">Normalize</option><option value="filter">Filter</option><option value="computed">Computed field</option><option value="dedupe">Remove duplicates</option><option value="provider_classify">Classify provider</option><option value="validate">Validate fields</option></select></div>{steps.map((step, index) => <article className="studio-block" key={index}><div className="studio-block-head"><strong>{index + 1}. {step.type}</strong><button aria-label={`Remove step ${index + 1}`} onClick={() => setDefinition(current => ({ ...current, steps: current.steps.filter((_: ApiRecord, position: number) => position !== index) }))}>×</button></div>{step.type === 'normalize' && <div className="inline-fields"><label>Fields<input value={(step.fields || []).join(', ')} onChange={event => updateStep(index, { fields: event.target.value.split(',').map((value: string) => value.trim()).filter(Boolean) })} /></label><label>Operation<select value={step.operation || 'whitespace'} onChange={event => updateStep(index, { operation: event.target.value })}><option value="email">Email address</option><option value="whitespace">Trim whitespace</option><option value="lower">Lowercase</option><option value="upper">Uppercase</option></select></label></div>}{step.type === 'dedupe' && <label>Key fields<input value={(step.fields || []).join(', ')} onChange={event => updateStep(index, { fields: event.target.value.split(',').map((value: string) => value.trim()) })} /></label>}{step.type === 'computed' && <div className="inline-fields"><label>Output field<input value={step.field || ''} onChange={event => updateStep(index, { field: event.target.value })} /></label><label>Expression<select value={step.expression?.kind || 'concat'} onChange={event => updateStep(index, { expression: { ...step.expression, kind: event.target.value } })}><option value="concat">Combine fields</option><option value="email_domain">Email domain</option><option value="provider_classify">Provider classification</option></select></label></div>}{step.type === 'filter' && <div className="inline-fields"><label>Field<input value={step.condition?.field || ''} onChange={event => updateStep(index, { condition: { ...step.condition, field: event.target.value } })} /></label><label>Operator<select value={step.condition?.op || 'present'} onChange={event => updateStep(index, { condition: { ...step.condition, op: event.target.value } })}><option value="present">Present</option><option value="missing">Missing</option><option value="contains">Contains</option><option value="equals">Equals</option></select></label></div>}{step.type === 'provider_classify' && <label>Email field<input value={step.field || 'email'} onChange={event => updateStep(index, { field: event.target.value })} /></label>}{step.type === 'validate' && <label>Required fields<input value={(step.required || []).join(', ')} onChange={event => updateStep(index, { required: event.target.value.split(',').map((value: string) => value.trim()).filter(Boolean) })} /></label>}</article>)}</section>
+    {preview && <section className="panel table-panel"><div className="panel-head"><div><h3>Preview</h3><p className="muted">Preview only · {preview.counts?.input || 0} input · {preview.counts?.output || 0} output · {preview.counts?.removed || 0} removed · {preview.counts?.errors || 0} validation errors</p></div></div><table><thead><tr>{Object.keys(preview.rows?.[0] || {}).filter(key => key !== '__source_row').map(key => <th key={key}>{key}</th>)}</tr></thead><tbody>{(preview.rows || []).slice(0, 20).map((row: ApiRecord, index: number) => <tr key={index}>{Object.keys(preview.rows?.[0] || {}).filter(key => key !== '__source_row').map(key => <td key={key}>{typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></section>}
+  </div>
+}
 
 type StudioBlock = ApiRecord & { type: string }
 

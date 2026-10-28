@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1099,6 +1099,80 @@ CREATE INDEX IF NOT EXISTS idx_inbound_mailbox_actions_source
 ON inbound_mailbox_actions(source_ref, created_at DESC);
 """
 
+MIGRATION_13_SQL = """
+CREATE TABLE IF NOT EXISTS data_studio_recipes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
+    current_revision_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'local-operator'
+);
+CREATE TABLE IF NOT EXISTS data_studio_recipe_revisions (
+    id TEXT PRIMARY KEY,
+    recipe_id TEXT NOT NULL REFERENCES data_studio_recipes(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    definition_json TEXT NOT NULL,
+    input_schema_json TEXT NOT NULL DEFAULT '{}',
+    output_schema_json TEXT NOT NULL DEFAULT '{}',
+    validation_json TEXT NOT NULL DEFAULT '{}',
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'local-operator',
+    UNIQUE(recipe_id, revision_number)
+);
+CREATE INDEX IF NOT EXISTS idx_data_studio_recipe_revisions
+ON data_studio_recipe_revisions(recipe_id, revision_number DESC);
+CREATE TABLE IF NOT EXISTS data_studio_jobs (
+    id TEXT PRIMARY KEY,
+    recipe_revision_id TEXT NOT NULL REFERENCES data_studio_recipe_revisions(id),
+    source_filename TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed', 'canceled')),
+    processed_count INTEGER NOT NULL DEFAULT 0,
+    output_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    job_dir TEXT NOT NULL,
+    correlation_id TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_data_studio_jobs_status
+ON data_studio_jobs(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS data_studio_artifacts (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES data_studio_jobs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    path TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(job_id, kind)
+);
+CREATE TABLE IF NOT EXISTS data_studio_extensions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    version TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    input_contract_json TEXT NOT NULL,
+    output_contract_json TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1335,6 +1409,13 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (12, utc_now()),
                 )
+                current = 12
+            if current < 13:
+                self._apply_migration_13(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (13, utc_now()),
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1416,6 +1497,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_12(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_12_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_13(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_13_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

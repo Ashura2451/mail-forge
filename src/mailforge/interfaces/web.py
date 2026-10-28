@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -24,6 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from mailforge.application.automation import AutomationError, AutomationService
 from mailforge.application.campaigns import CampaignService
+from mailforge.application.data_studio import DataStudioError, DataStudioService, detect_schema
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_operations import InboundOperations, InboundOperationsError
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
@@ -57,6 +58,17 @@ CSRF_HEADER = "x-mailforge-csrf"
 class ListInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
+
+
+class DataStudioRecipeInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=500)
+    definition: dict[str, Any] = Field(default_factory=lambda: {"steps": []})
+
+
+class DataStudioRevisionInput(BaseModel):
+    definition: dict[str, Any]
+    expected_revision_id: str | None = None
 
 
 class CampaignInput(BaseModel):
@@ -468,6 +480,7 @@ class WebRuntime:
             self.automation, self.automation_workers
         )
         self.list_processing = ListProcessingService(self.store)
+        self.data_studio = DataStudioService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
         self._recover_running_campaigns()
 
@@ -495,6 +508,7 @@ class WebRuntime:
     def close(self) -> None:
         self.automation_runtime.shutdown()
         self.list_processing.close()
+        self.data_studio.close()
         self.workers.shutdown()
         self.automation_workers.shutdown()
 
@@ -616,6 +630,32 @@ def _upload_list_tool(upload: UploadFile, directory: Path) -> Path:
             total += len(chunk)
             if total > 1_073_741_824:
                 raise ValueError("list input exceeds the 1 GiB local processing limit")
+            handle.write(chunk)
+        handle.close()
+        return Path(handle.name)
+    except Exception:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+
+
+def _upload_data_studio(upload: UploadFile, directory: Path) -> Path:
+    """Retain a bounded structured source in the Data Studio app directory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = Path(upload.filename or "data.csv").suffix.lower()
+    handle = tempfile.NamedTemporaryFile(
+        prefix="data-source-", suffix=suffix, dir=directory, delete=False
+    )
+    total = 0
+    try:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1_073_741_824:
+                raise ValueError("structured input exceeds the 1 GiB local processing limit")
             handle.write(chunk)
         handle.close()
         return Path(handle.name)
@@ -1142,6 +1182,128 @@ def create_app(
             return _error(
                 404 if error.code == "artifact_not_found" else 403, error.code, str(error)
             )
+
+    @app.get(f"{API_PREFIX}/data-studio/recipes")
+    async def data_studio_recipes(include_archived: bool = False):
+        return {"items": runtime.data_studio.list_recipes(include_archived=include_archived)}
+
+    @app.post(f"{API_PREFIX}/data-studio/recipes")
+    async def create_data_studio_recipe(payload: DataStudioRecipeInput):
+        try:
+            return runtime.data_studio.create_recipe(
+                payload.name, payload.description, payload.definition
+            )
+        except DataStudioError as error:
+            return _error(409 if error.code == "recipe_exists" else 400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/data-studio/recipes/{{recipe_id}}")
+    async def data_studio_recipe(recipe_id: str, revision_id: str | None = None):
+        try:
+            return runtime.data_studio.get_recipe(recipe_id, revision_id)
+        except DataStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/recipes/{{recipe_id}}/revisions")
+    async def save_data_studio_revision(recipe_id: str, payload: DataStudioRevisionInput):
+        try:
+            return runtime.data_studio.save_revision(
+                recipe_id,
+                payload.definition,
+                expected_revision_id=payload.expected_revision_id,
+            )
+        except DataStudioError as error:
+            return _error(409 if error.code == "revision_conflict" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/validate")
+    async def validate_data_studio_recipe(payload: DataStudioRevisionInput):
+        try:
+            definition = runtime.data_studio.validate_definition(payload.definition)
+            return {"valid": True, "definition": definition}
+        except DataStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/schema")
+    async def inspect_data_studio_schema(file: UploadFile = File(...)):  # noqa: B008
+        temporary = _upload_data_studio(file, runtime.data_studio.root)
+        try:
+            return detect_schema(temporary)
+        except (DataStudioError, OSError, UnicodeError) as error:
+            return _error(400, getattr(error, "code", "source_invalid"), str(error))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.post(f"{API_PREFIX}/data-studio/preview")
+    async def preview_data_studio(file: UploadFile = File(...), definition: str = Form("{}")):  # noqa: B008
+        temporary = _upload_data_studio(file, runtime.data_studio.root)
+        try:
+            parsed = json.loads(definition)
+            return runtime.data_studio.preview(temporary, parsed)
+        except (DataStudioError, OSError, UnicodeError, json.JSONDecodeError) as error:
+            return _error(400, getattr(error, "code", "preview_invalid"), str(error))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get(f"{API_PREFIX}/data-studio/jobs")
+    async def data_studio_jobs(limit: int = 50, offset: int = 0):
+        safe_limit = max(1, min(limit, 100))
+        return {
+            "items": _query(
+                runtime.store,
+                "SELECT id,recipe_revision_id,source_filename,status,processed_count,"
+                "output_count,rejected_count,error_count,summary_json,error_message,"
+                "created_at,updated_at,started_at,completed_at,correlation_id "
+                "FROM data_studio_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (safe_limit, max(0, offset)),
+            )
+        }
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs")
+    async def create_data_studio_job(
+        recipe_revision_id: str,
+        file: UploadFile = File(...),  # noqa: B008
+    ):
+        temporary = _upload_data_studio(file, runtime.data_studio.root)
+        try:
+            job = runtime.data_studio.create_job(
+                temporary, file.filename or "data.csv", recipe_revision_id
+            )
+            temporary.unlink(missing_ok=True)
+            return job
+        except DataStudioError as error:
+            temporary.unlink(missing_ok=True)
+            return _error(
+                404 if error.code == "revision_not_found" else 400, error.code, str(error)
+            )
+
+    @app.get(f"{API_PREFIX}/data-studio/jobs/{{job_id}}")
+    async def data_studio_job(job_id: str):
+        try:
+            return runtime.data_studio.get_job(job_id)
+        except DataStudioError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs/{{job_id}}/{{action}}")
+    async def data_studio_job_action(job_id: str, action: str):
+        try:
+            if action == "start":
+                return runtime.data_studio.start(job_id)
+            if action == "cancel":
+                return runtime.data_studio.cancel(job_id)
+            return _error(400, "action_invalid", "unsupported Data Studio job action")
+        except DataStudioError as error:
+            return _error(
+                404 if error.code == "job_not_found" else 409 if error.code == "job_state" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/data-studio/jobs/{{job_id}}/artifacts/{{artifact_id}}")
+    async def data_studio_artifact(job_id: str, artifact_id: str):
+        try:
+            path, filename = runtime.data_studio.artifact_path(job_id, artifact_id)
+            return FileResponse(path, filename=filename, headers={"cache-control": "no-store"})
+        except DataStudioError as error:
+            return _error(404, error.code, str(error))
 
     @app.get(f"{API_PREFIX}/campaigns")
     async def campaigns(limit: int = 100, offset: int = 0):
