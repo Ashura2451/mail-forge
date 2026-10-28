@@ -45,7 +45,7 @@ def _service(tmp_path: Path, records: dict[tuple[str, str], list[str]] | None = 
 
 def test_schema_and_sender_identity_are_durable(tmp_path: Path) -> None:
     store, service = _service(tmp_path)
-    assert store.schema_version() == 21
+    assert store.schema_version() == 22
     saved = service.register_sender_identity(
         "primary",
         visible_from="Sender@example.com",

@@ -42,6 +42,7 @@ from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_operations import InboundOperations, InboundOperationsError
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import iter_raw_values
+from mailforge.application.integration_hub import IntegrationHubError, IntegrationHubService
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.local_application import (
     DataDirectory,
@@ -121,6 +122,41 @@ class DataConnectionSnapshotInput(BaseModel):
 class DataConnectionHandoffInput(BaseModel):
     recipe_revision_id: str
     correlation_id: str | None = Field(default=None, max_length=240)
+
+
+class IntegrationClientInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    scopes: list[str] = Field(min_length=1, max_length=5)
+    expires_at: str
+
+
+class IntegrationClientRotateInput(BaseModel):
+    expires_at: str | None = None
+
+
+class IntegrationEventInput(BaseModel):
+    event_id: str = Field(min_length=1, max_length=160)
+    source: str = Field(min_length=1, max_length=200)
+    type: str = Field(min_length=1, max_length=120)
+    time: str
+    schema_version: str = Field(min_length=1, max_length=32)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationWebhookInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    endpoint_url: str = Field(min_length=8, max_length=1_000)
+    event_types: list[str] = Field(min_length=1, max_length=20)
+    secret_ref: str = Field(min_length=5, max_length=200)
+    payload_version: str = Field(default="1", min_length=1, max_length=20)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = False
+    local_fixture: bool = False
+
+
+class IntegrationWebhookStateInput(BaseModel):
+    enabled: bool
 
 
 class DataStudioRevisionInput(BaseModel):
@@ -479,14 +515,22 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
         if host not in self.session.allowed_hosts:
             return _error(400, "invalid_host", "Mailforge only accepts loopback Host headers")
         one_click_path = request.url.path.startswith(f"{API_PREFIX}/unsubscribe/")
+        integration_event_path = (
+            request.url.path == f"{API_PREFIX}/integrations/events" and request.method == "POST"
+        )
         if (
             request.url.path.startswith(API_PREFIX)
             and request.url.path != f"{API_PREFIX}/session"
             and not one_click_path
+            and not integration_event_path
         ):
             if request.cookies.get(SESSION_COOKIE) != self.session.session_id:
                 return _error(401, "session_required", "a local operator session is required")
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not one_click_path:
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not one_click_path
+            and not integration_event_path
+        ):
             origin = request.headers.get("origin")
             if origin:
                 parsed = urlsplit(origin)
@@ -660,9 +704,12 @@ class AutomationWorkerSupervisor:
 class AutomationRuntimeSupervisor:
     """Polls durable facts and schedules; SQLite remains the source of truth."""
 
-    def __init__(self, automation: AutomationService, workers: AutomationWorkerSupervisor):
+    def __init__(
+        self, automation: AutomationService, workers: AutomationWorkerSupervisor, integrations=None
+    ):
         self.automation = automation
         self.workers = workers
+        self.integrations = integrations
         self.stop = threading.Event()
         self.thread = threading.Thread(
             target=self._run, name="mailforge-automation-supervisor", daemon=True
@@ -675,6 +722,8 @@ class AutomationRuntimeSupervisor:
                 run_ids = self.automation.reconcile_operational_events(limit=100)
                 run_ids.extend(self.automation.reconcile_schedules(limit=25))
                 run_ids.extend(self.automation.due_run_ids(limit=25))
+                if self.integrations is not None:
+                    self.integrations.process_due_deliveries(limit=25)
                 for run_id in dict.fromkeys(run_ids):
                     self.workers.start(run_id)
             except Exception:
@@ -762,13 +811,17 @@ class WebRuntime:
             data_studio=self.data_studio,
             programmable=self.programmable,
         )
+        self.integrations = IntegrationHubService(
+            self.store,
+            automation=self.automation,
+        )
         self.inbound_operations = InboundOperations(
             self.store, message_studio=self.message_studio, programmable=self.programmable
         )
         self.inbound.set_operations(self.inbound_operations)
         self.automation_workers = AutomationWorkerSupervisor(self.automation)
         self.automation_runtime = AutomationRuntimeSupervisor(
-            self.automation, self.automation_workers
+            self.automation, self.automation_workers, self.integrations
         )
         self.list_processing = ListProcessingService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
@@ -830,6 +883,14 @@ class WebRuntime:
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+def _bearer(request: Request) -> str:
+    value = request.headers.get("authorization", "")
+    scheme, _, token = value.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise IntegrationHubError("a bearer integration token is required", "unauthorized")
+    return token
 
 
 def _row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -1304,6 +1365,116 @@ def create_app(
                 str(error),
             )
 
+    @app.get(f"{API_PREFIX}/integrations")
+    async def integrations_summary(limit: int = 50, offset: int = 0):
+        try:
+            return {
+                "catalog": runtime.integrations.event_catalog(),
+                "clients": runtime.integrations.list_clients(limit=limit, offset=offset),
+                "subscriptions": runtime.integrations.list_subscriptions(
+                    limit=limit, offset=offset
+                ),
+                "events": runtime.integrations.list_events(limit=limit, offset=offset),
+                "deliveries": runtime.integrations.deliveries(limit=limit, offset=offset),
+                "diagnostics": runtime.integrations.diagnostics(),
+            }
+        except IntegrationHubError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/integrations/clients")
+    async def integration_clients(limit: int = 50, offset: int = 0):
+        return runtime.integrations.list_clients(limit=limit, offset=offset)
+
+    @app.post(f"{API_PREFIX}/integrations/clients")
+    async def issue_integration_client(payload: IntegrationClientInput):
+        try:
+            return runtime.integrations.issue_client(**payload.model_dump())
+        except IntegrationHubError as error:
+            return _error(409 if error.code == "client_exists" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/integrations/clients/{{client_ref}}/rotate")
+    async def rotate_integration_client(client_ref: str, payload: IntegrationClientRotateInput):
+        try:
+            return runtime.integrations.rotate_client(client_ref, **payload.model_dump())
+        except IntegrationHubError as error:
+            return _error(404 if error.code == "client_not_found" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/integrations/clients/{{client_ref}}/revoke")
+    async def revoke_integration_client(client_ref: str):
+        try:
+            return runtime.integrations.revoke_client(client_ref)
+        except IntegrationHubError as error:
+            return _error(404 if error.code == "client_not_found" else 400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/integrations/events/catalog")
+    async def integration_event_catalog():
+        return runtime.integrations.event_catalog()
+
+    @app.post(f"{API_PREFIX}/integrations/events")
+    async def receive_integration_event(request: Request, payload: IntegrationEventInput):
+        try:
+            client = runtime.integrations.authenticate(_bearer(request), "INGEST_LOCAL_EVENT")
+            return runtime.integrations.submit_event(client, payload.model_dump())
+        except IntegrationHubError as error:
+            status = (
+                401 if error.code in {"unauthorized", "client_revoked", "client_expired"}
+                else 409 if error.code == "event_conflict" else 400
+            )
+            return _error(status, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/integrations/events")
+    async def list_integration_events(limit: int = 50, offset: int = 0):
+        return runtime.integrations.list_events(limit=limit, offset=offset)
+
+    @app.get(f"{API_PREFIX}/integrations/webhooks")
+    async def integration_webhooks(limit: int = 50, offset: int = 0):
+        return runtime.integrations.list_subscriptions(limit=limit, offset=offset)
+
+    @app.post(f"{API_PREFIX}/integrations/webhooks")
+    async def create_integration_webhook(payload: IntegrationWebhookInput):
+        try:
+            return runtime.integrations.create_subscription(**payload.model_dump())
+        except IntegrationHubError as error:
+            return _error(
+                409 if error.code == "subscription_exists" else 400, error.code, str(error)
+            )
+
+    @app.post(f"{API_PREFIX}/integrations/webhooks/{{subscription_ref}}/state")
+    async def set_integration_webhook_state(
+        subscription_ref: str, payload: IntegrationWebhookStateInput
+    ):
+        try:
+            return runtime.integrations.set_subscription(subscription_ref, enabled=payload.enabled)
+        except IntegrationHubError as error:
+            return _error(
+                404 if error.code == "subscription_not_found" else 400, error.code, str(error)
+            )
+
+    @app.get(f"{API_PREFIX}/integrations/webhooks/{{subscription_ref}}/preview")
+    async def preview_integration_webhook(subscription_ref: str, event_type: str | None = None):
+        try:
+            return runtime.integrations.preview_subscription(
+                subscription_ref, event_type=event_type
+            )
+        except IntegrationHubError as error:
+            return _error(
+                404 if error.code == "subscription_not_found" else 400, error.code, str(error)
+            )
+
+    @app.get(f"{API_PREFIX}/integrations/deliveries")
+    async def integration_deliveries(
+        subscription_ref: str | None = None, limit: int = 100, offset: int = 0
+    ):
+        return runtime.integrations.deliveries(subscription_ref, limit=limit, offset=offset)
+
+    @app.post(f"{API_PREFIX}/integrations/deliveries/process")
+    async def process_integration_deliveries():
+        return {"items": runtime.integrations.process_due_deliveries()}
+
+    @app.get(f"{API_PREFIX}/integrations/diagnostics")
+    async def integration_diagnostics():
+        return runtime.integrations.diagnostics()
+
     @app.get(f"{API_PREFIX}/dashboard")
     async def dashboard():
         campaigns = _query(
@@ -1327,6 +1498,10 @@ def create_app(
     @app.get(f"{API_PREFIX}/reports/email-standards")
     async def report_email_standards(limit: int = 100):
         return runtime.reporting.email_standards(limit=limit)
+
+    @app.get(f"{API_PREFIX}/reports/integration")
+    async def report_integration(limit: int = 100):
+        return runtime.reporting.integration(limit=limit)
 
     @app.get(f"{API_PREFIX}/reports/summary")
     async def report_summary(
