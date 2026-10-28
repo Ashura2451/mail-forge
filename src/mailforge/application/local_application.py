@@ -10,6 +10,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -29,6 +30,7 @@ APP_NAME = "Mailforge"
 DEFAULT_PORT = 8765
 BACKUP_FORMAT = "mailforge-application-backup"
 BACKUP_VERSION = 1
+MAX_BACKUP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def application_version() -> str:
@@ -102,6 +104,7 @@ class DataDirectory:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.root.is_symlink():
             raise ValueError("Mailforge data directory must not be a symlink")
+        self.root.chmod(0o700)
         for path in (self.root / "config", self.backups, self.logs, self.runtime, self.artifacts):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.chmod(0o700)
@@ -227,6 +230,29 @@ def _safe_archive_name(name: str) -> None:
         raise ValueError("backup contains an unsafe path")
 
 
+def _archive_member_sha256(archive: zipfile.ZipFile, name: str) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with archive.open(name) as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            size += len(chunk)
+            if size > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                raise ValueError("backup member exceeds the safe uncompressed size limit")
+            digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _extract_archive_member(archive: zipfile.ZipFile, name: str, target: Path) -> None:
+    size = 0
+    with archive.open(name) as source, target.open("wb") as destination:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            size += len(chunk)
+            if size > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                raise ValueError("backup member exceeds the safe uncompressed size limit")
+            destination.write(chunk)
+    os.chmod(target, 0o600)
+
+
 def create_backup(data: DataDirectory, destination: str | Path | None = None) -> Path:
     data.initialize()
     if not data.database.is_file():
@@ -301,10 +327,14 @@ def validate_backup(source: str | Path) -> dict[str, Any]:
         names = archive.namelist()
         for name in names:
             _safe_archive_name(name)
+        if sum(info.file_size for info in archive.infolist()) > MAX_BACKUP_UNCOMPRESSED_BYTES:
+            raise ValueError("backup exceeds the safe uncompressed size limit")
         try:
             manifest = json.loads(archive.read("manifest.json"))
         except (KeyError, json.JSONDecodeError) as error:
             raise ValueError("backup manifest is missing or invalid") from error
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+            raise ValueError("backup manifest is invalid")
         if (
             manifest.get("format") != BACKUP_FORMAT
             or manifest.get("format_version") != BACKUP_VERSION
@@ -313,22 +343,30 @@ def validate_backup(source: str | Path) -> dict[str, Any]:
         if int(manifest.get("schema_version", 0)) > SCHEMA_VERSION:
             raise ValueError("backup database schema is newer than this application")
         members = set(names)
+        if "database/mailforge.sqlite3" not in members:
+            raise ValueError("backup is incomplete")
         for entry in manifest.get("files", []):
+            if not isinstance(entry, dict):
+                raise ValueError("backup manifest entry is invalid")
             name = entry.get("path")
             if not isinstance(name, str) or name not in members:
                 raise ValueError("backup is incomplete")
-            content = archive.read(name)
-            if len(content) != int(entry.get("size", -1)):
+            size, digest = _archive_member_sha256(archive, name)
+            if size != int(entry.get("size", -1)):
                 raise ValueError(
                     "backup integrity check failed: file size does not match its manifest"
                 )
-            if hashlib.sha256(content).hexdigest() != entry.get("sha256"):
+            if digest != entry.get("sha256"):
                 raise ValueError("backup integrity check failed")
         descriptor, temporary_path = tempfile.mkstemp(prefix="mailforge-verify-")
         os.close(descriptor)
         database = Path(temporary_path)
         try:
-            database.write_bytes(archive.read("database/mailforge.sqlite3"))
+            with (
+                archive.open("database/mailforge.sqlite3") as source_handle,
+                database.open("wb") as target_handle,
+            ):
+                shutil.copyfileobj(source_handle, target_handle)
             with sqlite3.connect(database) as connection:
                 result = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if result != "ok":
@@ -368,6 +406,8 @@ def restore_backup(source: str | Path, destination: str | Path, *, replace: bool
     destination_data.root.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination_data.root.parent / f".mailforge-restore-{uuid.uuid4().hex}"
     temporary.mkdir(mode=0o700)
+    backup_old: Path | None = None
+    installed = False
     try:
         with zipfile.ZipFile(source_path) as archive:
             for name in archive.namelist():
@@ -383,17 +423,30 @@ def restore_backup(source: str | Path, destination: str | Path, *, replace: bool
                 else:
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                target.write_bytes(archive.read(name))
+                _extract_archive_member(archive, name, target)
         for directory in ("backups", "logs", "runtime"):
             (temporary / directory).mkdir(mode=0o700)
         if destination_data.root.exists() and replace:
             backup_old = destination_data.root.parent / f".mailforge-old-{uuid.uuid4().hex}"
             destination_data.root.rename(backup_old)
         temporary.rename(destination_data.root)
+        installed = True
+        CampaignStore(destination_data.database).integrity_check()
     except Exception:
+        if installed and destination_data.root.exists():
+            failed = destination_data.root.parent / f".mailforge-failed-{uuid.uuid4().hex}"
+            destination_data.root.rename(failed)
+        if backup_old is not None and backup_old.exists() and not destination_data.root.exists():
+            backup_old.rename(destination_data.root)
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    CampaignStore(destination_data.database).integrity_check()
+    if backup_old is not None:
+        try:
+            shutil.rmtree(backup_old)
+        except OSError as error:
+            raise RuntimeError(
+                f"restore completed; rollback copy was retained at {backup_old}"
+            ) from error
     return destination_data.root
 
 
@@ -403,7 +456,7 @@ def list_backups(data: DataDirectory) -> list[dict[str, Any]]:
     for path in sorted(data.backups.glob("*.zip"), reverse=True):
         try:
             item = validate_backup(path)
-        except (OSError, ValueError, zipfile.BadZipFile) as error:
+        except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
             item = {"valid": False, "path": str(path), "error": str(error)}
         items.append(item)
     return items
@@ -422,6 +475,21 @@ def _health(port: int) -> dict[str, Any] | None:
             return payload if payload.get("application") == APP_NAME else None
     except OSError, ValueError, json.JSONDecodeError, urllib.error.URLError:
         return None
+
+
+def _process_start_time(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    value = result.stdout.strip()
+    return value or None
 
 
 class LocalApplication:
@@ -471,6 +539,7 @@ class LocalApplication:
             )
         log_path = self.data.logs / "application.log"
         log = log_path.open("a", encoding="utf-8")
+        os.chmod(log_path, 0o600)
         command = [
             self.executable,
             "-m",
@@ -503,6 +572,7 @@ class LocalApplication:
                         "port": self.port,
                         "runtime_id": health["runtime_id"],
                         "started_at": health["started_at"],
+                        "process_start": _process_start_time(process.pid),
                     }
                     _write_json(self.record_path, record)
                     if open_browser:
@@ -524,6 +594,20 @@ class LocalApplication:
         if not record:
             return {"running": False, "stopped": False, "message": "Mailforge is not running"}
         pid = int(record["pid"])
+        if record.get("process_start") and _process_start_time(pid) != record["process_start"]:
+            self.record_path.unlink(missing_ok=True)
+            return {
+                "running": False,
+                "stopped": False,
+                "message": "stale runtime record was not signaled",
+            }
+        current = self._record()
+        if not current or current.get("runtime_id") != record.get("runtime_id"):
+            return {
+                "running": False,
+                "stopped": False,
+                "message": "runtime ownership changed; no process was signaled",
+            }
         os.kill(pid, signal.SIGTERM)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:

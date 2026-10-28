@@ -12,7 +12,15 @@ if [ "$ARCH" != "arm64" ]; then
   exit 2
 fi
 
-OUTPUT=${1:-"$PROJECT_ROOT/dist/Mailforge.app"}
+OUTPUT_INPUT=${1:-"$PROJECT_ROOT/dist/Mailforge.app"}
+case "$OUTPUT_INPUT" in
+  /*) OUTPUT="$OUTPUT_INPUT" ;;
+  *) OUTPUT="$PROJECT_ROOT/$OUTPUT_INPUT" ;;
+esac
+case "$OUTPUT" in
+  "$PROJECT_ROOT/dist/"*.app) ;;
+  *) echo "package output must be an .app directly under $PROJECT_ROOT/dist" >&2; exit 2 ;;
+esac
 STAGE="$PROJECT_ROOT/.package-stage"
 RESOURCES="$OUTPUT/Contents/Resources"
 rm -rf "$STAGE" "$OUTPUT"
@@ -26,14 +34,18 @@ uv sync --locked --no-dev
 BASE_PREFIX=$(uv run --locked python -c 'import sys; print(sys.base_prefix)')
 BASE_EXECUTABLE=$(uv run --locked python -c 'import sys; print(sys._base_executable)')
 uv venv --python "$BASE_EXECUTABLE" "$STAGE/venv"
-uv pip install --python "$STAGE/venv/bin/python" "$PROJECT_ROOT"
+uv export --locked --no-dev --no-emit-project --format requirements.txt --output-file "$STAGE/requirements.txt"
+uv pip install --python "$STAGE/venv/bin/python" --requirement "$STAGE/requirements.txt"
+uv build --wheel --out-dir "$STAGE/wheels"
+WHEEL=$(find "$STAGE/wheels" -type f -name 'mailforge-*.whl' -print -quit)
+uv pip install --python "$STAGE/venv/bin/python" --no-deps "$WHEEL"
 
 cp -R "$BASE_PREFIX" "$RESOURCES/python"
 mkdir -p "$RESOURCES/site-packages"
 cp -R "$STAGE/venv/lib/python3.15/site-packages/." "$RESOURCES/site-packages/"
 # Local wheel installation metadata can contain the developer checkout path;
 # the application bundle must not depend on or disclose that path.
-find "$RESOURCES/site-packages" -name direct_url.json -delete
+find "$RESOURCES" \( -name direct_url.json -o -name '*.pth' \) -delete
 
 cat > "$OUTPUT/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

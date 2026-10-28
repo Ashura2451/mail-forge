@@ -609,6 +609,8 @@ class WebRuntime:
             if not snapshot.exists():
                 backup_database_snapshot(database_path, snapshot)
         self.store = CampaignStore(database)
+        if database_path.exists():
+            database_path.chmod(0o600)
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)

@@ -12,6 +12,7 @@ from mailforge.application.local_application import (
     application_status,
     complete_onboarding,
     create_backup,
+    list_backups,
     restore_backup,
     validate_backup,
 )
@@ -38,6 +39,11 @@ def test_local_data_directory_onboarding_and_full_backup_restore(tmp_path: Path)
     ) == "synthetic artifact\n"
     assert CampaignStore(restored / "mailforge.sqlite3").integrity_check()
 
+    replacement = DataDirectory.from_path(tmp_path / "replacement-data").initialize()
+    CampaignStore(replacement.database)
+    restore_backup(backup, replacement.root, replace=True)
+    assert not list(replacement.root.parent.glob(".mailforge-old-*"))
+
 
 def test_tampered_backup_is_refused(tmp_path: Path) -> None:
     data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
@@ -55,6 +61,11 @@ def test_tampered_backup_is_refused(tmp_path: Path) -> None:
                 )
         with pytest.raises(ValueError, match="integrity"):
             validate_backup(tampered)
+
+    malformed = data.backups / "malformed.zip"
+    with zipfile.ZipFile(malformed, "w") as archive:
+        archive.writestr("manifest.json", "[]")
+    assert list_backups(data)[0]["valid"] is False
 
 
 def test_newer_schema_fails_closed(tmp_path: Path) -> None:
@@ -85,3 +96,28 @@ def test_restore_refuses_an_active_destination(
     monkeypatch.setattr(local_application, "_health", lambda _port: {"application": "Mailforge"})
     with pytest.raises(RuntimeError, match="active"):
         restore_backup(backup, destination.root, replace=True)
+
+
+def test_restore_cleanup_failure_keeps_valid_new_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
+    CampaignStore(data.database)
+    backup = create_backup(data)
+    destination = DataDirectory.from_path(tmp_path / "replacement-data").initialize()
+    CampaignStore(destination.database)
+
+    import mailforge.application.local_application as local_application
+
+    original_rmtree = local_application.shutil.rmtree
+
+    def fail_old_root(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name.startswith(".mailforge-old-"):
+            raise OSError("simulated cleanup failure")
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(local_application.shutil, "rmtree", fail_old_root)
+    with pytest.raises(RuntimeError, match="rollback copy was retained"):
+        restore_backup(backup, destination.root, replace=True)
+    assert CampaignStore(destination.database).integrity_check()
+    assert list(destination.root.parent.glob(".mailforge-old-*"))
