@@ -93,6 +93,25 @@ def test_local_api_runs_contact_campaign_lifecycle(tmp_path: Path) -> None:
     assert client.get("/api/v1/activity").json()["items"]
 
 
+def test_local_api_exposes_operational_reports_with_bounded_exports(tmp_path: Path) -> None:
+    client, _headers = _client(tmp_path)
+
+    definitions = client.get("/api/v1/reports/definitions")
+    summary = client.get("/api/v1/reports/summary?preset=last_7_days&timezone=UTC")
+    exported = client.get("/api/v1/reports/export?report_type=summary&format=csv")
+    invalid = client.get("/api/v1/reports/summary?preset=custom&start=2020-01-01&end=2022-01-01")
+
+    assert definitions.status_code == 200
+    assert definitions.json()["version"] == "022.1"
+    assert summary.status_code == 200
+    assert summary.json()["evidence"]["simulated"] is True
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("text/csv")
+    assert "attachment" in exported.headers["content-disposition"]
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "range_too_large"
+
+
 def test_local_api_supports_typed_segments_and_recurring_snapshots(tmp_path: Path) -> None:
     client, headers = _client(tmp_path)
     list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Segments"}).json()["id"]

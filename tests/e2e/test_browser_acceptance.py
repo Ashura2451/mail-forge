@@ -119,6 +119,14 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
                 page.get_by_role("button", name=label).click()
                 assert page.get_by_role("heading", name=label).is_visible()
 
+            page.get_by_role("button", name="Reports & Insights").click()
+            page.get_by_role("heading", name="Reports & Insights", exact=True).first.wait_for()
+            page.get_by_text("Evidence boundary:").wait_for()
+            page.get_by_text("Submission attempts").wait_for()
+            page.get_by_role("button", name="Campaign outcomes").click()
+            page.get_by_role("link", name="Export CSV").wait_for()
+            page.get_by_text("Browser synthetic campaign").wait_for()
+
             page.set_viewport_size({"width": 390, "height": 844})
             page.reload(wait_until="networkidle")
             assert page.locator(".rail").evaluate("e => e.getBoundingClientRect().width") == 68

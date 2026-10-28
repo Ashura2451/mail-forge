@@ -34,6 +34,7 @@ from mailforge.application.message_studio import MessageStudioError, MessageStud
 from mailforge.application.outbound import OutboundService
 from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
+from mailforge.application.reporting import ReportFilters, ReportingError, ReportingService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.domain.campaign import CampaignStatus, ContactCandidate
 from mailforge.domain.email import extract_addresses, normalize_email, validate_email
@@ -497,6 +498,7 @@ class WebRuntime:
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.provider_operations = ProviderOperationsService(self.store)
+        self.reporting = ReportingService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
         self.automation = AutomationService(
             self.store,
@@ -562,6 +564,39 @@ def _row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 def _query(store: CampaignStore, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with store.connect() as connection:
         return [_row(row) for row in connection.execute(sql, params).fetchall()]
+
+
+def _report_filters(
+    *,
+    preset: str,
+    start: str | None,
+    end: str | None,
+    timezone: str,
+    provider_ref: str | None,
+    campaign_id: str | None,
+    workflow_id: str | None,
+    limit: int,
+    offset: int,
+    source_ref: str | None = None,
+    account_ref: str | None = None,
+    folder: str | None = None,
+    job_kind: str | None = None,
+) -> ReportFilters:
+    return ReportFilters(
+        preset=preset,
+        start=start,
+        end=end,
+        timezone=timezone,
+        provider_ref=provider_ref,
+        campaign_id=campaign_id,
+        workflow_id=workflow_id,
+        source_ref=source_ref,
+        account_ref=account_ref,
+        folder=folder,
+        job_kind=job_kind,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def _require_list(store: CampaignStore, list_id: str) -> None:
@@ -752,6 +787,263 @@ def create_app(
                 for item in campaigns
             ],
         }
+
+    @app.get(f"{API_PREFIX}/reports/definitions")
+    async def report_definitions():
+        return runtime.reporting.definitions()
+
+    @app.get(f"{API_PREFIX}/reports/summary")
+    async def report_summary(
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        provider_ref: str | None = None,
+        campaign_id: str | None = None,
+        workflow_id: str | None = None,
+        source_ref: str | None = None,
+        account_ref: str | None = None,
+        folder: str | None = None,
+        job_kind: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.summary(
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=provider_ref,
+                    campaign_id=campaign_id,
+                    workflow_id=workflow_id,
+                    limit=limit,
+                    offset=offset,
+                    source_ref=source_ref,
+                    account_ref=account_ref,
+                    folder=folder,
+                    job_kind=job_kind,
+                )
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/campaigns")
+    async def report_campaigns(
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        provider_ref: str | None = None,
+        campaign_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.campaigns(
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=provider_ref,
+                    campaign_id=campaign_id,
+                    workflow_id=None,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/campaigns/{{campaign_id}}")
+    async def report_campaign_detail(
+        campaign_id: str,
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.campaign_detail(
+                campaign_id,
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=None,
+                    campaign_id=campaign_id,
+                    workflow_id=None,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+        except ReportingError as error:
+            return _error(404 if error.code == "not_found" else 400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/providers")
+    async def report_providers(
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        provider_ref: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.providers(
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=provider_ref,
+                    campaign_id=None,
+                    workflow_id=None,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/workflows")
+    async def report_workflows(
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        workflow_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.workflows(
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=None,
+                    campaign_id=None,
+                    workflow_id=workflow_id,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/inbound")
+    async def report_inbound(
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        source_ref: str | None = None,
+        account_ref: str | None = None,
+        folder: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.inbound(
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=None,
+                    campaign_id=None,
+                    workflow_id=None,
+                    limit=limit,
+                    offset=offset,
+                    source_ref=source_ref,
+                    account_ref=account_ref,
+                    folder=folder,
+                )
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/jobs")
+    async def report_jobs(
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        job_kind: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            return runtime.reporting.jobs(
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=None,
+                    campaign_id=None,
+                    workflow_id=None,
+                    limit=limit,
+                    offset=offset,
+                    job_kind=job_kind,
+                )
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/reports/export")
+    async def report_export(
+        report_type: str = "summary",
+        format: str = "json",
+        preset: str = "last_7_days",
+        start: str | None = None,
+        end: str | None = None,
+        timezone: str = "UTC",
+        provider_ref: str | None = None,
+        campaign_id: str | None = None,
+        workflow_id: str | None = None,
+        source_ref: str | None = None,
+        account_ref: str | None = None,
+        folder: str | None = None,
+        job_kind: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        try:
+            content, media_type, filename = runtime.reporting.export(
+                report_type,
+                _report_filters(
+                    preset=preset,
+                    start=start,
+                    end=end,
+                    timezone=timezone,
+                    provider_ref=provider_ref,
+                    campaign_id=campaign_id,
+                    workflow_id=workflow_id,
+                    limit=limit,
+                    offset=offset,
+                    source_ref=source_ref,
+                    account_ref=account_ref,
+                    folder=folder,
+                    job_kind=job_kind,
+                ),
+                format=format,
+            )
+            return Response(
+                content=content,
+                media_type=media_type,
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except ReportingError as error:
+            return _error(400, error.code, str(error))
 
     @app.get(f"{API_PREFIX}/lists")
     async def lists(limit: int = 100, offset: int = 0):

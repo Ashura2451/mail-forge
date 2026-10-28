@@ -30,6 +30,7 @@ from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import run_outbound_demo
 from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
+from mailforge.application.reporting import ReportFilters, ReportingError, ReportingService
 from mailforge.application.segmentation import SegmentationService
 from mailforge.application.sorting import EmailSorter, SortConfig
 from mailforge.application.transform import (
@@ -407,6 +408,42 @@ def build_parser() -> argparse.ArgumentParser:
     draft.add_argument("--message-id", required=True)
     draft.add_argument("--kind", choices=["reply", "forward"], required=True)
     draft.add_argument("--body", default="")
+    reports = subparsers.add_parser(
+        "reports", help="inspect local operational intelligence and export bounded reports"
+    )
+    report_commands = reports.add_subparsers(dest="reports_command", required=True)
+
+    def add_report_filters(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--database", type=Path, required=True)
+        command.add_argument(
+            "--preset",
+            choices=["today", "yesterday", "last_7_days", "last_30_days", "custom"],
+            default="last_7_days",
+        )
+        command.add_argument("--start")
+        command.add_argument("--end")
+        command.add_argument("--timezone", default="UTC")
+        command.add_argument("--provider-ref")
+        command.add_argument("--campaign-id")
+        command.add_argument("--workflow-id")
+        command.add_argument("--source-ref")
+        command.add_argument("--account-ref")
+        command.add_argument("--folder")
+        command.add_argument("--job-kind", choices=["data_studio", "list_tools"])
+        command.add_argument("--limit", type=int, default=50)
+        command.add_argument("--offset", type=int, default=0)
+
+    report_summary = report_commands.add_parser("summary", help="print the operational summary")
+    add_report_filters(report_summary)
+    report_export = report_commands.add_parser("export", help="write a bounded report export")
+    add_report_filters(report_export)
+    report_export.add_argument(
+        "--report-type",
+        choices=["summary", "campaigns", "providers", "workflows", "inbound", "jobs"],
+        default="summary",
+    )
+    report_export.add_argument("--format", choices=["json", "csv", "html"], default="json")
+    report_export.add_argument("--output", type=Path, required=True)
     provider = subparsers.add_parser(
         "provider", help="inspect safe provider profiles and diagnostics"
     )
@@ -1273,6 +1310,39 @@ def main(argv: list[str] | None = None) -> int:
                         default=str,
                     )
                 )
+    elif args.command == "reports":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = ReportingService(CampaignStore(args.database))
+        filters = ReportFilters(
+            preset=args.preset,
+            start=args.start,
+            end=args.end,
+            timezone=args.timezone,
+            provider_ref=args.provider_ref,
+            campaign_id=args.campaign_id,
+            workflow_id=args.workflow_id,
+            source_ref=args.source_ref,
+            account_ref=args.account_ref,
+            folder=args.folder,
+            job_kind=args.job_kind,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        try:
+            if args.reports_command == "summary":
+                print(json.dumps(service.summary(filters), indent=2, default=str))
+            else:
+                content, _media_type, _filename = service.export(
+                    args.report_type,
+                    filters,
+                    format=args.format,
+                )
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_bytes(content)
+                print(json.dumps({"path": str(args.output), "format": args.format}))
+        except ReportingError as error:
+            raise SystemExit(f"{error.code}: {error}") from error
     elif args.command == "interactive":
         overrides = {}
         if args.results_dir is not None:

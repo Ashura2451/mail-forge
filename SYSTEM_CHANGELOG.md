@@ -1,5 +1,19 @@
 # System changelog
 
+## 2026-10-28 — Operational intelligence and reporting
+
+- Added schema-free `ReportingService` metric definitions and bounded,
+  timezone-aware summary/comparison reports over the canonical SQLite records.
+- Added campaign, provider, inbound, workflow, List Tools/Data Studio, and
+  Message Studio reporting with stable drilldowns, evidence boundaries, and
+  deterministic next-action insights.
+- Added shared API and CLI report surfaces plus the browser Reports & Insights
+  console with range controls, evidence notes, detail tabs, and CSV export.
+- Added bounded JSON/CSV/HTML exports with spreadsheet formula protection and
+  no raw message bodies, credentials, or unrestricted paths in aggregate output.
+- Validation is local and synthetic; no real provider, mailbox, credential, or
+  recipient data was accessed, and SMTP acceptance is not inbox delivery.
+
 ## 2026-10-28 — Inbound operations workbench
 
 - Added schema 12 durable inbound attachment metadata, extracted values,
