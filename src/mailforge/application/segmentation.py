@@ -835,6 +835,20 @@ class SegmentationService:
                         reason,
                     ),
                 )
+                self.store.record_event(
+                    connection,
+                    "list_membership",
+                    f"{list_id}:{contact_id}",
+                    "contact_added_to_list" if action == "add" else "contact_removed_from_list",
+                    {
+                        "list_id": list_id,
+                        "contact_id": contact_id,
+                        "source": source,
+                        "actor": actor,
+                        "idempotency_key": key,
+                        "reason": reason,
+                    },
+                )
         return {"changed": changed, "idempotency_key": key}
 
     def validate_import_rows(

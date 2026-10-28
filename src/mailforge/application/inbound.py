@@ -308,6 +308,32 @@ class InboundService:
             message_id, parsed, classification, correlations, trust
         )
         self.store.mark_inbound_processed(message_id)
+        exact = next((item for item in correlations if item.kind is CorrelationKind.EXACT), None)
+        if trust is TrustStatus.TRUSTED_SYNTHETIC and exact is not None:
+            target = self._target(parsed, correlations)
+            contact_id = None
+            if target:
+                with self.store.connect() as connection:
+                    contact = connection.execute(
+                        "SELECT id FROM contacts WHERE normalized_email = ?", (target,)
+                    ).fetchone()
+                contact_id = contact["id"] if contact else None
+            with self.store.transaction(immediate=True) as connection:
+                self.store.record_event(
+                    connection,
+                    "inbound_message",
+                    message_id,
+                    "trusted_inbound_reconciled",
+                    {
+                        "message_id": message_id,
+                        "contact_id": contact_id,
+                        "target": target,
+                        "trust_status": trust.value,
+                        "correlation_id": exact.entity_id,
+                        "classification": classification.kind.value,
+                        "provenance": {"source_ref": row["source_ref"], "synthetic": True},
+                    },
+                )
         reviews = tuple(
             review["id"]
             for review in self.store.list_inbound_reviews()

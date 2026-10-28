@@ -27,6 +27,7 @@ from mailforge.application.campaigns import CampaignService
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_sources import EmlFileSource
 from mailforge.application.ingest import iter_raw_values
+from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
@@ -282,6 +283,37 @@ class AutomationWorkerSupervisor:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
 
+class AutomationRuntimeSupervisor:
+    """Polls durable facts and schedules; SQLite remains the source of truth."""
+
+    def __init__(self, automation: AutomationService, workers: AutomationWorkerSupervisor):
+        self.automation = automation
+        self.workers = workers
+        self.stop = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, name="mailforge-automation-supervisor", daemon=True
+        )
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop.is_set():
+            try:
+                run_ids = self.automation.reconcile_operational_events(limit=100)
+                run_ids.extend(self.automation.reconcile_schedules(limit=25))
+                run_ids.extend(self.automation.due_run_ids(limit=25))
+                for run_id in dict.fromkeys(run_ids):
+                    self.workers.start(run_id)
+            except Exception:
+                # The next bounded poll retries durable work and leaves the
+                # operator-visible run/event state intact.
+                pass
+            self.stop.wait(0.1)
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=2)
+
+
 class WebRuntime:
     def __init__(self, database: str | Path, frontend_dir: str | Path | None = None):
         self.store = CampaignStore(database)
@@ -293,6 +325,10 @@ class WebRuntime:
         self.workers = WorkerSupervisor(self.outbound)
         self.automation = AutomationService(self.store, campaigns=self.campaigns)
         self.automation_workers = AutomationWorkerSupervisor(self.automation)
+        self.automation_runtime = AutomationRuntimeSupervisor(
+            self.automation, self.automation_workers
+        )
+        self.list_processing = ListProcessingService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
         self._recover_running_campaigns()
 
@@ -318,6 +354,8 @@ class WebRuntime:
                 pass
 
     def close(self) -> None:
+        self.automation_runtime.shutdown()
+        self.list_processing.close()
         self.workers.shutdown()
         self.automation_workers.shutdown()
 
@@ -420,6 +458,32 @@ def _upload_inbound(upload: UploadFile) -> tuple[Path, str]:
         Path(handle.name).unlink(missing_ok=True)
         raise
     return Path(handle.name), digest
+
+
+def _upload_list_tool(upload: UploadFile, directory: Path) -> Path:
+    """Stream one bounded upload into an app-owned private directory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = Path(upload.filename or "contacts.txt").suffix.lower()
+    handle = tempfile.NamedTemporaryFile(
+        prefix="list-input-", suffix=suffix, dir=directory, delete=False
+    )
+    total = 0
+    try:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1_073_741_824:
+                raise ValueError("list input exceeds the 1 GiB local processing limit")
+            handle.write(chunk)
+        handle.close()
+        return Path(handle.name)
+    except Exception:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+        raise
 
 
 def create_app(
@@ -703,6 +767,83 @@ def create_app(
             return _error(404, "list_not_found", "target list was not found")
         except (OSError, ValueError) as error:
             return _error(400, "import_invalid", str(error))
+
+    @app.post(f"{API_PREFIX}/list-tools/preview")
+    async def list_tools_preview(file: UploadFile = File(...)):  # noqa: B008
+        temporary = _upload_list_tool(file, runtime.list_processing.root)
+        try:
+            return runtime.list_processing.preview(temporary)
+        except ListProcessingError as error:
+            return _error(400, error.code, str(error))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get(f"{API_PREFIX}/list-tools/jobs")
+    async def list_tools_jobs(limit: int = 50, offset: int = 0):
+        safe_limit = max(1, min(limit, 100))
+        return {
+            "items": _query(
+                runtime.store,
+                "SELECT id,source_filename,profile,dns_mode,status,processed_count,"
+                "accepted_count,summary_json,error_message,created_at,updated_at,"
+                "started_at,completed_at,correlation_id FROM list_processing_jobs "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (safe_limit, max(0, offset)),
+            )
+        }
+
+    @app.post(f"{API_PREFIX}/list-tools/jobs")
+    async def create_list_tools_job(
+        file: UploadFile = File(...),  # noqa: B008
+        profile: str = "full",
+        dns_mode: str = "offline",
+    ):
+        temporary = _upload_list_tool(file, runtime.list_processing.root)
+        try:
+            job = runtime.list_processing.create_job(
+                temporary, file.filename or "input.txt", profile=profile, dns_mode=dns_mode
+            )
+            temporary.unlink(missing_ok=True)
+            return job
+        except ListProcessingError as error:
+            temporary.unlink(missing_ok=True)
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}")
+    async def list_tools_job(job_id: str):
+        try:
+            return runtime.list_processing.get_job(job_id)
+        except ListProcessingError as error:
+            return _error(404 if error.code == "job_not_found" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/{{action}}")
+    async def list_tools_job_action(job_id: str, action: str):
+        try:
+            if action == "start":
+                return runtime.list_processing.start(job_id)
+            if action == "resume":
+                return runtime.list_processing.start(job_id, resume=True)
+            if action == "pause":
+                return runtime.list_processing.pause(job_id)
+            if action == "cancel":
+                return runtime.list_processing.cancel(job_id)
+            return _error(400, "action_invalid", "unsupported List Tools job action")
+        except ListProcessingError as error:
+            return _error(
+                404 if error.code == "job_not_found" else 409 if error.code == "job_state" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/artifacts/{{artifact_id}}")
+    async def list_tools_artifact(job_id: str, artifact_id: str):
+        try:
+            path, filename = runtime.list_processing.artifact_path(job_id, artifact_id)
+            return FileResponse(path, filename=filename, headers={"cache-control": "no-store"})
+        except ListProcessingError as error:
+            return _error(
+                404 if error.code == "artifact_not_found" else 403, error.code, str(error)
+            )
 
     @app.get(f"{API_PREFIX}/campaigns")
     async def campaigns(limit: int = 100, offset: int = 0):

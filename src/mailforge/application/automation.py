@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -36,6 +37,7 @@ TRIGGER_KINDS = {
     "contact_added_to_list",
     "scheduled_occurrence",
     "trusted_inbound_event",
+    "list_processing_completed",
 }
 NODE_KINDS = {
     "TRIGGER",
@@ -109,6 +111,7 @@ class AutomationService:
         self.store = store
         self.campaigns = campaigns or CampaignService(store)
         self.segmentation = SegmentationService(store)
+        self._event_lock = threading.Lock()
 
     @staticmethod
     def default_graph() -> dict[str, Any]:
@@ -173,6 +176,45 @@ class AutomationService:
                 and not node.get("config", {}).get("list_id")
             ):
                 errors.append(f"trigger {node_id} requires a list_id")
+            if kind == "TRIGGER" and node.get("config", {}).get("trigger_kind") in {
+                "scheduled_occurrence",
+            }:
+                schedule = node.get("config", {})
+                if not any(
+                    key in schedule for key in ("due_at_utc", "delay_seconds", "local_time")
+                ):
+                    errors.append(
+                        f"scheduled trigger {node_id} requires a due_at_utc, delay_seconds, or local_time"
+                    )
+                if "delay_seconds" in schedule and (
+                    not isinstance(schedule["delay_seconds"], int)
+                    or not 0 <= schedule["delay_seconds"] <= MAX_WAIT_SECONDS
+                ):
+                    errors.append(f"scheduled trigger {node_id} has an invalid bounded delay")
+                if "due_at_utc" in schedule:
+                    try:
+                        due = datetime.fromisoformat(
+                            str(schedule["due_at_utc"]).replace("Z", "+00:00")
+                        )
+                        if due.tzinfo is None:
+                            errors.append(
+                                f"scheduled trigger {node_id} due_at_utc must include a timezone"
+                            )
+                    except ValueError:
+                        errors.append(f"scheduled trigger {node_id} has an invalid due_at_utc")
+                if "local_time" in schedule:
+                    try:
+                        hour, minute = (
+                            int(value) for value in str(schedule["local_time"]).split(":", 1)
+                        )
+                        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+                            raise ValueError
+                    except TypeError, ValueError:
+                        errors.append(f"scheduled trigger {node_id} local_time must be HH:MM")
+                    try:
+                        ZoneInfo(str(schedule.get("timezone", "UTC")))
+                    except ZoneInfoNotFoundError, TypeError:
+                        errors.append(f"scheduled trigger {node_id} has an invalid IANA timezone")
             if kind == "CONDITION":
                 segment_id = node.get("config", {}).get("segment_id")
                 segment_revision_id = node.get("config", {}).get("segment_revision_id")
@@ -666,6 +708,7 @@ class AutomationService:
                     "UPDATE automation_workflows SET status = ?, active_revision_id = ?, updated_at = ?, updated_by = ? WHERE id = ?",
                     (status, revision_id, utc_now(), actor, workflow_id),
                 )
+                self._ensure_schedule_states(connection, workflow_id, revision_id)
             else:
                 status = "paused" if action == "pause" else "archived"
                 connection.execute(
@@ -681,6 +724,226 @@ class AutomationService:
                 actor,
             )
         return self.get_workflow(workflow_id)
+
+    def _ensure_schedule_states(self, connection, workflow_id: str, revision_id: str) -> None:
+        revision = connection.execute(
+            "SELECT graph_json FROM automation_revisions WHERE id = ?", (revision_id,)
+        ).fetchone()
+        if revision is None:
+            return
+        graph = json.loads(revision["graph_json"])
+        now = _now()
+        for node in graph.get("nodes", []):
+            if (
+                node.get("kind") != "TRIGGER"
+                or node.get("config", {}).get("trigger_kind") != "scheduled_occurrence"
+            ):
+                continue
+            due = self._schedule_due(node.get("config", {}), now)
+            connection.execute(
+                "INSERT OR IGNORE INTO automation_schedule_state(workflow_id,revision_id,trigger_key,next_due_at_utc,updated_at) VALUES (?,?,?,?,?)",
+                (workflow_id, revision_id, node["id"], due.isoformat(), now.isoformat()),
+            )
+
+    @staticmethod
+    def _schedule_due(config: dict[str, Any], now: datetime) -> datetime:
+        if config.get("due_at_utc"):
+            due = datetime.fromisoformat(str(config["due_at_utc"]).replace("Z", "+00:00"))
+            return due.astimezone(UTC)
+        if config.get("delay_seconds") is not None:
+            return now.astimezone(UTC) + timedelta(seconds=int(config["delay_seconds"]))
+        return AutomationService._next_local_due(config, now)
+
+    @staticmethod
+    def _next_local_due(config: dict[str, Any], now: datetime) -> datetime:
+        timezone = ZoneInfo(str(config.get("timezone", "UTC")))
+        hour, minute = (
+            int(value) for value in str(config.get("local_time", "00:00")).split(":", 1)
+        )
+        weekdays = {int(day) for day in config.get("weekdays", range(7))}
+        local_now = now.astimezone(timezone)
+        for day_offset in range(0, 370):
+            date = (local_now + timedelta(days=day_offset)).date()
+            if date.weekday() not in weekdays:
+                continue
+            naive = datetime(date.year, date.month, date.day, hour, minute)
+            for fold in (0, 1):
+                candidate = naive.replace(tzinfo=timezone, fold=fold)
+                if candidate.astimezone(timezone).replace(tzinfo=None) != naive:
+                    continue
+                if candidate.astimezone(UTC) > now.astimezone(UTC):
+                    return candidate.astimezone(UTC)
+            # A nonexistent spring-forward time is shifted to the first valid
+            # minute after the requested wall time.
+            for minute_offset in range(1, 181):
+                shifted = naive + timedelta(minutes=minute_offset)
+                candidate = shifted.replace(tzinfo=timezone, fold=0)
+                if candidate.astimezone(timezone).replace(
+                    tzinfo=None
+                ) == shifted and candidate.astimezone(UTC) > now.astimezone(UTC):
+                    return candidate.astimezone(UTC)
+        raise AutomationError(
+            "scheduled trigger has no calculable future occurrence", "schedule_invalid"
+        )
+
+    def reconcile_operational_events(self, *, limit: int = 100) -> list[str]:
+        """Consume committed application facts and return newly enrolled runs."""
+
+        run_ids: list[str] = []
+        with self._event_lock:
+            with self.store.transaction(immediate=True) as connection:
+                cursor = connection.execute(
+                    "SELECT last_event_id FROM automation_event_cursor WHERE id = 1"
+                ).fetchone()["last_event_id"]
+                events = connection.execute(
+                    "SELECT * FROM operational_events WHERE id > ? ORDER BY id LIMIT ?",
+                    (cursor, max(1, min(limit, 250))),
+                ).fetchall()
+            for event in events:
+                payload = json.loads(event["payload_json"] or "{}")
+                event_kind = {
+                    "contact_imported": "contact_imported",
+                    "contact_added_to_list": "contact_added_to_list",
+                    "trusted_inbound_reconciled": "trusted_inbound_event",
+                    "list_processing_completed": "list_processing_completed",
+                }.get(event["event_type"])
+                if event_kind:
+                    for workflow in self.list_workflows(limit=250, offset=0)["items"]:
+                        if workflow["status"] != "active":
+                            continue
+                        revision = self.get_revision(workflow["active_revision_id"])
+                        matching = [
+                            node
+                            for node in revision["graph"]["nodes"]
+                            if node.get("kind") == "TRIGGER"
+                            and node.get("config", {}).get("trigger_kind") == event_kind
+                        ]
+                        for trigger in matching:
+                            if event_kind == "contact_added_to_list" and trigger["config"].get(
+                                "list_id"
+                            ) != payload.get("list_id"):
+                                continue
+                            if event_kind == "trusted_inbound_event" and payload.get(
+                                "trust_status"
+                            ) not in {"trusted_synthetic", "trusted"}:
+                                continue
+                            try:
+                                result = self.enroll(
+                                    workflow["id"],
+                                    contact_id=payload.get("contact_id")
+                                    or (
+                                        event["aggregate_id"]
+                                        if event["aggregate_type"] == "contact"
+                                        else None
+                                    ),
+                                    event_kind=event_kind,
+                                    source_identity=f"operational:{event['id']}",
+                                    subject_key=payload.get("contact_id")
+                                    or payload.get("job_id")
+                                    or f"event:{event['id']}",
+                                    payload={**payload, "operational_event_id": event["id"]},
+                                    provenance={
+                                        "source": "operational_events",
+                                        "event_id": event["id"],
+                                        **payload.get("provenance", {}),
+                                    },
+                                    correlation_id=payload.get("correlation_id")
+                                    or f"operational:{event['id']}",
+                                    occurred_at=event["occurred_at"],
+                                    actor="automation-supervisor",
+                                )
+                                if result.get("run_id"):
+                                    run_ids.append(result["run_id"])
+                            except AutomationError as error:
+                                if error.code not in {
+                                    "trigger_mismatch",
+                                    "trigger_not_configured",
+                                    "workflow_state",
+                                }:
+                                    raise
+                with self.store.transaction(immediate=True) as connection:
+                    connection.execute(
+                        "UPDATE automation_event_cursor SET last_event_id = ?, updated_at = ? WHERE id = 1 AND last_event_id = ?",
+                        (event["id"], utc_now(), cursor),
+                    )
+                    cursor = event["id"]
+        return run_ids
+
+    def reconcile_schedules(self, *, now: datetime | None = None, limit: int = 25) -> list[str]:
+        clock = (now or _now()).astimezone(UTC)
+        run_ids: list[str] = []
+        with self.store.connect() as connection:
+            states = connection.execute(
+                "SELECT * FROM automation_schedule_state WHERE next_due_at_utc <= ? ORDER BY next_due_at_utc LIMIT ?",
+                (clock.isoformat(), max(1, min(limit, 100))),
+            ).fetchall()
+        for state in states:
+            workflow = self.get_workflow_base(state["workflow_id"])
+            if (
+                workflow["status"] != "active"
+                or workflow["active_revision_id"] != state["revision_id"]
+            ):
+                continue
+            revision = self.get_revision(state["revision_id"])
+            trigger = next(
+                (node for node in revision["graph"]["nodes"] if node["id"] == state["trigger_key"]),
+                None,
+            )
+            if trigger is None:
+                continue
+            due = datetime.fromisoformat(state["next_due_at_utc"]).astimezone(UTC)
+            occurrence = due.isoformat()
+            result = self.enroll(
+                state["workflow_id"],
+                contact_id=trigger["config"].get("contact_id"),
+                event_kind="scheduled_occurrence",
+                source_identity=f"schedule:{state['workflow_id']}:{state['revision_id']}:{state['trigger_key']}:{occurrence}",
+                subject_key=trigger["config"].get("subject_key")
+                or f"schedule:{state['workflow_id']}",
+                payload={
+                    "scheduled_for_utc": occurrence,
+                    "timezone": trigger["config"].get("timezone", "UTC"),
+                },
+                provenance={"source": "durable_scheduler", "revision_id": state["revision_id"]},
+                correlation_id=f"schedule:{state['workflow_id']}:{occurrence}",
+                occurred_at=occurrence,
+                actor="automation-scheduler",
+            )
+            if result.get("run_id"):
+                run_ids.append(result["run_id"])
+            config = trigger["config"]
+            if config.get("local_time") and config.get("recurrence", "daily") in {
+                "daily",
+                "weekly",
+            }:
+                next_due = self._next_local_due(config, max(clock, due) + timedelta(seconds=1))
+            else:
+                next_due = datetime.max.replace(tzinfo=UTC)
+            with self.store.transaction(immediate=True) as connection:
+                connection.execute(
+                    "UPDATE automation_schedule_state SET next_due_at_utc = ?, last_occurrence_key = ?, updated_at = ? WHERE workflow_id = ? AND revision_id = ? AND trigger_key = ? AND next_due_at_utc = ?",
+                    (
+                        next_due.isoformat(),
+                        occurrence,
+                        utc_now(),
+                        state["workflow_id"],
+                        state["revision_id"],
+                        state["trigger_key"],
+                        state["next_due_at_utc"],
+                    ),
+                )
+        return run_ids
+
+    def due_run_ids(self, *, now: datetime | None = None, limit: int = 25) -> list[str]:
+        clock = (now or _now()).astimezone(UTC).isoformat()
+        with self.store.connect() as connection:
+            return [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM automation_runs WHERE status IN ('pending', 'waiting', 'running') AND (due_at_utc IS NULL OR due_at_utc <= ?) ORDER BY updated_at LIMIT ?",
+                    (clock, max(1, min(limit, 100))),
+                ).fetchall()
+            ]
 
     def enroll(
         self,

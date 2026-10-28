@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mailforge.domain.sorting import ProviderDefinition
@@ -32,6 +34,17 @@ class ProviderCatalog:
             tldextract.TLDExtract(suffix_list_urls=()) if tldextract is not None else None
         )
         self._build_maps()
+        self._catalog_version = self._compute_catalog_version()
+
+    @property
+    def catalog_version(self) -> str:
+        return self._catalog_version
+
+    def _compute_catalog_version(self) -> str:
+        if self.path is None or not self.path.exists():
+            return "builtin-v1"
+        digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        return digest[:16]
 
     @staticmethod
     def _load(path: Path | None) -> list[ProviderDefinition]:
@@ -104,6 +117,34 @@ class ProviderCatalog:
             self.domain_to_file.get(registered, "custom_domains.txt"),
             self.domain_to_name.get(registered, "custom"),
         )
+
+    def classify(
+        self, email: str, *, dns_status: str = "not_needed", evaluated_at: str | None = None
+    ) -> dict[str, str | None]:
+        """Return explicit, serializable provider evidence for one address."""
+
+        domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+        registered = self.registered_domain(domain)
+        output_file, provider = self.route(email)
+        if provider != "custom":
+            classification = "recognized_mailbox"
+            source = "domain_catalog"
+        elif dns_status in {"unavailable", "offline"}:
+            classification = "dns_unavailable"
+            source = "dns_policy"
+        else:
+            classification = "unknown_custom"
+            source = "domain_catalog"
+        return {
+            "classification": classification,
+            "provider": provider,
+            "registered_domain": registered,
+            "output_file": output_file,
+            "evidence_source": source,
+            "catalog_version": self.catalog_version,
+            "evaluated_at": evaluated_at or datetime.now(UTC).isoformat(),
+            "dns_status": dns_status,
+        }
 
     def hosting_from_mx(self, mx_host: str) -> str | None:
         normalized = mx_host.lower().rstrip(".")

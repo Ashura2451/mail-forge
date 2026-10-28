@@ -1,5 +1,21 @@
 # System changelog
 
+## 2026-10-28 — Operational workflows and List Tools
+
+- Added SQLite schema 9 for durable operational-event cursors, schedule
+  occurrences, List Tools jobs, checkpoints, and private artifact manifests.
+- Wired contact imports, list membership changes, trusted synthetic inbound
+  reconciliation, and List Tools completion into active automation triggers
+  with durable idempotency and bounded in-process restart reconciliation.
+- Added UTC/relative/IANA local scheduled triggers with bounded recurrence and
+  DST-safe local-time conversion.
+- Added an accessible standalone List Tools browser route for TXT, CSV, JSON,
+  and JSONL provider organization. It delegates to the canonical streaming
+  sorter, emits provider evidence and downloadable TXT/CSV/master/summary/error
+  artifacts, and never silently creates Contacts or lists.
+- Validation remains local and synthetic; no provider, mailbox, credential, or
+  real-recipient data was accessed.
+
 ## 2026-10-28 — Visual workflow automation
 
 - Added SQLite schema 8 for durable visual workflow definitions, immutable

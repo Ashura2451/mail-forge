@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -813,6 +813,63 @@ CREATE INDEX IF NOT EXISTS idx_automation_audit_run
 ON automation_audit(run_id, occurred_at);
 """
 
+MIGRATION_9_SQL = """
+CREATE TABLE IF NOT EXISTS automation_event_cursor (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO automation_event_cursor(id, last_event_id, updated_at)
+VALUES (1, 0, CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS automation_schedule_state (
+    workflow_id TEXT NOT NULL REFERENCES automation_workflows(id) ON DELETE CASCADE,
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id) ON DELETE CASCADE,
+    trigger_key TEXT NOT NULL,
+    next_due_at_utc TEXT NOT NULL,
+    last_occurrence_key TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workflow_id, revision_id, trigger_key)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_schedule_due
+ON automation_schedule_state(next_due_at_utc);
+CREATE TABLE IF NOT EXISTS list_processing_jobs (
+    id TEXT PRIMARY KEY,
+    source_filename TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    dns_mode TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'paused', 'completed', 'failed', 'canceled')),
+    processed_count INTEGER NOT NULL DEFAULT 0,
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    checkpoint_path TEXT NOT NULL,
+    job_dir TEXT NOT NULL,
+    correlation_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_list_processing_jobs_status
+ON list_processing_jobs(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS list_processing_artifacts (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES list_processing_jobs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    provider_key TEXT,
+    filename TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(job_id, kind, provider_key)
+);
+CREATE INDEX IF NOT EXISTS idx_list_processing_artifacts_job
+ON list_processing_artifacts(job_id, kind, filename);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -978,6 +1035,13 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (8, utc_now()),
                 )
+                current = 8
+            if current < 9:
+                self._apply_migration_9(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (9, utc_now()),
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1031,6 +1095,13 @@ class CampaignStore:
         # Keep migration 8 inside the caller transaction; executescript would
         # implicitly commit and make a failed upgrade difficult to recover.
         for statement in MIGRATION_8_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_9(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_9_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

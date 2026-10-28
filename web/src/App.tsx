@@ -3,7 +3,7 @@ import { api, bootstrapSession, upload, type ApiRecord } from './api/client'
 import './App.css'
 
 const nav = [
-  ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['campaigns', 'Campaigns', '↗'], ['automations', 'Automations', '✦'],
+  ['dashboard', 'Dashboard', '⌂'], ['contacts', 'Contacts', '◎'], ['segments', 'Segments', '◇'], ['campaigns', 'Campaigns', '↗'], ['automations', 'Automations', '✦'], ['list-tools', 'List Tools', '▦'],
   ['inbound', 'Inbound', '↘'], ['providers', 'Providers', '◈'], ['activity', 'Activity', '≡'],
 ]
 
@@ -16,7 +16,7 @@ function App() {
 
   const load = async (target = view) => {
     setBusy(true); setError('')
-    try { setData(await api(target === 'dashboard' ? '/dashboard' : `/${target}`)) }
+    try { setData(await api(target === 'dashboard' ? '/dashboard' : target === 'list-tools' ? '/list-tools/jobs' : `/${target}`)) }
     catch (err) { setError(err instanceof Error ? err.message : 'Unable to load this view') }
     finally { setBusy(false) }
   }
@@ -35,7 +35,7 @@ function App() {
     </aside>
     <main className="main"><header className="topbar"><div><p className="eyebrow">WORKSPACE / {view.toUpperCase()}</p><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div><div className="top-actions"><span className="status-chip"><span className="live-dot" /> Local</span><button className="icon-button" aria-label="Refresh" onClick={() => load()}>↻</button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}{error && <div className="error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
-      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
+      {view === 'dashboard' && <Dashboard data={data} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'activity' && <Activity data={data} />}
     </main>
   </div>
 }
@@ -172,6 +172,23 @@ function Automations({ data, onRun }: { data: ApiRecord, onRun: (action: () => P
         <div className="run-history"><div className="panel-head"><h3>Run history</h3><span className="muted">Durable step diagnostics</span></div>{runs.length ? runs.map(run => <div className="run-row" key={run.id}><span><strong>{run.status}</strong><small>{run.current_node_key} · revision {run.revision_id.slice(0, 8)}</small></span><div className="button-row"><button onClick={() => onRun(() => api(`/automations/runs/${run.id}/advance`, { method: 'POST' }).then(() => refresh(selected)), 'Run advanced')}>Advance</button><button onClick={() => onRun(() => api(`/automations/runs/${run.id}`, { method: 'GET' }), 'Run diagnostics loaded')}>Details</button><button onClick={() => onRun(() => api(`/automations/runs/${run.id}/${run.status === 'paused' ? 'resume' : 'pause'}`, { method: 'POST' }).then(() => refresh(selected)), run.status === 'paused' ? 'Run resumed' : 'Run paused')}>{run.status === 'paused' ? 'Resume' : 'Pause'}</button><button onClick={() => onRun(() => api(`/automations/runs/${run.id}/cancel`, { method: 'POST' }).then(() => refresh(selected)), 'Run canceled')}>Cancel</button></div></div>) : <Empty text="No enrollments yet." />}</div>
       </section> : <section className="panel"><Empty text="Select an automation or create one to open the workflow canvas." /></section>}
     </div>
+  </div>
+}
+
+function ListTools({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void }) {
+  const [file, setFile] = useState<File | null>(null)
+  const [profile, setProfile] = useState('full')
+  const [job, setJob] = useState<ApiRecord | null>(null)
+  const [preview, setPreview] = useState<ApiRecord | null>(null)
+  const jobs: ApiRecord[] = data.items || []
+  const refresh = async (id: string) => setJob(await api<ApiRecord>(`/list-tools/jobs/${id}`))
+  useEffect(() => { if (!job || ['completed', 'failed', 'canceled', 'paused'].includes(job.status)) return; const timer = window.setInterval(() => void refresh(job.id), 750); return () => window.clearInterval(timer) }, [job])
+  const inspect = async () => { if (file) setPreview(await upload('/list-tools/preview', file)) }
+  const create = async () => { if (!file) return; const created = await upload('/list-tools/jobs', file, `?profile=${encodeURIComponent(profile)}&dns_mode=offline`); setJob(created); await refresh(created.id) }
+  return <div className="content"><div className="toolbar"><div><p className="eyebrow teal">LIST TOOLS</p><h2>Organize by Provider</h2><p className="muted">Process a local TXT, CSV, JSON, or JSONL file without importing contacts or contacting a provider.</p></div><span className="status-chip">Offline evidence</span></div>
+    <section className="panel"><div className="panel-head"><div><h3>Prepare a bounded local job</h3><p className="muted">Preview first, then choose a deterministic classification profile.</p></div></div><label className="file-drop">{file ? file.name : 'Choose a list file'}<input aria-label="List Tools input file" type="file" accept=".txt,.csv,.json,.jsonl" onChange={event => setFile(event.target.files?.[0] || null)} /></label><div className="button-row"><label>Profile<select value={profile} onChange={event => setProfile(event.target.value)}><option value="full">Full classification</option><option value="validation">Validation only</option><option value="dedupe">Dedupe</option><option value="classify">Classify</option></select></label><button disabled={!file} onClick={() => void onRun(inspect, 'Preview calculated without creating contacts')}>Preview</button><button className="primary" disabled={!file} onClick={() => void onRun(create, 'List Tools job started')}>Start processing</button></div>{preview && <div className="stat-grid"><Stat label="Accepted" value={preview.accepted} tone="teal" /><Stat label="Invalid" value={preview.invalid} tone="amber" /><Stat label="Duplicates" value={preview.duplicates} /></div>}</section>
+    {job && <section className="panel"><div className="panel-head"><div><h3>Job {job.id.slice(0, 8)}</h3><p className="muted">{job.source_filename} · {job.status} · no Contacts side effect</p></div><span className={`status ${job.status}`}>{job.status}</span></div><p className="muted">Processed {job.processed_count} · accepted {job.accepted_count}</p>{job.summary?.counts && <div className="stat-grid"><Stat label="Invalid" value={job.summary.counts.invalid ?? 0} tone="amber" /><Stat label="Duplicates" value={job.summary.counts.duplicates_removed ?? 0} /><Stat label="Role" value={job.summary.counts.role_based ?? 0} /><Stat label="Disposable" value={job.summary.counts.disposable ?? 0} /></div>}{job.summary?.providers && <p className="muted">Provider groups: {Object.entries(job.summary.providers).map(([name, count]) => `${name} ${count}`).join(' · ')}</p>}<div className="button-row"><button onClick={() => onRun(() => api(`/list-tools/jobs/${job.id}/pause`, { method: 'POST' }).then(() => refresh(job.id)), 'List Tools job paused')}>Pause</button><button onClick={() => onRun(() => api(`/list-tools/jobs/${job.id}/resume`, { method: 'POST' }).then(() => refresh(job.id)), 'List Tools job resumed')}>Resume</button><button onClick={() => onRun(() => api(`/list-tools/jobs/${job.id}/cancel`, { method: 'POST' }).then(() => refresh(job.id)), 'List Tools job canceled')}>Cancel</button></div>{job.artifacts?.length ? <div className="list-stack">{job.artifacts.map((artifact: ApiRecord) => <a className="list-row" key={artifact.id} href={`/api/v1/list-tools/jobs/${job.id}/artifacts/${artifact.id}`}><span><strong>{artifact.filename}</strong><small>{artifact.kind} · {artifact.size_bytes} bytes</small></span><b>Download ↓</b></a>)}</div> : <p className="muted">Artifacts appear when processing completes.</p>}{job.error_message && <div className="error" role="alert">{job.error_message}</div>}</section>}
+    <section className="panel table-panel"><div className="panel-head"><h3>Recent jobs</h3><span className="muted">Durable local history</span></div>{jobs.length ? <table><thead><tr><th>Input</th><th>Status</th><th>Accepted</th><th>Updated</th></tr></thead><tbody>{jobs.map(item => <tr key={item.id} onClick={() => void refresh(item.id)}><td><strong>{item.source_filename}</strong><small className="table-subline">{item.profile}</small></td><td>{item.status}</td><td>{item.accepted_count}</td><td>{new Date(item.updated_at).toLocaleString()}</td></tr>)}</tbody></table> : <Empty text="No List Tools jobs yet." />}</section>
   </div>
 }
 
