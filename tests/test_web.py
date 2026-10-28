@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -116,6 +117,47 @@ def test_local_api_runs_contact_campaign_lifecycle(tmp_path: Path) -> None:
     assert progress["campaign_status"] == "completed"
     assert progress["counts"]["accepted"] == 2
     assert client.get("/api/v1/activity").json()["items"]
+
+
+def test_local_api_data_connection_upload_preview_and_snapshot(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    source = tmp_path / "contacts.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT)")
+        connection.executemany(
+            "INSERT INTO contacts(email) VALUES (?)",
+            [("one@example.com",), ("two@example.com",)],
+        )
+
+    with source.open("rb") as handle:
+        created = client.post(
+            "/api/v1/data-connections/sources",
+            headers=headers,
+            data={"profile_name": "Uploaded contacts", "source_type": "sqlite"},
+            files={"file": (source.name, handle, "application/vnd.sqlite3")},
+        )
+    assert created.status_code == 200
+    profile_id = created.json()["id"]
+    assert "source_path" not in created.text
+
+    schema = client.get(f"/api/v1/data-connections/{profile_id}/schema")
+    assert schema.status_code == 200
+    assert schema.json()["objects"][0]["name"] == "contacts"
+    preview = client.post(
+        f"/api/v1/data-connections/{profile_id}/preview",
+        headers=headers,
+        json={"selection": {"table": "contacts"}, "limit": 1},
+    )
+    assert preview.status_code == 200
+    assert len(preview.json()["rows"]) == 1
+    snapshot = client.post(
+        f"/api/v1/data-connections/{profile_id}/snapshots",
+        headers=headers,
+        json={"selection": {"table": "contacts"}, "idempotency_key": "web-1", "wait": True},
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "completed"
+    assert snapshot.json()["record_count"] == 2
 
 
 def test_local_api_exposes_operational_reports_with_bounded_exports(tmp_path: Path) -> None:

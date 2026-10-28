@@ -15,6 +15,7 @@ from mailforge.application.campaigns import (
     ScriptedTransport,
     run_synthetic_demo,
 )
+from mailforge.application.data_connections import DataConnectionError, DataConnectionsService
 from mailforge.application.data_studio import DataStudioService, detect_schema
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_demo import run_inbound_demo
@@ -653,6 +654,49 @@ def build_parser() -> argparse.ArgumentParser:
     data_run.add_argument("--source", type=Path, action="append", default=[])
     data_run.add_argument("--filename", default="data.csv")
     data_run.add_argument("--revision-id", required=True)
+    connections = subparsers.add_parser(
+        "data-connections", help="configure and snapshot read-only external data sources"
+    )
+    connection_commands = connections.add_subparsers(dest="connection_command", required=True)
+    connection_list = connection_commands.add_parser("list")
+    connection_list.add_argument("--database", type=Path, required=True)
+    connection_create = connection_commands.add_parser("create")
+    connection_create.add_argument("--database", type=Path, required=True)
+    connection_create.add_argument("--name", required=True)
+    connection_create.add_argument(
+        "--type", dest="source_type", choices=["sqlite", "postgresql", "xlsx"], required=True
+    )
+    connection_create.add_argument("--config", default="{}", help="JSON connection configuration")
+    connection_create.add_argument("--credential-ref")
+    connection_create.add_argument("--source", type=Path)
+    connection_create.add_argument("--selection", default="{}")
+    connection_test = connection_commands.add_parser("test")
+    connection_test.add_argument("--database", type=Path, required=True)
+    connection_test.add_argument("profile_id")
+    connection_schema = connection_commands.add_parser("schema")
+    connection_schema.add_argument("--database", type=Path, required=True)
+    connection_schema.add_argument("profile_id")
+    connection_preview = connection_commands.add_parser("preview")
+    connection_preview.add_argument("--database", type=Path, required=True)
+    connection_preview.add_argument("profile_id")
+    connection_preview.add_argument("--selection", default="{}")
+    connection_preview.add_argument("--limit", type=int, default=50)
+    connection_snapshot = connection_commands.add_parser("snapshot")
+    connection_snapshot.add_argument("--database", type=Path, required=True)
+    connection_snapshot.add_argument("profile_id")
+    connection_snapshot.add_argument("--selection", default="{}")
+    connection_snapshot.add_argument("--idempotency-key")
+    connection_snapshot.add_argument("--wait", action="store_true")
+    connection_snapshots = connection_commands.add_parser("list-snapshots")
+    connection_snapshots.add_argument("--database", type=Path, required=True)
+    connection_snapshots.add_argument("profile_id")
+    connection_cancel = connection_commands.add_parser("cancel")
+    connection_cancel.add_argument("--database", type=Path, required=True)
+    connection_cancel.add_argument("snapshot_id")
+    connection_handoff = connection_commands.add_parser("handoff")
+    connection_handoff.add_argument("--database", type=Path, required=True)
+    connection_handoff.add_argument("snapshot_id")
+    connection_handoff.add_argument("--recipe-revision-id", required=True)
     app = subparsers.add_parser("app", help="start and maintain the local Mailforge application")
     app_subparsers = app.add_subparsers(dest="app_command", required=True)
     for command, help_text in (
@@ -1566,6 +1610,74 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"path": str(args.output), "format": args.format}))
         except ReportingError as error:
             raise SystemExit(f"{error.code}: {error}") from error
+    elif args.command == "data-connections":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        store = CampaignStore(args.database)
+        data_studio = DataStudioService(store) if args.connection_command == "handoff" else None
+        service = DataConnectionsService(store, data_studio=data_studio)
+        try:
+            if args.connection_command == "list":
+                print(json.dumps(service.list_connections(), indent=2))
+            elif args.connection_command == "create":
+                config = json.loads(args.config)
+                selection = json.loads(args.selection)
+                print(
+                    json.dumps(
+                        service.create_connection(
+                            args.name,
+                            args.source_type,
+                            config,
+                            credential_ref=args.credential_ref,
+                            selection=selection,
+                            source_path=args.source,
+                            source_filename=args.source.name if args.source else None,
+                        ),
+                        indent=2,
+                    )
+                )
+            elif args.connection_command == "test":
+                print(json.dumps(service.test_connection(args.profile_id), indent=2))
+            elif args.connection_command == "schema":
+                print(json.dumps(service.schema(args.profile_id), indent=2))
+            elif args.connection_command == "preview":
+                print(
+                    json.dumps(
+                        service.preview(
+                            args.profile_id, json.loads(args.selection), limit=args.limit
+                        ),
+                        indent=2,
+                    )
+                )
+            elif args.connection_command == "snapshot":
+                print(
+                    json.dumps(
+                        service.start_snapshot(
+                            args.profile_id,
+                            json.loads(args.selection),
+                            idempotency_key=args.idempotency_key,
+                            wait=args.wait,
+                        ),
+                        indent=2,
+                    )
+                )
+            elif args.connection_command == "list-snapshots":
+                print(json.dumps(service.list_snapshots(args.profile_id), indent=2))
+            elif args.connection_command == "cancel":
+                print(json.dumps(service.cancel_snapshot(args.snapshot_id), indent=2))
+            elif args.connection_command == "handoff":
+                print(
+                    json.dumps(
+                        service.handoff_to_data_studio(args.snapshot_id, args.recipe_revision_id),
+                        indent=2,
+                    )
+                )
+        except (DataConnectionError, ValueError, OSError, json.JSONDecodeError) as error:
+            raise SystemExit(str(error)) from error
+        finally:
+            service.close()
+            if data_studio is not None:
+                data_studio.close()
     elif args.command == "interactive":
         overrides = {}
         if args.results_dir is not None:

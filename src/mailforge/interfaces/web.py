@@ -31,6 +31,7 @@ from mailforge.application.campaign_operations import (
     CampaignOperationsService,
 )
 from mailforge.application.campaigns import CampaignService
+from mailforge.application.data_connections import DataConnectionError, DataConnectionsService
 from mailforge.application.data_studio import DataStudioError, DataStudioService, detect_schema
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_operations import InboundOperations, InboundOperationsError
@@ -89,6 +90,31 @@ class DataStudioRecipeInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=500)
     definition: dict[str, Any] = Field(default_factory=lambda: {"steps": []})
+
+
+class DataConnectionInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    source_type: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    credential_ref: str | None = Field(default=None, max_length=200)
+    selection: dict[str, Any] = Field(default_factory=dict)
+    limits: dict[str, Any] = Field(default_factory=dict)
+
+
+class DataConnectionSelectionInput(BaseModel):
+    selection: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class DataConnectionSnapshotInput(BaseModel):
+    selection: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+    wait: bool = False
+
+
+class DataConnectionHandoffInput(BaseModel):
+    recipe_revision_id: str
+    correlation_id: str | None = Field(default=None, max_length=240)
 
 
 class DataStudioRevisionInput(BaseModel):
@@ -615,6 +641,11 @@ class WebRuntime:
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
         self.data_studio = DataStudioService(self.store)
+        self.data_connections = DataConnectionsService(
+            self.store,
+            root=self.data_directory.artifacts / "data-connections",
+            data_studio=self.data_studio,
+        )
         self.message_studio = MessageStudioService(
             self.store,
             outbound=self.outbound,
@@ -680,6 +711,7 @@ class WebRuntime:
     def close(self) -> None:
         self.automation_runtime.shutdown()
         self.list_processing.close()
+        self.data_connections.close()
         self.data_studio.close()
         self.campaign_scheduler.shutdown()
         self.workers.shutdown()
@@ -1001,6 +1033,189 @@ def create_app(
                 restored / "mailforge.sqlite3"
             ).schema_version(),
         }
+
+    @app.get(f"{API_PREFIX}/data-connections")
+    async def data_connections(limit: int = 50, offset: int = 0):
+        return runtime.data_connections.list_connections(limit=limit, offset=offset)
+
+    @app.post(f"{API_PREFIX}/data-connections")
+    async def create_data_connection(payload: DataConnectionInput):
+        try:
+            return runtime.data_connections.create_connection(
+                payload.name,
+                payload.source_type,
+                payload.config,
+                credential_ref=payload.credential_ref,
+                selection=payload.selection,
+                limits=payload.limits,
+            )
+        except (DataConnectionError, OSError, ValueError) as error:
+            code = getattr(error, "code", "connection_invalid")
+            return _error(409 if code == "connection_exists" else 400, code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-connections/sources")
+    async def upload_data_connection_source(
+        profile_name: str = Form(...),
+        source_type: str = Form(...),
+        selection: str = Form("{}"),
+        limits: str = Form("{}"),
+        file: UploadFile = File(...),  # noqa: B008
+    ):
+        temporary: Path | None = None
+        retained: Path | None = None
+        created = False
+        try:
+            parsed_selection = json.loads(selection)
+            parsed_limits = json.loads(limits)
+            if not isinstance(parsed_selection, dict) or not isinstance(parsed_limits, dict):
+                raise ValueError("selection and limits must be JSON objects")
+            temporary = _upload_data_studio(file, runtime.data_connections.root / "incoming")
+            retained = runtime.data_connections.retain_source(
+                temporary, file.filename or "source", source_type
+            )
+            result = runtime.data_connections.create_connection(
+                profile_name,
+                source_type,
+                {"source_name": file.filename or retained.name},
+                selection=parsed_selection,
+                limits=parsed_limits,
+                source_path=retained,
+                source_filename=file.filename or retained.name,
+            )
+            created = True
+            return result
+        except (DataConnectionError, OSError, ValueError, json.JSONDecodeError) as error:
+            code = getattr(error, "code", "source_invalid")
+            return _error(409 if code == "connection_exists" else 400, code, str(error))
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            if retained and not created:
+                retained.unlink(missing_ok=True)
+
+    @app.post(f"{API_PREFIX}/data-connections/{{profile_id}}/disable")
+    async def disable_data_connection(profile_id: str):
+        try:
+            return runtime.data_connections.disable_connection(profile_id)
+        except DataConnectionError as error:
+            return _error(
+                404 if error.code == "connection_not_found" else 400, error.code, str(error)
+            )
+
+    @app.post(f"{API_PREFIX}/data-connections/{{profile_id}}/test")
+    async def test_data_connection(profile_id: str):
+        try:
+            return runtime.data_connections.test_connection(profile_id)
+        except DataConnectionError as error:
+            return _error(
+                404
+                if error.code == "connection_not_found"
+                else 409
+                if error.code == "connection_disabled"
+                else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/data-connections/{{profile_id}}/schema")
+    async def data_connection_schema(profile_id: str):
+        try:
+            return runtime.data_connections.schema(profile_id)
+        except DataConnectionError as error:
+            return _error(
+                404 if error.code == "connection_not_found" else 400, error.code, str(error)
+            )
+
+    @app.post(f"{API_PREFIX}/data-connections/{{profile_id}}/preview")
+    async def data_connection_preview(profile_id: str, payload: DataConnectionSelectionInput):
+        try:
+            return runtime.data_connections.preview(
+                profile_id, payload.selection, limit=payload.limit
+            )
+        except DataConnectionError as error:
+            return _error(
+                404
+                if error.code == "connection_not_found"
+                else 409
+                if error.code == "connection_disabled"
+                else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/data-connections/{{profile_id}}/snapshots")
+    async def data_connection_snapshots(profile_id: str, limit: int = 50, offset: int = 0):
+        try:
+            return runtime.data_connections.list_snapshots(profile_id, limit=limit, offset=offset)
+        except DataConnectionError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-connections/{{profile_id}}/snapshots")
+    async def create_data_connection_snapshot(
+        profile_id: str, payload: DataConnectionSnapshotInput
+    ):
+        try:
+            return runtime.data_connections.start_snapshot(
+                profile_id,
+                payload.selection,
+                idempotency_key=payload.idempotency_key,
+                wait=payload.wait,
+            )
+        except DataConnectionError as error:
+            return _error(
+                404
+                if error.code == "connection_not_found"
+                else 409
+                if error.code in {"connection_exists", "connection_disabled"}
+                else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/data-connections/snapshots/{{snapshot_id}}")
+    async def data_connection_snapshot(snapshot_id: str):
+        try:
+            return runtime.data_connections.get_snapshot(snapshot_id)
+        except DataConnectionError as error:
+            return _error(404, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/data-connections/{{profile_id}}/events")
+    async def data_connection_events(profile_id: str, limit: int = 100):
+        try:
+            return {"items": runtime.data_connections.events(profile_id, limit=limit)}
+        except DataConnectionError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-connections/snapshots/{{snapshot_id}}/cancel")
+    async def cancel_data_connection_snapshot(snapshot_id: str):
+        try:
+            return runtime.data_connections.cancel_snapshot(snapshot_id)
+        except DataConnectionError as error:
+            return _error(
+                404 if error.code == "snapshot_not_found" else 409, error.code, str(error)
+            )
+
+    @app.post(f"{API_PREFIX}/data-connections/snapshots/{{snapshot_id}}/data-studio")
+    async def handoff_data_connection_snapshot(
+        snapshot_id: str, payload: DataConnectionHandoffInput
+    ):
+        try:
+            return runtime.data_connections.handoff_to_data_studio(
+                snapshot_id,
+                payload.recipe_revision_id,
+                correlation_id=payload.correlation_id,
+            )
+        except (DataConnectionError, DataStudioError) as error:
+            code = getattr(error, "code", "handoff_invalid")
+            return _error(
+                404
+                if code.endswith("_not_found")
+                else 409
+                if code.startswith("snapshot_")
+                else 400,
+                code,
+                str(error),
+            )
 
     @app.get(f"{API_PREFIX}/dashboard")
     async def dashboard():
