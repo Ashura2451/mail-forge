@@ -26,7 +26,7 @@ def test_retired_legacy_modules_are_not_importable(module):
 def test_canonical_imports_do_not_create_log_or_output_state(tmp_path):
     repo_root = Path(__file__).parents[1]
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(repo_root)
+    environment["PYTHONPATH"] = str(repo_root / "src")
     result = subprocess.run(
         [
             sys.executable,

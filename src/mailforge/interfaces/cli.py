@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from pathlib import Path
 
 from mailforge.application.automation import AutomationService
@@ -13,6 +14,7 @@ from mailforge.application.campaigns import (
     ScriptedTransport,
     run_synthetic_demo,
 )
+from mailforge.application.data_studio import DataStudioService, detect_schema
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_demo import run_inbound_demo
 from mailforge.application.inbound_operations import InboundOperations
@@ -520,6 +522,30 @@ def build_parser() -> argparse.ArgumentParser:
     automation_advance = automation_commands.add_parser("advance")
     automation_advance.add_argument("--database", type=Path, required=True)
     automation_advance.add_argument("run_id")
+    data_studio = subparsers.add_parser("data-studio", help="process structured local data")
+    data_commands = data_studio.add_subparsers(dest="data_command", required=True)
+    data_schema = data_commands.add_parser("schema", help="inspect source fields")
+    data_schema.add_argument("input", type=Path)
+    data_schema.add_argument("--sample-limit", type=int, default=100)
+    data_create = data_commands.add_parser("create-recipe", help="create a processing recipe")
+    data_create.add_argument("--database", type=Path, required=True)
+    data_create.add_argument("--name", required=True)
+    data_create.add_argument("--description", default="")
+    data_create.add_argument("--definition", type=Path, required=True)
+    data_list = data_commands.add_parser("list-recipes", help="list saved recipes")
+    data_list.add_argument("--database", type=Path, required=True)
+    data_preview = data_commands.add_parser("preview", help="preview a recipe")
+    data_preview.add_argument("--database", type=Path, required=True)
+    data_preview.add_argument("--input", type=Path, required=True)
+    data_preview.add_argument("--source", type=Path, action="append", default=[])
+    data_preview.add_argument("--definition", type=Path, required=True)
+    data_preview.add_argument("--limit", type=int, default=50)
+    data_run = data_commands.add_parser("run", help="run a pinned recipe")
+    data_run.add_argument("--database", type=Path, required=True)
+    data_run.add_argument("--input", type=Path, required=True)
+    data_run.add_argument("--source", type=Path, action="append", default=[])
+    data_run.add_argument("--filename", default="data.csv")
+    data_run.add_argument("--revision-id", required=True)
     serve = subparsers.add_parser("serve", help="run the local browser operator console")
     serve.add_argument("--database", type=Path, default=Path("state/mailforge.sqlite3"))
     serve.add_argument("--host", default="127.0.0.1")
@@ -530,7 +556,58 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "serve":
+    if args.command == "data-studio":
+        if args.data_command == "schema":
+            print(json.dumps(detect_schema(args.input, sample_limit=args.sample_limit), indent=2))
+        else:
+            from mailforge.infrastructure.campaign_store import CampaignStore
+
+            service = DataStudioService(CampaignStore(args.database))
+            try:
+                if args.data_command == "create-recipe":
+                    definition = json.loads(args.definition.read_text(encoding="utf-8"))
+                    print(
+                        json.dumps(
+                            service.create_recipe(args.name, args.description, definition), indent=2
+                        )
+                    )
+                elif args.data_command == "list-recipes":
+                    print(json.dumps(service.list_recipes(include_archived=True), indent=2))
+                elif args.data_command == "preview":
+                    definition = json.loads(args.definition.read_text(encoding="utf-8"))
+                    sources = [args.input, *args.source] if args.source else []
+                    print(
+                        json.dumps(
+                            service.preview_sources(
+                                [(path, path.name, path.stem) for path in sources],
+                                definition,
+                                limit=args.limit,
+                            )
+                            if args.source
+                            else service.preview(args.input, definition, limit=args.limit),
+                            indent=2,
+                        )
+                    )
+                else:
+                    sources = [args.input, *args.source] if args.source else []
+                    job = (
+                        service.create_multi_source_job(
+                            [(path, path.name, path.stem) for path in sources], args.revision_id
+                        )
+                        if args.source
+                        else service.create_job(args.input, args.filename, args.revision_id)
+                    )
+                    service.start(job["id"])
+                    while True:
+                        job = service.get_job(job["id"])
+                        if job["status"] not in {"pending", "running"}:
+                            break
+                        time.sleep(0.05)
+                    print(json.dumps(job, indent=2))
+                    return 0 if job["status"] == "completed" else 2
+            finally:
+                service.close()
+    elif args.command == "serve":
         import uvicorn
 
         from mailforge.interfaces.web import create_app
@@ -757,7 +834,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "automation":
         from mailforge.infrastructure.campaign_store import CampaignStore
 
-        service = AutomationService(CampaignStore(args.database))
+        store = CampaignStore(args.database)
+        data_studio = DataStudioService(store)
+        service = AutomationService(store, data_studio=data_studio)
         if args.automation_command == "list":
             print(json.dumps(service.list_workflows(), indent=2))
         elif args.automation_command == "create":

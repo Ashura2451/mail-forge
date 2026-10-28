@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -174,6 +175,176 @@ def test_local_api_supports_typed_segments_and_recurring_snapshots(tmp_path: Pat
     )
     assert type_change.status_code == 400
     assert type_change.json()["error"]["code"] == "field_type_migration_required"
+
+
+def test_data_studio_api_shares_pinned_recipe_preview_and_job_authority(tmp_path: Path) -> None:
+    client, headers = _client(tmp_path)
+    definition = {
+        "steps": [
+            {"type": "normalize", "fields": ["email"], "operation": "email"},
+            {"type": "dedupe", "fields": ["email"]},
+        ]
+    }
+    recipe = client.post(
+        "/api/v1/data-studio/recipes",
+        headers=headers,
+        json={"name": "API recipe", "definition": definition},
+    )
+    assert recipe.status_code == 200
+    source = {
+        "file": ("contacts.csv", b"email\nALICE@example.com\nalice@example.com\n", "text/csv")
+    }
+    schema = client.post("/api/v1/data-studio/schema", headers=headers, files=source)
+    assert schema.status_code == 200
+    assert schema.json()["fields"] == ["email"]
+    preview = client.post(
+        "/api/v1/data-studio/preview",
+        headers=headers,
+        data={"definition": json.dumps(definition)},
+        files=source,
+    )
+    assert preview.status_code == 200
+    assert preview.json()["counts"]["removed"] == 1
+    job = client.post(
+        f"/api/v1/data-studio/jobs?recipe_revision_id={recipe.json()['current_revision_id']}",
+        headers=headers,
+        files=source,
+    )
+    assert job.status_code == 200
+    started = client.post(f"/api/v1/data-studio/jobs/{job.json()['id']}/start", headers=headers)
+    assert started.status_code == 200
+    for _ in range(50):
+        detail = client.get(f"/api/v1/data-studio/jobs/{job.json()['id']}").json()
+        if detail["status"] not in {"pending", "running"}:
+            break
+        time.sleep(0.02)
+    assert detail["status"] == "completed"
+    assert {item["kind"] for item in detail["artifacts"]} == {"output", "errors"}
+
+
+def test_data_studio_connected_destinations_are_explicit_and_snapshot_pinned(
+    tmp_path: Path,
+) -> None:
+    client, headers = _client(tmp_path)
+    definition = {
+        "output": {"format": "jsonl"},
+        "steps": [{"type": "normalize", "fields": ["email"], "operation": "email"}],
+    }
+    recipe = client.post(
+        "/api/v1/data-studio/recipes",
+        headers=headers,
+        json={"name": "Connected recipe", "definition": definition},
+    )
+    assert recipe.status_code == 200
+    sources = [
+        ("left.csv", b"email\nada@example.com\n", "text/csv"),
+        ("right.csv", b"email\nbob@example.com\n", "text/csv"),
+    ]
+    multi_preview = client.post(
+        "/api/v1/data-studio/preview-multi",
+        headers=headers,
+        data={"definition": json.dumps({"combine": {"operation": "append"}, "steps": []})},
+        files=[("files", source) for source in sources],
+    )
+    assert multi_preview.status_code == 200
+    assert multi_preview.json()["counts"]["output"] == 2
+    job_response = client.post(
+        f"/api/v1/data-studio/jobs-multi?recipe_revision_id={recipe.json()['current_revision_id']}",
+        headers=headers,
+        files=[("files", source) for source in sources],
+    )
+    assert job_response.status_code == 200
+    job_id = job_response.json()["id"]
+    assert (
+        client.post(f"/api/v1/data-studio/jobs/{job_id}/start", headers=headers).status_code == 200
+    )
+    for _ in range(100):
+        detail = client.get(f"/api/v1/data-studio/jobs/{job_id}").json()
+        if detail["status"] not in {"pending", "running"}:
+            break
+        time.sleep(0.02)
+    assert detail["status"] == "completed"
+    output = next(item for item in detail["artifacts"] if item["kind"] == "output")
+
+    list_id = client.post(
+        "/api/v1/lists", headers=headers, json={"name": "Data Studio destination"}
+    ).json()["id"]
+    import_preview = client.post(
+        f"/api/v1/data-studio/jobs/{job_id}/artifacts/{output['id']}/contacts/preview",
+        headers=headers,
+        json={"list_id": list_id, "mappings": {"email": "contact.email"}},
+    )
+    assert import_preview.status_code == 200
+    assert import_preview.json()["valid"] is True
+    imported = client.post(
+        f"/api/v1/data-studio/jobs/{job_id}/artifacts/{output['id']}/contacts",
+        headers=headers,
+        json={"list_id": list_id, "mappings": {"email": "contact.email"}},
+    )
+    assert imported.status_code == 200
+    assert imported.json()["created"] == 2
+    contact_id = client.get("/api/v1/contacts").json()["items"][0]["id"]
+
+    document = client.post(
+        "/api/v1/message-studio/documents",
+        headers=headers,
+        json={"name": "Connected message", "kind": "message"},
+    ).json()
+    published = client.post(
+        f"/api/v1/message-studio/documents/{document['id']}/publish", headers=headers
+    )
+    assert published.status_code == 200
+    revision_id = published.json()["published"]["id"]
+    message_preview = client.post(
+        f"/api/v1/data-studio/jobs/{job_id}/artifacts/{output['id']}/message-preview",
+        headers=headers,
+        json={
+            "revision_id": revision_id,
+            "contact_id": contact_id,
+            "field_mapping": {"email": "email"},
+        },
+    )
+    assert message_preview.status_code == 200
+    assert message_preview.json()["snapshot"]["revision_id"] == revision_id
+
+    campaign = client.post(
+        "/api/v1/campaigns",
+        headers=headers,
+        json={
+            "name": "Data Studio prepared batch",
+            "list_id": list_id,
+            "message_revision_id": revision_id,
+            "sender_email": "sender@example.com",
+        },
+    )
+    assert campaign.status_code == 200
+    prepared = client.post(
+        f"/api/v1/campaigns/{campaign.json()['id']}/prepare-data-studio",
+        headers=headers,
+        json={
+            "source_job_id": job_id,
+            "source_artifact_id": output["id"],
+            "recipe_revision_id": recipe.json()["current_revision_id"],
+            "message_revision_id": revision_id,
+            "field_mapping": {"email": "email"},
+        },
+    )
+    assert prepared.status_code == 200
+    assert prepared.json()["data_snapshot"]["artifact_sha256"] == output["sha256"]
+    assert prepared.json()["prepared"] == 2
+
+    assert (
+        client.post(
+            "/api/v1/data-studio/extensions/email_domain_normalizer/register", headers=headers
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/data-studio/extensions/email_domain_normalizer/enable", headers=headers
+        ).json()["enabled"]
+        == 1
+    )
 
 
 def test_compiled_frontend_is_served(tmp_path: Path) -> None:

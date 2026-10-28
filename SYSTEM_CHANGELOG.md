@@ -227,3 +227,32 @@
   import, and synthetic-demo commands.
 - Validation is synthetic/local only; no real mailbox, SMTP, network, or
   recipient migration was performed.
+## 2026-10-28 — Data Studio 021 foundation
+
+- Integrated inbound operations 020 into `origin/main` at `eac22ba` before
+  branching `feat/mailforge-data-studio-021`.
+- Added the canonical `DataStudioService`, schema 13 recipe/revision/job/
+  artifact tables, bounded structured-source inspection, typed declarative
+  transforms, deterministic previews, provider-catalog classification,
+  aggregation, pinned jobs, and atomic JSONL/error artifacts.
+- Added shared versioned API, CLI, React Data Studio workbench, focused tests,
+  and browser acceptance. Removed the unnecessary tracked `.github` workflow;
+  portable local validation remains available.
+- This is a partial local slice. Joins, downstream integrations, multi-format
+  exports, trusted extensions, large-workload measurements, and full connected
+  acceptance remain open; no external provider or recipient data was used.
+
+## 2026-10-28 — Data Studio 021 completion slice
+
+- Added schema 14 consumer provenance, multi-source append/union/intersect/
+  subtract and indexed INNER/LEFT joins with deterministic provenance and
+  collision handling.
+- Added atomic UTF-8 TXT/CSV/TSV/JSON/JSONL exports with safe filenames,
+  deterministic fields, and spreadsheet formula-injection protection.
+- Added explicit contact-import reconciliation, canonical Message Studio
+  personalization previews, pinned Automation recipe actions, and a narrow
+  disabled-by-default trusted local extension contract.
+- Extended the browser workbench for multi-source selection, combine mode,
+  export choice, downloads, contact destinations, and message previews.
+- Real-provider qualification remains readiness-only; no external action or
+  private recipient/provider data was used.

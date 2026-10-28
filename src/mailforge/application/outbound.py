@@ -162,6 +162,61 @@ class OutboundService:
         sender_configuration: Mapping[str, object] | None = None,
         resolved_attachments: tuple[ResolvedAttachment, ...] = (),
         resolved_attachments_by_contact: Mapping[str, tuple[ResolvedAttachment, ...]] | None = None,
+        contact_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        recipient_ids: set[str] | None = None,
+        refresh_prepared: bool = False,
+        render_callback: Callable[[Mapping[str, object], Mapping[str, object], int], object]
+        | None = None,
+    ) -> OutboundPreparationReport:
+        with self.store.campaign_operation_lock():
+            with self.store.connect() as connection:
+                pinned = connection.execute(
+                    "SELECT 1 FROM data_studio_campaign_snapshots WHERE campaign_id=? LIMIT 1",
+                    (campaign_id,),
+                ).fetchone()
+            if pinned is not None:
+                raise ValueError(
+                    "campaign has a Data Studio recipient snapshot; use Message Studio preparation"
+                )
+            return self._prepare_campaign(
+                campaign_id,
+                template=template,
+                sender=sender,
+                campaign_variables=campaign_variables,
+                asset_root=asset_root,
+                attachments=attachments,
+                schedule=schedule,
+                unsubscribe_url=unsubscribe_url,
+                one_click_unsubscribe=one_click_unsubscribe,
+                dkim_signed=dkim_signed,
+                sender_configuration=sender_configuration,
+                resolved_attachments=resolved_attachments,
+                resolved_attachments_by_contact=resolved_attachments_by_contact,
+                contact_overrides=contact_overrides,
+                recipient_ids=recipient_ids,
+                refresh_prepared=refresh_prepared,
+                render_callback=render_callback,
+            )
+
+    def _prepare_campaign(
+        self,
+        campaign_id: str,
+        *,
+        template: TemplateDefinition,
+        sender: SenderPolicy,
+        campaign_variables: dict[str, object] | None = None,
+        asset_root: str | Path | None = None,
+        attachments: tuple[AttachmentSpec, ...] = (),
+        schedule: ScheduleSpec | None = None,
+        unsubscribe_url: str | None = None,
+        one_click_unsubscribe: bool = False,
+        dkim_signed: bool = False,
+        sender_configuration: Mapping[str, object] | None = None,
+        resolved_attachments: tuple[ResolvedAttachment, ...] = (),
+        resolved_attachments_by_contact: Mapping[str, tuple[ResolvedAttachment, ...]] | None = None,
+        contact_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        recipient_ids: set[str] | None = None,
+        refresh_prepared: bool = False,
         render_callback: Callable[[Mapping[str, object], Mapping[str, object], int], object]
         | None = None,
     ) -> OutboundPreparationReport:
@@ -187,6 +242,8 @@ class OutboundService:
             contacts = {
                 row["id"]: row for row in self.store.list_contacts(campaign["audience_list_id"])
             }
+        if contact_overrides:
+            contacts.update({key: dict(value) for key, value in contact_overrides.items()})
         resolved: tuple = ()
         asset_error: Exception | None = None
         if attachments:
@@ -203,10 +260,41 @@ class OutboundService:
         issues: list[PreparationIssue] = []
         prepared = 0
         for intent in self.store.list_intents(campaign_id):
-            if intent["state"] != DeliveryState.ELIGIBLE_PENDING.value:
+            if recipient_ids is not None and intent["contact_id"] not in recipient_ids:
+                if intent["state"] in {
+                    DeliveryState.ELIGIBLE_PENDING.value,
+                    DeliveryState.PREPARED.value,
+                }:
+                    self.store.set_intent_state(
+                        intent["id"],
+                        DeliveryState.NOT_ELIGIBLE,
+                        "excluded by Data Studio recipient snapshot",
+                    )
+                continue
+            intent_state = intent["state"]
+            if (
+                recipient_ids is not None
+                and refresh_prepared
+                and intent_state == DeliveryState.PREPARED.value
+            ):
+                self.store.set_intent_state(
+                    intent["id"],
+                    DeliveryState.ELIGIBLE_PENDING,
+                    "refreshing from Data Studio recipient snapshot",
+                )
+                intent_state = DeliveryState.ELIGIBLE_PENDING.value
+            if intent_state != DeliveryState.ELIGIBLE_PENDING.value:
                 continue
             contact = contacts[intent["contact_id"]]
-            metadata = json.loads(contact["metadata_json"])
+            if isinstance(contact, Mapping):
+                raw_metadata = contact.get("metadata_json")
+                metadata = (
+                    dict(contact["metadata"])
+                    if contact.get("metadata") is not None
+                    else json.loads(raw_metadata or "{}")
+                )
+            else:
+                metadata = json.loads(contact["metadata_json"] or "{}")
             context = {
                 "email": contact["normalized_email"],
                 "name": contact["display_name"],

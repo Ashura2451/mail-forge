@@ -18,6 +18,7 @@ from typing import Any
 from mailforge.application.composition import ResolvedAttachment
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.application.templates import SafeTemplateRenderer
+from mailforge.domain.email import normalize_email, validate_email
 from mailforge.domain.outbound import AttachmentSpec, SenderPolicy, TemplateDefinition
 from mailforge.infrastructure.campaign_store import CampaignStore
 
@@ -72,6 +73,14 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _file_hash(path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _row(row: Any) -> dict[str, Any]:
     result = dict(row)
     for key in ("document_json",):
@@ -92,10 +101,19 @@ def _filename(value: str) -> str:
 class MessageStudioService:
     """The single composition authority shared by UI, API, CLI, and campaigns."""
 
-    def __init__(self, store: CampaignStore, *, outbound=None, segmentation=None, now_fn=None):
+    def __init__(
+        self,
+        store: CampaignStore,
+        *,
+        outbound=None,
+        segmentation=None,
+        data_studio=None,
+        now_fn=None,
+    ):
         self.store = store
         self.outbound = outbound
         self.segmentation = segmentation or SegmentationService(store)
+        self.data_studio = data_studio
         self.renderer = SafeTemplateRenderer()
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
 
@@ -604,11 +622,16 @@ class MessageStudioService:
         block: Mapping[str, Any],
         contact_id: str | None,
         mode: str | None,
+        condition_modes: Mapping[str, bool] | None,
         warnings: list[str],
     ) -> bool:
         if mode in {"true", "false"}:
             return mode == "true"
         condition = block["condition"]
+        if condition_modes is not None:
+            key = _canonical(condition)
+            if key in condition_modes:
+                return bool(condition_modes[key])
         if not contact_id:
             warnings.append("conditional preview uses the nonmatching branch without a contact")
             return False
@@ -626,6 +649,7 @@ class MessageStudioService:
         *,
         contact_id: str | None,
         mode: str | None,
+        condition_modes: Mapping[str, bool] | None,
         warnings: list[str],
         attachments: list[ResolvedAttachment],
         text: list[str],
@@ -695,6 +719,7 @@ class MessageStudioService:
                             column,
                             contact_id=contact_id,
                             mode=mode,
+                            condition_modes=condition_modes,
                             warnings=warnings,
                             attachments=attachments,
                             text=child_text,
@@ -709,13 +734,14 @@ class MessageStudioService:
                     + "</tr></table>"
                 )
             elif kind == "conditional":
-                matched = self._condition(block, contact_id, mode, warnings)
+                matched = self._condition(block, contact_id, mode, condition_modes, warnings)
                 branch = block.get("if_true" if matched else "if_false", [])
                 html_parts.append(
                     self._render_blocks(
                         branch,
                         contact_id=contact_id,
                         mode=mode,
+                        condition_modes=condition_modes,
                         warnings=warnings,
                         attachments=attachments,
                         text=text,
@@ -735,6 +761,9 @@ class MessageStudioService:
     ) -> dict[str, Any]:
         source = self.validate_document(document)
         context, contact_id = self._contact_context(contact)
+        condition_modes = (
+            contact.get("_data_studio_condition_modes") if isinstance(contact, Mapping) else None
+        )
         warnings: list[str] = []
         context = self._with_fallbacks(context, source, warnings)
         attachments: list[ResolvedAttachment] = []
@@ -743,6 +772,7 @@ class MessageStudioService:
             source["blocks"],
             contact_id=contact_id,
             mode=condition_mode,
+            condition_modes=condition_modes,
             warnings=warnings,
             attachments=attachments,
             text=text_parts,
@@ -875,6 +905,289 @@ class MessageStudioService:
                 ).fetchone()
             )
 
+    def create_data_studio_snapshot(
+        self,
+        campaign_id: str,
+        *,
+        source_job_id: str,
+        artifact_id: str,
+        recipe_revision_id: str,
+        revision_id: str,
+        field_mapping: Mapping[str, str],
+        run_key: str = "primary",
+    ) -> dict[str, Any]:
+        with self.store.campaign_operation_lock():
+            return self._create_data_studio_snapshot(
+                campaign_id,
+                source_job_id=source_job_id,
+                artifact_id=artifact_id,
+                recipe_revision_id=recipe_revision_id,
+                revision_id=revision_id,
+                field_mapping=field_mapping,
+                run_key=run_key,
+            )
+
+    def _create_data_studio_snapshot(
+        self,
+        campaign_id: str,
+        *,
+        source_job_id: str,
+        artifact_id: str,
+        recipe_revision_id: str,
+        revision_id: str,
+        field_mapping: Mapping[str, str],
+        run_key: str = "primary",
+    ) -> dict[str, Any]:
+        """Freeze processed rows and their rendering context for one campaign run."""
+
+        if self.data_studio is None:
+            raise MessageStudioError("Data Studio is not configured", "data_studio_unavailable")
+        campaign = self.store.get_campaign(campaign_id)
+        job = self.data_studio.get_job(source_job_id)
+        if job["status"] != "completed" or job["recipe_revision_id"] != recipe_revision_id:
+            raise MessageStudioError(
+                "the source job must be completed with the selected recipe revision",
+                "data_snapshot_invalid",
+            )
+        artifact = next((item for item in job["artifacts"] if item["id"] == artifact_id), None)
+        if artifact is None or artifact["kind"] != "output":
+            raise MessageStudioError(
+                "the processed output artifact was not found", "artifact_invalid"
+            )
+        artifact_path, _ = self.data_studio.artifact_path(source_job_id, artifact_id)
+        if _file_hash(artifact_path) != artifact["sha256"]:
+            raise MessageStudioError(
+                "the processed output artifact checksum changed", "artifact_integrity"
+            )
+        with self.store.connect() as connection:
+            revision = connection.execute(
+                "SELECT * FROM message_revisions WHERE id=? AND status='published'", (revision_id,)
+            ).fetchone()
+            existing = connection.execute(
+                "SELECT * FROM data_studio_campaign_snapshots WHERE campaign_id=? AND run_key=?",
+                (campaign_id, run_key),
+            ).fetchone()
+            attachment_rows = connection.execute(
+                "SELECT contact_id,asset_id FROM message_recipient_attachments WHERE revision_id=?",
+                (revision_id,),
+            ).fetchall()
+        if revision is None:
+            raise MessageStudioError(
+                "campaigns require a published message revision", "revision_not_published"
+            )
+        document = json.loads(revision["document_json"])
+        if existing is None:
+            with self.store.connect() as connection:
+                prepared = connection.execute(
+                    "SELECT COUNT(*) FROM delivery_intents "
+                    "WHERE campaign_id=? AND state='prepared'",
+                    (campaign_id,),
+                ).fetchone()[0]
+            if prepared:
+                raise MessageStudioError(
+                    "campaign already has prepared messages; create a new campaign for a Data Studio batch",
+                    "snapshot_conflict",
+                )
+        if not field_mapping:
+            raise MessageStudioError(
+                "at least one processed field mapping is required", "mapping_invalid"
+            )
+        allowed_targets = {"email", "name"}
+        for target in field_mapping.values():
+            if target not in allowed_targets and not re.fullmatch(
+                r"contact\.[a-z][a-z0-9_]{0,63}", target
+            ):
+                raise MessageStudioError(
+                    f"unsupported campaign field mapping: {target}", "mapping_invalid"
+                )
+        rows = list(
+            self.data_studio.iter_artifact_records(source_job_id, artifact_id, limit=100_001)
+        )
+        if len(rows) > 100_000:
+            raise MessageStudioError(
+                "campaign preparation is limited to 100,000 processed rows", "campaign_limit"
+            )
+        email_source = next(
+            (source for source, target in field_mapping.items() if target == "email"), None
+        )
+        if not email_source:
+            raise MessageStudioError("an email field mapping is required", "mapping_invalid")
+        attachment_map: dict[str, list[str]] = {}
+        for item in attachment_rows:
+            attachment_map.setdefault(item["contact_id"], []).append(item["asset_id"])
+        recipients: list[dict[str, Any]] = []
+        seen_contacts: set[str] = set()
+        for row_number, row in enumerate(rows, start=1):
+            if email_source not in row:
+                raise MessageStudioError(
+                    f"row {row_number} is missing the mapped email field", "mapping_invalid"
+                )
+            email = normalize_email(str(row[email_source] or ""))
+            if not validate_email(email).valid:
+                raise MessageStudioError(
+                    f"row {row_number} does not contain a valid recipient email", "mapping_invalid"
+                )
+            contact = self.store.contact_by_email(email)
+            if contact is None:
+                raise MessageStudioError(
+                    f"row {row_number} has no reconciled contact for {email}",
+                    "recipient_unreconciled",
+                )
+            contact_id = contact["id"]
+            if contact_id in seen_contacts:
+                raise MessageStudioError(
+                    f"processed data contains duplicate recipient {email}", "recipient_duplicate"
+                )
+            seen_contacts.add(contact_id)
+            with self.store.connect() as connection:
+                member = connection.execute(
+                    "SELECT 1 FROM list_memberships WHERE list_id=? AND contact_id=?",
+                    (campaign["audience_list_id"], contact_id),
+                ).fetchone()
+            if member is None:
+                raise MessageStudioError(
+                    f"recipient {email} is not in the campaign audience list",
+                    "recipient_not_in_audience",
+                )
+            metadata = json.loads(contact["metadata_json"] or "{}")
+            name = contact["display_name"]
+            for source, target in field_mapping.items():
+                if source not in row:
+                    continue
+                if target == "name":
+                    name = str(row[source] or "")
+                elif target.startswith("contact."):
+                    metadata[target.split(".", 1)[1]] = row[source]
+            context_contact = {
+                "id": contact_id,
+                "normalized_email": email,
+                "display_name": name,
+                "metadata": metadata,
+                "_data_studio_condition_modes": self._condition_modes(
+                    document.get("blocks", []), contact_id
+                ),
+            }
+            recipients.append(
+                {
+                    "row_number": row_number,
+                    "source_row_hash": _hash(row),
+                    "contact_id": contact_id,
+                    "normalized_email": email,
+                    "context": context_contact,
+                    "attachment_asset_ids": attachment_map.get(contact_id, []),
+                    "rendering_seed": int(
+                        hashlib.sha256(f"{campaign_id}:{email}:{revision_id}".encode()).hexdigest()[
+                            :16
+                        ],
+                        16,
+                    )
+                    % (2**63 - 1),
+                }
+            )
+        snapshot_payload = {
+            "campaign_id": campaign_id,
+            "run_key": run_key,
+            "source_job_id": source_job_id,
+            "source_artifact_id": artifact_id,
+            "artifact_sha256": artifact["sha256"],
+            "recipe_revision_id": recipe_revision_id,
+            "message_revision_id": revision_id,
+            "message_content_hash": revision["content_hash"],
+            "field_mapping": dict(field_mapping),
+            "recipients": recipients,
+        }
+        content_hash = _hash(snapshot_payload)
+        if existing is not None:
+            if existing["content_hash"] != content_hash:
+                raise MessageStudioError(
+                    "campaign data snapshot already exists with different source or mapping",
+                    "snapshot_conflict",
+                )
+            return self.get_data_studio_snapshot(existing["id"])
+        snapshot_id = str(uuid.uuid4())
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO data_studio_campaign_snapshots(id,campaign_id,run_key,source_job_id,source_artifact_id,artifact_sha256,recipe_revision_id,message_revision_id,message_content_hash,field_mapping_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    snapshot_id,
+                    campaign_id,
+                    run_key,
+                    source_job_id,
+                    artifact_id,
+                    artifact["sha256"],
+                    recipe_revision_id,
+                    revision_id,
+                    revision["content_hash"],
+                    _canonical(dict(field_mapping)),
+                    content_hash,
+                    self.now_fn().isoformat(),
+                ),
+            )
+            for item in recipients:
+                connection.execute(
+                    "INSERT INTO data_studio_campaign_recipients(snapshot_id,row_number,source_row_hash,contact_id,normalized_email,context_json,attachment_asset_ids_json,rendering_seed) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        snapshot_id,
+                        item["row_number"],
+                        item["source_row_hash"],
+                        item["contact_id"],
+                        item["normalized_email"],
+                        _canonical(item["context"]),
+                        _canonical(item["attachment_asset_ids"]),
+                        item["rendering_seed"],
+                    ),
+                )
+        return self.get_data_studio_snapshot(snapshot_id)
+
+    def _condition_modes(
+        self, blocks: Sequence[Mapping[str, Any]], contact_id: str
+    ) -> dict[str, bool]:
+        modes: dict[str, bool] = {}
+
+        def visit(items: Sequence[Mapping[str, Any]]) -> None:
+            for block in items:
+                if block.get("type") == "conditional":
+                    condition = block["condition"]
+                    try:
+                        modes[_canonical(condition)] = self.segmentation.matches_contact(
+                            condition["segment_id"],
+                            contact_id,
+                            revision_id=condition.get("revision_id"),
+                        )
+                    except KeyError, SegmentationError:
+                        modes[_canonical(condition)] = False
+                    visit(block.get("if_true", []))
+                    visit(block.get("if_false", []))
+                elif block.get("type") == "columns":
+                    for column in block.get("columns", []):
+                        visit(column)
+
+        visit(blocks)
+        return modes
+
+    def get_data_studio_snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        with self.store.connect() as connection:
+            snapshot = connection.execute(
+                "SELECT * FROM data_studio_campaign_snapshots WHERE id=?", (snapshot_id,)
+            ).fetchone()
+            if snapshot is None:
+                raise MessageStudioError(
+                    "campaign data snapshot was not found", "snapshot_not_found"
+                )
+            recipients = connection.execute(
+                "SELECT * FROM data_studio_campaign_recipients WHERE snapshot_id=? ORDER BY row_number",
+                (snapshot_id,),
+            ).fetchall()
+        result = dict(snapshot)
+        result["field_mapping"] = json.loads(result.pop("field_mapping_json"))
+        result["recipients"] = []
+        for item in recipients:
+            value = dict(item)
+            value["context"] = json.loads(value.pop("context_json"))
+            value["attachment_asset_ids"] = json.loads(value.pop("attachment_asset_ids_json"))
+            result["recipients"].append(value)
+        return result
+
     def prepare_campaign(
         self,
         campaign_id: str,
@@ -883,13 +1196,53 @@ class MessageStudioService:
         revision_id: str | None = None,
         run_key: str = "primary",
         campaign_variables: dict[str, Any] | None = None,
+        data_snapshot_id: str | None = None,
+    ):
+        with self.store.campaign_operation_lock():
+            return self._prepare_campaign(
+                campaign_id,
+                sender=sender,
+                revision_id=revision_id,
+                run_key=run_key,
+                campaign_variables=campaign_variables,
+                data_snapshot_id=data_snapshot_id,
+            )
+
+    def _prepare_campaign(
+        self,
+        campaign_id: str,
+        *,
+        sender: SenderPolicy,
+        revision_id: str | None = None,
+        run_key: str = "primary",
+        campaign_variables: dict[str, Any] | None = None,
+        data_snapshot_id: str | None = None,
     ):
         if self.outbound is None:
             raise MessageStudioError("outbound service is not configured")
+        refresh_prepared = data_snapshot_id is not None
         campaign = self.store.get_campaign(campaign_id)
         revision_id = revision_id or campaign["message_revision_id"]
         if not revision_id:
             raise MessageStudioError("campaign has no message revision", "revision_required")
+        if data_snapshot_id is None:
+            with self.store.connect() as connection:
+                saved_snapshot = connection.execute(
+                    "SELECT id FROM data_studio_campaign_snapshots "
+                    "WHERE campaign_id=? AND run_key=? AND message_revision_id=?",
+                    (campaign_id, run_key, revision_id),
+                ).fetchone()
+                any_snapshot = connection.execute(
+                    "SELECT 1 FROM data_studio_campaign_snapshots WHERE campaign_id=? LIMIT 1",
+                    (campaign_id,),
+                ).fetchone()
+            if saved_snapshot is not None:
+                data_snapshot_id = saved_snapshot["id"]
+            elif any_snapshot is not None:
+                raise MessageStudioError(
+                    "campaign has a Data Studio snapshot for a different revision or run",
+                    "snapshot_conflict",
+                )
         snapshot = self.campaign_snapshot(campaign_id, revision_id, run_key=run_key)
         document = json.loads(snapshot["document_json"])
         static = []
@@ -908,6 +1261,28 @@ class MessageStudioService:
         for mapping in mappings:
             per_contact.setdefault(mapping["contact_id"], tuple())
             per_contact[mapping["contact_id"]] += (self._asset_attachment(mapping["asset_id"]),)
+        contact_overrides = None
+        recipient_ids = None
+        if data_snapshot_id:
+            data_snapshot = self.get_data_studio_snapshot(data_snapshot_id)
+            if (
+                data_snapshot["campaign_id"] != campaign_id
+                or data_snapshot["message_revision_id"] != revision_id
+                or data_snapshot["run_key"] != run_key
+            ):
+                raise MessageStudioError(
+                    "campaign data snapshot does not match this run", "snapshot_conflict"
+                )
+            contact_overrides = {
+                item["contact_id"]: item["context"] for item in data_snapshot["recipients"]
+            }
+            recipient_ids = set(contact_overrides)
+            per_contact = {
+                item["contact_id"]: tuple(
+                    self._asset_attachment(asset_id) for asset_id in item["attachment_asset_ids"]
+                )
+                for item in data_snapshot["recipients"]
+            }
         template = TemplateDefinition(
             name=f"studio:{revision_id}", version=revision_id, subject="", text=""
         )
@@ -916,12 +1291,15 @@ class MessageStudioService:
             result = self.render_document(document, contact=contact)
             return result["_rendered"], result["_attachments"]
 
-        return self.outbound.prepare_campaign(
+        return self.outbound._prepare_campaign(
             campaign_id,
             template=template,
             sender=sender,
             campaign_variables=campaign_variables,
             resolved_attachments=tuple(static),
             resolved_attachments_by_contact=per_contact,
+            contact_overrides=contact_overrides,
+            recipient_ids=recipient_ids,
+            refresh_prepared=refresh_prepared,
             render_callback=render,
         )

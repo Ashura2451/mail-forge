@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -24,6 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from mailforge.application.automation import AutomationError, AutomationService
 from mailforge.application.campaigns import CampaignService
+from mailforge.application.data_studio import DataStudioError, DataStudioService, detect_schema
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_operations import InboundOperations, InboundOperationsError
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
@@ -57,6 +58,41 @@ CSRF_HEADER = "x-mailforge-csrf"
 class ListInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
+
+
+class DataStudioRecipeInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=500)
+    definition: dict[str, Any] = Field(default_factory=lambda: {"steps": []})
+
+
+class DataStudioRevisionInput(BaseModel):
+    definition: dict[str, Any]
+    expected_revision_id: str | None = None
+
+
+class DataStudioContactImportInput(BaseModel):
+    list_id: str
+    mappings: dict[str, str]
+    overwrite: bool = False
+    source_ref: str = Field(default="data-studio-artifact", max_length=200)
+    max_rows: int = Field(default=10_000, ge=1, le=100_000)
+
+
+class DataStudioMessagePreviewInput(BaseModel):
+    revision_id: str
+    contact_id: str | None = None
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+    row_number: int = Field(default=1, ge=1, le=100_000)
+
+
+class DataStudioCampaignPrepareInput(BaseModel):
+    source_job_id: str
+    source_artifact_id: str
+    recipe_revision_id: str
+    message_revision_id: str
+    field_mapping: dict[str, str]
+    run_key: str = Field(default="primary", min_length=1, max_length=120)
 
 
 class CampaignInput(BaseModel):
@@ -451,15 +487,22 @@ class WebRuntime:
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
+        self.data_studio = DataStudioService(self.store)
         self.message_studio = MessageStudioService(
-            self.store, outbound=self.outbound, segmentation=self.segmentation
+            self.store,
+            outbound=self.outbound,
+            segmentation=self.segmentation,
+            data_studio=self.data_studio,
         )
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.provider_operations = ProviderOperationsService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
         self.automation = AutomationService(
-            self.store, campaigns=self.campaigns, message_studio=self.message_studio
+            self.store,
+            campaigns=self.campaigns,
+            message_studio=self.message_studio,
+            data_studio=self.data_studio,
         )
         self.inbound_operations = InboundOperations(self.store, message_studio=self.message_studio)
         self.inbound.set_operations(self.inbound_operations)
@@ -495,6 +538,7 @@ class WebRuntime:
     def close(self) -> None:
         self.automation_runtime.shutdown()
         self.list_processing.close()
+        self.data_studio.close()
         self.workers.shutdown()
         self.automation_workers.shutdown()
 
@@ -616,6 +660,32 @@ def _upload_list_tool(upload: UploadFile, directory: Path) -> Path:
             total += len(chunk)
             if total > 1_073_741_824:
                 raise ValueError("list input exceeds the 1 GiB local processing limit")
+            handle.write(chunk)
+        handle.close()
+        return Path(handle.name)
+    except Exception:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+
+
+def _upload_data_studio(upload: UploadFile, directory: Path) -> Path:
+    """Retain a bounded structured source in the Data Studio app directory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = Path(upload.filename or "data.csv").suffix.lower()
+    handle = tempfile.NamedTemporaryFile(
+        prefix="data-source-", suffix=suffix, dir=directory, delete=False
+    )
+    total = 0
+    try:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1_073_741_824:
+                raise ValueError("structured input exceeds the 1 GiB local processing limit")
             handle.write(chunk)
         handle.close()
         return Path(handle.name)
@@ -917,7 +987,7 @@ def create_app(
             if missing:
                 return _error(400, "mapping_invalid", f"unknown fields: {', '.join(missing)}")
             checked = runtime.segmentation.validate_import_rows(
-                payload.rows, mappings=payload.mappings
+                payload.rows, mappings=payload.mappings, overwrite=payload.overwrite
             )
             return {
                 "records": checked["records"],
@@ -926,6 +996,7 @@ def create_app(
                 "source_ref": payload.source_ref,
                 "valid": not checked["invalid"],
                 "invalid": checked["invalid"],
+                "conflicts": checked["conflicts"],
             }
         except (KeyError, SegmentationError) as error:
             return _error(400, "mapping_invalid", str(error))
@@ -1143,6 +1214,340 @@ def create_app(
                 404 if error.code == "artifact_not_found" else 403, error.code, str(error)
             )
 
+    @app.get(f"{API_PREFIX}/data-studio/recipes")
+    async def data_studio_recipes(include_archived: bool = False):
+        return {"items": runtime.data_studio.list_recipes(include_archived=include_archived)}
+
+    @app.post(f"{API_PREFIX}/data-studio/recipes")
+    async def create_data_studio_recipe(payload: DataStudioRecipeInput):
+        try:
+            return runtime.data_studio.create_recipe(
+                payload.name, payload.description, payload.definition
+            )
+        except DataStudioError as error:
+            return _error(409 if error.code == "recipe_exists" else 400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/data-studio/recipes/{{recipe_id}}")
+    async def data_studio_recipe(recipe_id: str, revision_id: str | None = None):
+        try:
+            return runtime.data_studio.get_recipe(recipe_id, revision_id)
+        except DataStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/recipes/{{recipe_id}}/revisions")
+    async def save_data_studio_revision(recipe_id: str, payload: DataStudioRevisionInput):
+        try:
+            return runtime.data_studio.save_revision(
+                recipe_id,
+                payload.definition,
+                expected_revision_id=payload.expected_revision_id,
+            )
+        except DataStudioError as error:
+            return _error(409 if error.code == "revision_conflict" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/validate")
+    async def validate_data_studio_recipe(payload: DataStudioRevisionInput):
+        try:
+            definition = runtime.data_studio.validate_definition(payload.definition)
+            return {"valid": True, "definition": definition}
+        except DataStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/schema")
+    async def inspect_data_studio_schema(file: UploadFile = File(...)):  # noqa: B008
+        temporary = _upload_data_studio(file, runtime.data_studio.root)
+        try:
+            return detect_schema(temporary)
+        except (DataStudioError, OSError, UnicodeError) as error:
+            return _error(400, getattr(error, "code", "source_invalid"), str(error))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.post(f"{API_PREFIX}/data-studio/preview")
+    async def preview_data_studio(file: UploadFile = File(...), definition: str = Form("{}")):  # noqa: B008
+        temporary = _upload_data_studio(file, runtime.data_studio.root)
+        try:
+            parsed = json.loads(definition)
+            return runtime.data_studio.preview(temporary, parsed)
+        except (DataStudioError, OSError, UnicodeError, json.JSONDecodeError) as error:
+            return _error(400, getattr(error, "code", "preview_invalid"), str(error))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.post(f"{API_PREFIX}/data-studio/preview-multi")
+    async def preview_data_studio_multi(
+        files: list[UploadFile] = File(...),  # noqa: B008
+        definition: str = Form("{}"),
+    ):
+        temporary: list[Path] = []
+        try:
+            parsed = json.loads(definition)
+            sources = []
+            for index, file in enumerate(files, start=1):
+                path = _upload_data_studio(file, runtime.data_studio.root)
+                temporary.append(path)
+                sources.append((path, file.filename or f"source-{index}.csv", f"source-{index}"))
+            return runtime.data_studio.preview_sources(sources, parsed)
+        except (DataStudioError, OSError, UnicodeError, json.JSONDecodeError) as error:
+            return _error(400, getattr(error, "code", "preview_invalid"), str(error))
+        finally:
+            for path in temporary:
+                path.unlink(missing_ok=True)
+
+    @app.get(f"{API_PREFIX}/data-studio/jobs")
+    async def data_studio_jobs(limit: int = 50, offset: int = 0):
+        safe_limit = max(1, min(limit, 100))
+        return {
+            "items": _query(
+                runtime.store,
+                "SELECT id,recipe_revision_id,source_filename,status,processed_count,"
+                "output_count,rejected_count,error_count,summary_json,error_message,"
+                "created_at,updated_at,started_at,completed_at,correlation_id "
+                "FROM data_studio_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (safe_limit, max(0, offset)),
+            )
+        }
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs")
+    async def create_data_studio_job(
+        recipe_revision_id: str,
+        file: UploadFile = File(...),  # noqa: B008
+    ):
+        temporary = _upload_data_studio(file, runtime.data_studio.root)
+        try:
+            job = runtime.data_studio.create_job(
+                temporary, file.filename or "data.csv", recipe_revision_id
+            )
+            temporary.unlink(missing_ok=True)
+            return job
+        except DataStudioError as error:
+            temporary.unlink(missing_ok=True)
+            return _error(
+                404 if error.code == "revision_not_found" else 400, error.code, str(error)
+            )
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs-multi")
+    async def create_data_studio_multi_source_job(
+        recipe_revision_id: str,
+        files: list[UploadFile] = File(...),  # noqa: B008
+    ):
+        temporary: list[Path] = []
+        try:
+            sources = []
+            for index, file in enumerate(files, start=1):
+                path = _upload_data_studio(file, runtime.data_studio.root)
+                temporary.append(path)
+                sources.append((path, file.filename or f"source-{index}.csv", f"source-{index}"))
+            return runtime.data_studio.create_multi_source_job(sources, recipe_revision_id)
+        except DataStudioError as error:
+            return _error(
+                404 if error.code == "revision_not_found" else 400, error.code, str(error)
+            )
+        finally:
+            for path in temporary:
+                path.unlink(missing_ok=True)
+
+    @app.get(f"{API_PREFIX}/data-studio/jobs/{{job_id}}")
+    async def data_studio_job(job_id: str):
+        try:
+            return runtime.data_studio.get_job(job_id)
+        except DataStudioError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs/{{job_id}}/{{action}}")
+    async def data_studio_job_action(job_id: str, action: str):
+        try:
+            if action == "start":
+                return runtime.data_studio.start(job_id)
+            if action == "cancel":
+                return runtime.data_studio.cancel(job_id)
+            return _error(400, "action_invalid", "unsupported Data Studio job action")
+        except DataStudioError as error:
+            return _error(
+                404 if error.code == "job_not_found" else 409 if error.code == "job_state" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/data-studio/jobs/{{job_id}}/artifacts/{{artifact_id}}")
+    async def data_studio_artifact(job_id: str, artifact_id: str):
+        try:
+            path, filename = runtime.data_studio.artifact_path(job_id, artifact_id)
+            return FileResponse(path, filename=filename, headers={"cache-control": "no-store"})
+        except DataStudioError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(
+        f"{API_PREFIX}/data-studio/jobs/{{job_id}}/artifacts/{{artifact_id}}/contacts/preview"
+    )
+    async def preview_data_studio_contact_import(
+        job_id: str, artifact_id: str, payload: DataStudioContactImportInput
+    ):
+        try:
+            rows = list(
+                runtime.data_studio.iter_artifact_records(
+                    job_id, artifact_id, limit=payload.max_rows + 1
+                )
+            )
+            if len(rows) > payload.max_rows:
+                raise DataStudioError(
+                    "artifact has more rows than max_rows; raise the explicit import limit",
+                    "contact_import_limit",
+                )
+            checked = runtime.segmentation.validate_import_rows(
+                rows, mappings=payload.mappings, overwrite=payload.overwrite
+            )
+            return {
+                "records": checked["records"],
+                "mappings": payload.mappings,
+                "overwrite": payload.overwrite,
+                "source_ref": payload.source_ref,
+                "valid": not checked["invalid"],
+                "invalid": checked["invalid"],
+                "conflicts": checked["conflicts"],
+            }
+        except (DataStudioError, SegmentationError) as error:
+            return _error(400, getattr(error, "code", "contact_import_invalid"), str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs/{{job_id}}/artifacts/{{artifact_id}}/contacts")
+    async def import_data_studio_contacts(
+        job_id: str, artifact_id: str, payload: DataStudioContactImportInput
+    ):
+        try:
+            rows = list(
+                runtime.data_studio.iter_artifact_records(
+                    job_id, artifact_id, limit=payload.max_rows + 1
+                )
+            )
+            if len(rows) > payload.max_rows:
+                raise DataStudioError(
+                    "artifact has more rows than max_rows; raise the explicit import limit",
+                    "contact_import_limit",
+                )
+            result = runtime.segmentation.import_structured(
+                rows,
+                mappings=payload.mappings,
+                list_id=payload.list_id,
+                source_ref=payload.source_ref,
+                overwrite=payload.overwrite,
+            )
+            consumer = runtime.data_studio.record_consumer(
+                kind="contact_import",
+                job_id=job_id,
+                artifact_id=artifact_id,
+                reference_id=payload.list_id,
+                configuration=payload.model_dump(),
+            )
+            return {**result, "consumer": consumer}
+        except (DataStudioError, SegmentationError) as error:
+            return _error(400, getattr(error, "code", "contact_import_invalid"), str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/jobs/{{job_id}}/artifacts/{{artifact_id}}/message-preview")
+    async def preview_data_studio_message(
+        job_id: str, artifact_id: str, payload: DataStudioMessagePreviewInput
+    ):
+        try:
+            rows = list(
+                runtime.data_studio.iter_artifact_records(
+                    job_id, artifact_id, limit=payload.row_number
+                )
+            )
+            if len(rows) < payload.row_number:
+                return _error(404, "row_not_found", "the requested artifact row was not found")
+            row = rows[payload.row_number - 1]
+            with runtime.store.connect() as connection:
+                revision = connection.execute(
+                    "SELECT document_json FROM message_revisions WHERE id=? AND status='published'",
+                    (payload.revision_id,),
+                ).fetchone()
+            if revision is None:
+                return _error(
+                    400, "revision_not_published", "a published message revision is required"
+                )
+            metadata: dict[str, Any] = {}
+            for source, target in payload.field_mapping.items():
+                if source not in row:
+                    continue
+                key = target.removeprefix("contact.")
+                metadata[key] = row[source]
+            if payload.contact_id:
+                contact = dict(runtime.store.get_contact(payload.contact_id))
+                existing = json.loads(contact.get("metadata_json") or "{}")
+                contact["metadata"] = {**existing, **metadata}
+            else:
+                email_field = next(
+                    (
+                        source
+                        for source, target in payload.field_mapping.items()
+                        if target == "email"
+                    ),
+                    "email",
+                )
+                name_field = next(
+                    (
+                        source
+                        for source, target in payload.field_mapping.items()
+                        if target == "name"
+                    ),
+                    "display_name",
+                )
+                contact = {
+                    "normalized_email": normalize_email(
+                        str(row.get(email_field, "sample@example.com"))
+                    ),
+                    "display_name": str(row.get(name_field, "")),
+                    "metadata": metadata,
+                }
+            document = json.loads(revision["document_json"])
+            rendered = runtime.message_studio.render_document(document, contact=contact)
+            job = runtime.data_studio.get_job(job_id)
+            artifact = next(item for item in job["artifacts"] if item["id"] == artifact_id)
+            consumer = runtime.data_studio.record_consumer(
+                kind="message_preview",
+                job_id=job_id,
+                artifact_id=artifact_id,
+                reference_id=payload.revision_id,
+                configuration={
+                    **payload.model_dump(),
+                    "row_hash": hashlib.sha256(
+                        json.dumps(
+                            row, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                        ).encode()
+                    ).hexdigest(),
+                    "artifact_sha256": artifact["sha256"],
+                },
+            )
+            rendered.pop("_rendered", None)
+            rendered.pop("_attachments", None)
+            return {
+                **rendered,
+                "consumer": consumer,
+                "snapshot": {
+                    "artifact_sha256": artifact["sha256"],
+                    "revision_id": payload.revision_id,
+                },
+            }
+        except (DataStudioError, MessageStudioError, KeyError, ValueError) as error:
+            return _error(400, getattr(error, "code", "message_preview_invalid"), str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/extensions/{{name}}/register")
+    async def register_data_studio_extension(name: str):
+        try:
+            return runtime.data_studio.register_extension(name)
+        except DataStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/data-studio/extensions/{{name}}/{{action}}")
+    async def data_studio_extension_action(name: str, action: str):
+        try:
+            if action not in {"enable", "disable"}:
+                return _error(400, "action_invalid", "unsupported extension action")
+            return runtime.data_studio.set_extension_enabled(name, action == "enable")
+        except DataStudioError as error:
+            return _error(
+                404 if error.code == "extension_not_found" else 400, error.code, str(error)
+            )
+
     @app.get(f"{API_PREFIX}/campaigns")
     async def campaigns(limit: int = 100, offset: int = 0):
         safe_limit = max(1, min(limit, 500))
@@ -1268,6 +1673,38 @@ def create_app(
             return asdict(report)
         except (KeyError, ValueError) as error:
             return _error(400, "campaign_not_ready", str(error))
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepare-data-studio")
+    async def prepare_data_studio_campaign(
+        campaign_id: str, payload: DataStudioCampaignPrepareInput
+    ):
+        try:
+            campaign = runtime.store.get_campaign(campaign_id)
+            configuration = json.loads(campaign["configuration_json"] or "{}")
+            sender = SenderPolicy(
+                ref=campaign["sender_config_ref"],
+                provider="synthetic",
+                email=configuration.get("sender_email", "sender@example.com"),
+            )
+            snapshot = runtime.message_studio.create_data_studio_snapshot(
+                campaign_id,
+                source_job_id=payload.source_job_id,
+                artifact_id=payload.source_artifact_id,
+                recipe_revision_id=payload.recipe_revision_id,
+                revision_id=payload.message_revision_id,
+                field_mapping=payload.field_mapping,
+                run_key=payload.run_key,
+            )
+            report = runtime.message_studio.prepare_campaign(
+                campaign_id,
+                sender=sender,
+                revision_id=payload.message_revision_id,
+                run_key=payload.run_key,
+                data_snapshot_id=snapshot["id"],
+            )
+            return {**asdict(report), "data_snapshot": snapshot}
+        except (DataStudioError, KeyError, ValueError, MessageStudioError) as error:
+            return _error(400, getattr(error, "code", "campaign_not_ready"), str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/authorize")
     async def authorize_campaign(campaign_id: str):
