@@ -32,8 +32,10 @@ The same-origin API is versioned under `/api/v1` and includes status/dashboard,
 lists/imports/contacts, campaign creation/preview/eligibility/preparation,
 simulation authorization and supervised execution controls, progress/outcomes,
 bounded local EML acquisition, inbound classification/correlation/trust and
-review decisions, provider profiles/credential readiness/diagnostics, and
-paginated activity events. Browser EML acquisition uses a temporary private
+review decisions, provider profiles/credential readiness/diagnostics, paginated
+activity events, and visual workflow definition, revision, validation,
+publication, activation, synthetic enrollment, run controls, and step
+diagnostics. Browser EML acquisition uses a temporary private
 file and the existing `EmlFileSource`/`InboundService`; it never accepts a
 filesystem path.
 
@@ -61,7 +63,9 @@ On startup, stale running/pausing campaigns are reconciled through the existing
 lease recovery path, transitioned through the valid `pausing` state, and made
 available for explicit local resume. Real sending, hosted identity, LAN access,
 remote workers, and cloud infrastructure require separate architecture and
-release decisions.
+release decisions. Workflow runs use the same bounded in-process worker model;
+published revisions are immutable and all workflow actions remain synthetic and
+policy-aware.
 
 ## Verification
 

@@ -1,5 +1,53 @@
 # System changelog
 
+## 2026-10-28 — Message Studio
+
+- Added schema 10 durable Message Studio documents, immutable revisions,
+  bounded local assets, recipient-specific attachment mappings, and immutable
+  campaign content snapshots.
+- Added the canonical `MessageStudioService` for structured blocks, safe merge
+  fields, conditional segments, deterministic HTML/plain-text rendering, CID
+  images, attachment manifests, and recipient previews.
+- Added secured `/api/v1/message-studio/*` operations, `mailforge message`
+  list/validate/render commands, campaign revision pinning, and workflow
+  preparation reuse of the canonical renderer.
+- Added a responsive structured browser studio with keyboard block reordering,
+  merge-field insertion, local uploads, revision controls, isolated preview,
+  and campaign revision selection.
+- Validation remains local and synthetic. No provider, mailbox, credential,
+  or real-recipient data was accessed, and arbitrary HTML/script execution is
+  not supported.
+
+## 2026-10-28 — Operational workflows and List Tools
+
+- Added SQLite schema 9 for durable operational-event cursors, schedule
+  occurrences, List Tools jobs, checkpoints, and private artifact manifests.
+- Wired contact imports, list membership changes, trusted synthetic inbound
+  reconciliation, and List Tools completion into active automation triggers
+  with durable idempotency and bounded in-process restart reconciliation.
+- Added UTC/relative/IANA local scheduled triggers with bounded recurrence and
+  DST-safe local-time conversion.
+- Added an accessible standalone List Tools browser route for TXT, CSV, JSON,
+  and JSONL provider organization. It delegates to the canonical streaming
+  sorter, emits provider evidence and downloadable TXT/CSV/master/summary/error
+  artifacts, and never silently creates Contacts or lists.
+- Validation remains local and synthetic; no provider, mailbox, credential, or
+  real-recipient data was accessed.
+
+## 2026-10-28 — Visual workflow automation
+
+- Added SQLite schema 8 for durable visual workflow definitions, immutable
+  revisions, source-event deduplication, enrollments, pinned runs, waits,
+  action correlations, step history, and audit evidence.
+- Added the canonical `AutomationService`, versioned API, `mailforge automation`
+  CLI, bounded synthetic worker, revision lifecycle, graph validation, UTC wait
+  handling, and allowlisted list/campaign-preparation/note actions.
+- Added an accessible Automation console with a structured visual canvas,
+  explicit keyboard edge editor, revision controls, synthetic enrollment, and
+  durable run history.
+- This is local synthetic evidence only: no provider, mailbox, credential, or
+  real-recipient data was accessed, and no live delivery is enabled.
+
 ## 2026-10-28 — Advanced audience segmentation
 
 - Added CampaignStore schema 7 for typed contact attributes, conflict/audit

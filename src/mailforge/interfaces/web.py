@@ -17,15 +17,18 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from mailforge.application.automation import AutomationError, AutomationService
 from mailforge.application.campaigns import CampaignService
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_sources import EmlFileSource
 from mailforge.application.ingest import iter_raw_values
+from mailforge.application.list_processing import ListProcessingError, ListProcessingService
+from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
@@ -60,6 +63,56 @@ class CampaignInput(BaseModel):
     sender_email: str = "sender@example.com"
     subject: str = Field(default="Synthetic Mailforge campaign", max_length=200)
     text: str = Field(default="Hello {{ email }}", max_length=100_000)
+    message_revision_id: str | None = None
+
+
+class MessageDocumentInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    kind: str = "message"
+    document: dict[str, Any] | None = None
+
+
+class MessageSaveInput(BaseModel):
+    document: dict[str, Any]
+    expected_revision_id: str | None = None
+
+
+class MessageRevisionInput(BaseModel):
+    expected_revision_id: str | None = None
+
+
+class MessagePreviewInput(BaseModel):
+    document: dict[str, Any] | None = None
+    revision_id: str | None = None
+    contact_id: str | None = None
+    condition_mode: str | None = None
+
+
+class MessageAttachmentMapInput(BaseModel):
+    revision_id: str
+    contact_id: str
+    asset_id: str
+    required: bool = True
+
+
+class AutomationInput(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=500)
+
+
+class AutomationRevisionInput(BaseModel):
+    graph: dict[str, Any] | None = None
+    revision_id: str | None = None
+
+
+class AutomationEnrollInput(BaseModel):
+    contact_id: str | None = None
+    event_kind: str = "manual_enrollment"
+    source_identity: str | None = Field(default=None, max_length=240)
+    subject_key: str | None = Field(default=None, max_length=240)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    correlation_id: str | None = Field(default=None, max_length=240)
 
 
 class PrepareInput(BaseModel):
@@ -215,15 +268,103 @@ class WorkerSupervisor:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
 
+class AutomationWorkerSupervisor:
+    """Bounded synthetic workflow worker; waits and history remain durable."""
+
+    def __init__(self, automation: AutomationService):
+        self.automation = automation
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mailforge-automation")
+        self._lock = threading.Lock()
+        self._running: set[str] = set()
+
+    def start(self, run_id: str) -> bool:
+        with self._lock:
+            if run_id in self._running:
+                return False
+            self._running.add(run_id)
+        self.executor.submit(self._run, run_id)
+        return True
+
+    def _run(self, run_id: str) -> None:
+        try:
+            for _ in range(50):
+                detail = self.automation.advance(
+                    run_id, max_steps=20, worker_id=f"web-{threading.get_ident()}"
+                )
+                status = detail["run"]["status"]
+                if status not in {"running", "pending"}:
+                    break
+                time.sleep(0.03)
+        except Exception as error:
+            # Never leave a durable run claiming it is running after a worker
+            # exception; the operator must see and explicitly recover it.
+            try:
+                self.automation.fail_run(run_id, "worker_exception", type(error).__name__)
+            except Exception:
+                pass
+        finally:
+            with self._lock:
+                self._running.discard(run_id)
+
+    def active(self, run_id: str) -> bool:
+        with self._lock:
+            return run_id in self._running
+
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=True, cancel_futures=False)
+
+
+class AutomationRuntimeSupervisor:
+    """Polls durable facts and schedules; SQLite remains the source of truth."""
+
+    def __init__(self, automation: AutomationService, workers: AutomationWorkerSupervisor):
+        self.automation = automation
+        self.workers = workers
+        self.stop = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, name="mailforge-automation-supervisor", daemon=True
+        )
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop.is_set():
+            try:
+                run_ids = self.automation.reconcile_operational_events(limit=100)
+                run_ids.extend(self.automation.reconcile_schedules(limit=25))
+                run_ids.extend(self.automation.due_run_ids(limit=25))
+                for run_id in dict.fromkeys(run_ids):
+                    self.workers.start(run_id)
+            except Exception:
+                # The next bounded poll retries durable work and leaves the
+                # operator-visible run/event state intact.
+                pass
+            self.stop.wait(0.1)
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=2)
+
+
 class WebRuntime:
     def __init__(self, database: str | Path, frontend_dir: str | Path | None = None):
         self.store = CampaignStore(database)
         self.campaigns = CampaignService(self.store)
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
+        self.message_studio = MessageStudioService(
+            self.store, outbound=self.outbound, segmentation=self.segmentation
+        )
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
+        self.automation = AutomationService(
+            self.store, campaigns=self.campaigns, message_studio=self.message_studio
+        )
+        self.automation_workers = AutomationWorkerSupervisor(self.automation)
+        self.automation_runtime = AutomationRuntimeSupervisor(
+            self.automation, self.automation_workers
+        )
+        self.list_processing = ListProcessingService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
         self._recover_running_campaigns()
 
@@ -249,7 +390,10 @@ class WebRuntime:
                 pass
 
     def close(self) -> None:
+        self.automation_runtime.shutdown()
+        self.list_processing.close()
         self.workers.shutdown()
+        self.automation_workers.shutdown()
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -352,6 +496,32 @@ def _upload_inbound(upload: UploadFile) -> tuple[Path, str]:
     return Path(handle.name), digest
 
 
+def _upload_list_tool(upload: UploadFile, directory: Path) -> Path:
+    """Stream one bounded upload into an app-owned private directory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = Path(upload.filename or "contacts.txt").suffix.lower()
+    handle = tempfile.NamedTemporaryFile(
+        prefix="list-input-", suffix=suffix, dir=directory, delete=False
+    )
+    total = 0
+    try:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1_073_741_824:
+                raise ValueError("list input exceeds the 1 GiB local processing limit")
+            handle.write(chunk)
+        handle.close()
+        return Path(handle.name)
+    except Exception:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+
+
 def create_app(
     database: str | Path = "state/mailforge.sqlite3",
     *,
@@ -440,6 +610,165 @@ def create_app(
     @app.get(f"{API_PREFIX}/fields")
     async def fields(include_archived: bool = False):
         return {"items": runtime.segmentation.list_fields(include_archived=include_archived)}
+
+    @app.get(f"{API_PREFIX}/message-studio/documents")
+    async def message_documents(kind: str | None = None, limit: int = 100, offset: int = 0):
+        return {
+            "items": runtime.message_studio.list_documents(kind=kind, limit=limit, offset=offset)
+        }
+
+    @app.post(f"{API_PREFIX}/message-studio/documents")
+    async def create_message_document(payload: MessageDocumentInput):
+        try:
+            return runtime.message_studio.create_document(
+                payload.name, kind=payload.kind, document=payload.document
+            )
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/documents/{{document_id}}")
+    async def message_document(document_id: str):
+        try:
+            return runtime.message_studio.get_document(document_id)
+        except MessageStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/save")
+    async def save_message_document(document_id: str, payload: MessageSaveInput):
+        try:
+            return runtime.message_studio.save_draft(
+                document_id, payload.document, expected_revision_id=payload.expected_revision_id
+            )
+        except MessageStudioError as error:
+            return _error(409 if error.code == "revision_conflict" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/publish")
+    async def publish_message_document(
+        document_id: str, payload: MessageRevisionInput | None = None
+    ):
+        try:
+            return runtime.message_studio.publish(
+                document_id, expected_revision_id=payload.expected_revision_id if payload else None
+            )
+        except MessageStudioError as error:
+            return _error(409 if error.code == "revision_conflict" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/archive")
+    async def archive_message_document(document_id: str):
+        try:
+            return runtime.message_studio.archive(document_id)
+        except MessageStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/documents/{{document_id}}/duplicate")
+    async def duplicate_message_document(
+        document_id: str, payload: MessageDocumentInput | None = None
+    ):
+        try:
+            return runtime.message_studio.duplicate(document_id, payload.name if payload else None)
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/templates")
+    async def message_templates(limit: int = 100, offset: int = 0):
+        return {
+            "items": runtime.message_studio.list_documents(
+                kind="template", limit=limit, offset=offset
+            )
+        }
+
+    @app.post(f"{API_PREFIX}/message-studio/validate")
+    async def validate_message_document(payload: MessageSaveInput):
+        try:
+            document = runtime.message_studio.validate_document(payload.document)
+            return {
+                "valid": True,
+                "content_hash": hashlib.sha256(
+                    json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "warnings": [],
+            }
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/preview")
+    async def preview_message_document(payload: MessagePreviewInput):
+        try:
+            return runtime.message_studio.preview(
+                payload.document,
+                revision_id=payload.revision_id,
+                contact_id=payload.contact_id,
+                condition_mode=payload.condition_mode,
+            )
+        except (MessageStudioError, KeyError) as error:
+            return _error(400, getattr(error, "code", "preview_invalid"), str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/assets")
+    async def message_assets(kind: str | None = None):
+        return {"items": runtime.message_studio.list_assets(kind=kind)}
+
+    @app.get(f"{API_PREFIX}/message-studio/revisions/{{revision_id}}/recipient-attachments")
+    async def recipient_attachment_mappings(revision_id: str):
+        try:
+            return {"items": runtime.message_studio.list_recipient_attachments(revision_id)}
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/recipient-attachments")
+    async def map_recipient_attachment(payload: MessageAttachmentMapInput):
+        try:
+            return runtime.message_studio.map_recipient_attachment(**payload.model_dump())
+        except MessageStudioError as error:
+            status = 404 if error.code.endswith("_not_found") else 400
+            return _error(status, error.code, str(error))
+
+    @app.delete(f"{API_PREFIX}/message-studio/recipient-attachments")
+    async def remove_recipient_attachment(payload: MessageAttachmentMapInput):
+        try:
+            runtime.message_studio.remove_recipient_attachment(
+                payload.revision_id, payload.contact_id, payload.asset_id
+            )
+            return {"removed": True}
+        except MessageStudioError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/message-studio/assets")
+    async def upload_message_asset(file: UploadFile = File(...), kind: str = "attachment"):  # noqa: B008
+        try:
+            raw = file.file.read(10 * 1024 * 1024 + 1)
+            if len(raw) > 10 * 1024 * 1024:
+                return _error(413, "asset_limit", "asset exceeds the 10 MiB local limit")
+            return runtime.message_studio.create_asset(
+                file.filename or "attachment",
+                file.content_type or "application/octet-stream",
+                raw,
+                kind=kind,
+            )
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+
+    @app.delete(f"{API_PREFIX}/message-studio/assets/{{asset_id}}")
+    async def archive_message_asset(asset_id: str):
+        try:
+            runtime.message_studio.archive_asset(asset_id)
+            return {"asset_id": asset_id, "status": "archived"}
+        except MessageStudioError as error:
+            return _error(409 if error.code == "asset_referenced" else 404, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/assets/{{asset_id}}")
+    async def download_message_asset(asset_id: str):
+        try:
+            asset = runtime.message_studio.get_asset(asset_id, include_data=True)
+            return Response(
+                content=asset["data_blob"],
+                media_type=asset["media_type"],
+                headers={
+                    "content-disposition": f'inline; filename="{asset["filename"]}"',
+                    "cache-control": "no-store",
+                },
+            )
+        except MessageStudioError as error:
+            return _error(404, error.code, str(error))
 
     @app.post(f"{API_PREFIX}/fields")
     async def create_field(payload: FieldInput):
@@ -634,6 +963,83 @@ def create_app(
         except (OSError, ValueError) as error:
             return _error(400, "import_invalid", str(error))
 
+    @app.post(f"{API_PREFIX}/list-tools/preview")
+    async def list_tools_preview(file: UploadFile = File(...)):  # noqa: B008
+        temporary = _upload_list_tool(file, runtime.list_processing.root)
+        try:
+            return runtime.list_processing.preview(temporary)
+        except ListProcessingError as error:
+            return _error(400, error.code, str(error))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get(f"{API_PREFIX}/list-tools/jobs")
+    async def list_tools_jobs(limit: int = 50, offset: int = 0):
+        safe_limit = max(1, min(limit, 100))
+        return {
+            "items": _query(
+                runtime.store,
+                "SELECT id,source_filename,profile,dns_mode,status,processed_count,"
+                "accepted_count,summary_json,error_message,created_at,updated_at,"
+                "started_at,completed_at,correlation_id FROM list_processing_jobs "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (safe_limit, max(0, offset)),
+            )
+        }
+
+    @app.post(f"{API_PREFIX}/list-tools/jobs")
+    async def create_list_tools_job(
+        file: UploadFile = File(...),  # noqa: B008
+        profile: str = "full",
+        dns_mode: str = "offline",
+    ):
+        temporary = _upload_list_tool(file, runtime.list_processing.root)
+        try:
+            job = runtime.list_processing.create_job(
+                temporary, file.filename or "input.txt", profile=profile, dns_mode=dns_mode
+            )
+            temporary.unlink(missing_ok=True)
+            return job
+        except ListProcessingError as error:
+            temporary.unlink(missing_ok=True)
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}")
+    async def list_tools_job(job_id: str):
+        try:
+            return runtime.list_processing.get_job(job_id)
+        except ListProcessingError as error:
+            return _error(404 if error.code == "job_not_found" else 400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/{{action}}")
+    async def list_tools_job_action(job_id: str, action: str):
+        try:
+            if action == "start":
+                return runtime.list_processing.start(job_id)
+            if action == "resume":
+                return runtime.list_processing.start(job_id, resume=True)
+            if action == "pause":
+                return runtime.list_processing.pause(job_id)
+            if action == "cancel":
+                return runtime.list_processing.cancel(job_id)
+            return _error(400, "action_invalid", "unsupported List Tools job action")
+        except ListProcessingError as error:
+            return _error(
+                404 if error.code == "job_not_found" else 409 if error.code == "job_state" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/artifacts/{{artifact_id}}")
+    async def list_tools_artifact(job_id: str, artifact_id: str):
+        try:
+            path, filename = runtime.list_processing.artifact_path(job_id, artifact_id)
+            return FileResponse(path, filename=filename, headers={"cache-control": "no-store"})
+        except ListProcessingError as error:
+            return _error(
+                404 if error.code == "artifact_not_found" else 403, error.code, str(error)
+            )
+
     @app.get(f"{API_PREFIX}/campaigns")
     async def campaigns(limit: int = 100, offset: int = 0):
         safe_limit = max(1, min(limit, 500))
@@ -669,6 +1075,18 @@ def create_app(
                 source_type = "segment"
                 source_id = segment["id"]
                 payload.segment_revision_id = segment["revision"]["id"]
+            if payload.message_revision_id:
+                with runtime.store.connect() as connection:
+                    revision = connection.execute(
+                        "SELECT status FROM message_revisions WHERE id = ?",
+                        (payload.message_revision_id,),
+                    ).fetchone()
+                if revision is None or revision["status"] != "published":
+                    return _error(
+                        400,
+                        "revision_not_published",
+                        "campaigns require a published message revision",
+                    )
             campaign_id = runtime.campaigns.create_campaign(
                 payload.name.strip(),
                 payload.list_id,
@@ -683,6 +1101,7 @@ def create_app(
                 audience_source_type=source_type,
                 audience_source_id=source_id,
                 audience_revision_id=payload.segment_revision_id,
+                message_revision_id=payload.message_revision_id,
             )
         except KeyError:
             return _error(404, "list_not_found", "audience list was not found")
@@ -714,10 +1133,24 @@ def create_app(
             sender = SenderPolicy(
                 ref=campaign["sender_config_ref"], provider="synthetic", email=sender_email
             )
+            run_key = payload.run_key if payload else "primary"
+            if campaign["message_revision_id"]:
+                if run_key != "primary":
+                    return _error(
+                        400,
+                        "run_key_unsupported",
+                        "Message Studio campaigns use the primary audience run",
+                    )
+                report = runtime.message_studio.prepare_campaign(
+                    campaign_id,
+                    sender=sender,
+                    revision_id=campaign["message_revision_id"],
+                    run_key=run_key,
+                )
+                return asdict(report)
             template = TemplateDefinition(
                 name=campaign["template_ref"], version="1", subject=subject, text=text
             )
-            run_key = payload.run_key if payload else "primary"
             if run_key != "primary":
                 report = runtime.campaigns.prepare(campaign_id, run_key=run_key)
                 return {
@@ -835,6 +1268,138 @@ def create_app(
             }
         except KeyError:
             return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.get(f"{API_PREFIX}/automations")
+    async def automations(limit: int = 100, offset: int = 0):
+        return runtime.automation.list_workflows(limit=limit, offset=offset)
+
+    @app.post(f"{API_PREFIX}/automations")
+    async def create_automation(payload: AutomationInput):
+        try:
+            return runtime.automation.create_workflow(payload.name, payload.description)
+        except AutomationError as error:
+            return _error(409 if error.code == "workflow_exists" else 400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/automations/runs/{{run_id}}")
+    async def automation_run_detail(run_id: str):
+        try:
+            return runtime.automation.run_detail(run_id)
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/automations/runs/{{run_id}}/{{action}}")
+    async def automation_run_control(run_id: str, action: str):
+        try:
+            result = runtime.automation.control_run(run_id, action)
+            if action == "resume":
+                runtime.automation_workers.start(run_id)
+            return {"run": result, "action": action}
+        except AutomationError as error:
+            return _error(
+                409 if error.code == "run_state" else 404 if error.code == "run_not_found" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.post(f"{API_PREFIX}/automations/runs/{{run_id}}/advance")
+    async def advance_automation_run(run_id: str):
+        try:
+            return runtime.automation.advance(run_id)
+        except AutomationError as error:
+            return _error(
+                409 if error.code == "run_state" else 404 if error.code == "run_not_found" else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/automations/{{automation_id}}")
+    async def automation_detail(automation_id: str):
+        try:
+            return runtime.automation.get_workflow(automation_id)
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/automations/{{automation_id}}/revisions")
+    async def automation_revisions(automation_id: str):
+        try:
+            return {"items": runtime.automation.list_revisions(automation_id)}
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/revisions")
+    async def save_automation_revision(automation_id: str, payload: AutomationRevisionInput):
+        try:
+            if payload.graph is None:
+                return _error(400, "graph_required", "graph is required when saving a draft")
+            return runtime.automation.save_revision(
+                automation_id, payload.graph, revision_id=payload.revision_id
+            )
+        except AutomationError as error:
+            return _error(
+                409 if error.code in {"revision_state", "workflow_exists"} else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/validate")
+    async def validate_automation(
+        automation_id: str, payload: AutomationRevisionInput | None = None
+    ):
+        try:
+            graph = (
+                payload.graph
+                if payload and payload.graph is not None
+                else runtime.automation.get_workflow(automation_id)["draft"]["graph"]
+            )
+            return runtime.automation.validate_graph(graph)
+        except AutomationError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/enroll")
+    async def enroll_automation(automation_id: str, payload: AutomationEnrollInput):
+        try:
+            result = runtime.automation.enroll(
+                automation_id, **payload.model_dump(exclude_none=True)
+            )
+            if result.get("run_id"):
+                runtime.automation_workers.start(result["run_id"])
+            return result
+        except AutomationError as error:
+            return _error(
+                409 if error.code in {"workflow_state", "trigger_not_configured"} else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.post(f"{API_PREFIX}/automations/{{automation_id}}/{{action}}")
+    async def automation_lifecycle(
+        automation_id: str, action: str, payload: AutomationRevisionInput | None = None
+    ):
+        try:
+            if action == "publish":
+                return runtime.automation.publish(
+                    automation_id, payload.revision_id if payload else None
+                )
+            if action in {"activate", "pause", "archive"}:
+                return runtime.automation.set_lifecycle(
+                    automation_id, action, payload.revision_id if payload else None
+                )
+            raise AutomationError("unsupported workflow lifecycle action")
+        except AutomationError as error:
+            return _error(
+                409
+                if error.code in {"revision_state", "workflow_state", "trigger_not_configured"}
+                else 400,
+                error.code,
+                str(error),
+            )
+
+    @app.get(f"{API_PREFIX}/automations/{{automation_id}}/runs")
+    async def automation_runs(automation_id: str, limit: int = 100, offset: int = 0):
+        try:
+            return runtime.automation.list_runs(automation_id, limit=limit, offset=offset)
+        except AutomationError as error:
+            return _error(404, error.code, str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/resume")
     async def resume_campaign(campaign_id: str):

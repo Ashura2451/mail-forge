@@ -855,6 +855,10 @@ class EmailSorter:
                     else:
                         reason_codes.append(ReasonCode.DNS_EVIDENCE_PENDING.value)
                         dns_evidence_status = "pending"
+                provider_evidence = self.providers.classify(
+                    normalized,
+                    dns_status=dns_evidence_status,
+                )
                 for reason_code in reason_codes:
                     self.stats.reason_counts[reason_code] = (
                         self.stats.reason_counts.get(reason_code, 0) + 1
@@ -908,6 +912,7 @@ class EmailSorter:
                             "is_role_based": is_role,
                             "is_disposable": is_disposable,
                             "has_subaddress": has_subaddress,
+                            "provider_evidence": provider_evidence,
                         },
                         deduplication_disposition="unique",
                         diagnostic_reason_codes=tuple(reason_codes),

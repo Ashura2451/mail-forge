@@ -57,7 +57,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 10
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -652,6 +652,288 @@ CREATE INDEX IF NOT EXISTS idx_audience_recipients_contact
 ON campaign_audience_recipients(audience_id, normalized_email);
 """
 
+MIGRATION_8_SQL = """
+CREATE TABLE IF NOT EXISTS automation_workflows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('draft', 'active', 'paused', 'archived')),
+    reentry_policy TEXT NOT NULL DEFAULT 'once_per_contact',
+    current_draft_revision_id TEXT,
+    active_revision_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    updated_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS automation_revisions (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL REFERENCES automation_workflows(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('draft', 'published')),
+    graph_json TEXT NOT NULL,
+    graph_hash TEXT NOT NULL,
+    limits_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    created_by TEXT NOT NULL,
+    UNIQUE(workflow_id, revision_number),
+    UNIQUE(workflow_id, graph_hash)
+);
+CREATE TABLE IF NOT EXISTS automation_triggers (
+    id TEXT PRIMARY KEY,
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id) ON DELETE CASCADE,
+    trigger_key TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    UNIQUE(revision_id, trigger_key)
+);
+CREATE TABLE IF NOT EXISTS automation_nodes (
+    id TEXT PRIMARY KEY,
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id) ON DELETE CASCADE,
+    node_key TEXT NOT NULL,
+    node_kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    position_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(revision_id, node_key)
+);
+CREATE TABLE IF NOT EXISTS automation_edges (
+    id TEXT PRIMARY KEY,
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    branch_key TEXT NOT NULL DEFAULT 'default',
+    edge_order INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(revision_id, source_key, target_key, branch_key)
+);
+CREATE TABLE IF NOT EXISTS automation_source_events (
+    id TEXT PRIMARY KEY,
+    source_identity TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    contact_id TEXT REFERENCES contacts(id),
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    correlation_id TEXT,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS automation_enrollments (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL REFERENCES automation_workflows(id),
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id),
+    source_event_id TEXT NOT NULL REFERENCES automation_source_events(id),
+    contact_id TEXT REFERENCES contacts(id),
+    subject_key TEXT NOT NULL,
+    trigger_key TEXT NOT NULL,
+    reentry_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'enrolled',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    correlation_id TEXT,
+    enrolled_at TEXT NOT NULL,
+    UNIQUE(workflow_id, source_event_id, trigger_key),
+    UNIQUE(workflow_id, contact_id, reentry_key)
+);
+CREATE TABLE IF NOT EXISTS automation_runs (
+    id TEXT PRIMARY KEY,
+    enrollment_id TEXT NOT NULL UNIQUE REFERENCES automation_enrollments(id) ON DELETE CASCADE,
+    workflow_id TEXT NOT NULL REFERENCES automation_workflows(id),
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id),
+    status TEXT NOT NULL,
+    current_node_key TEXT NOT NULL,
+    started_at TEXT,
+    waiting_since TEXT,
+    due_at_utc TEXT,
+    completed_at TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    failure_reason TEXT,
+    worker_id TEXT,
+    lease_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS automation_step_history (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES automation_runs(id) ON DELETE CASCADE,
+    node_key TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    side_effect_phase TEXT NOT NULL DEFAULT 'none',
+    input_json TEXT NOT NULL DEFAULT '{}',
+    output_json TEXT NOT NULL DEFAULT '{}',
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(run_id, node_key, attempt_number)
+);
+CREATE TABLE IF NOT EXISTS automation_waits (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES automation_runs(id) ON DELETE CASCADE,
+    node_key TEXT NOT NULL,
+    due_at_utc TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    local_value TEXT NOT NULL,
+    catch_up_policy TEXT NOT NULL,
+    resumed_at TEXT,
+    UNIQUE(run_id, node_key)
+);
+CREATE TABLE IF NOT EXISTS automation_action_correlations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES automation_runs(id) ON DELETE CASCADE,
+    node_key TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    action_kind TEXT NOT NULL,
+    target_key TEXT,
+    correlation_id TEXT,
+    outcome TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS automation_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id TEXT,
+    revision_id TEXT,
+    run_id TEXT,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_automation_revisions_workflow
+ON automation_revisions(workflow_id, revision_number DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_status_due
+ON automation_runs(status, due_at_utc, updated_at);
+CREATE INDEX IF NOT EXISTS idx_automation_events_subject
+ON automation_source_events(subject_key, event_kind, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_run
+ON automation_audit(run_id, occurred_at);
+"""
+
+MIGRATION_9_SQL = """
+CREATE TABLE IF NOT EXISTS automation_event_cursor (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO automation_event_cursor(id, last_event_id, updated_at)
+VALUES (1, 0, CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS automation_schedule_state (
+    workflow_id TEXT NOT NULL REFERENCES automation_workflows(id) ON DELETE CASCADE,
+    revision_id TEXT NOT NULL REFERENCES automation_revisions(id) ON DELETE CASCADE,
+    trigger_key TEXT NOT NULL,
+    next_due_at_utc TEXT NOT NULL,
+    last_occurrence_key TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workflow_id, revision_id, trigger_key)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_schedule_due
+ON automation_schedule_state(next_due_at_utc);
+CREATE TABLE IF NOT EXISTS list_processing_jobs (
+    id TEXT PRIMARY KEY,
+    source_filename TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    dns_mode TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'paused', 'completed', 'failed', 'canceled')),
+    processed_count INTEGER NOT NULL DEFAULT 0,
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    checkpoint_path TEXT NOT NULL,
+    job_dir TEXT NOT NULL,
+    correlation_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_list_processing_jobs_status
+ON list_processing_jobs(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS list_processing_artifacts (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES list_processing_jobs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    provider_key TEXT,
+    filename TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(job_id, kind, provider_key)
+);
+CREATE INDEX IF NOT EXISTS idx_list_processing_artifacts_job
+ON list_processing_artifacts(job_id, kind, filename);
+"""
+
+MIGRATION_10_SQL = """
+CREATE TABLE IF NOT EXISTS message_documents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('message', 'template')),
+    status TEXT NOT NULL CHECK(status IN ('draft', 'active', 'archived')),
+    current_draft_revision_id TEXT,
+    current_published_revision_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'local-operator',
+    updated_by TEXT NOT NULL DEFAULT 'local-operator'
+);
+CREATE INDEX IF NOT EXISTS idx_message_documents_status
+ON message_documents(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS message_revisions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES message_documents(id) ON DELETE CASCADE,
+    revision_number INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('draft', 'published')),
+    document_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    created_by TEXT NOT NULL DEFAULT 'local-operator',
+    UNIQUE(document_id, revision_number)
+);
+CREATE INDEX IF NOT EXISTS idx_message_revisions_document
+ON message_revisions(document_id, revision_number DESC);
+CREATE TABLE IF NOT EXISTS message_assets (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('image', 'attachment')),
+    filename TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    data_blob BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT,
+    UNIQUE(kind, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_message_assets_kind
+ON message_assets(kind, created_at DESC);
+CREATE TABLE IF NOT EXISTS message_recipient_attachments (
+    revision_id TEXT NOT NULL REFERENCES message_revisions(id) ON DELETE CASCADE,
+    contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    asset_id TEXT NOT NULL REFERENCES message_assets(id) ON DELETE RESTRICT,
+    required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1)),
+    PRIMARY KEY(revision_id, contact_id, asset_id)
+);
+CREATE TABLE IF NOT EXISTS message_campaign_snapshots (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    run_key TEXT NOT NULL,
+    revision_id TEXT NOT NULL REFERENCES message_revisions(id),
+    content_hash TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(campaign_id, run_key)
+);
+CREATE INDEX IF NOT EXISTS idx_message_campaign_snapshots_campaign
+ON message_campaign_snapshots(campaign_id, run_key);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -810,6 +1092,32 @@ class CampaignStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (7, utc_now()),
                 )
+                current = 7
+            if current < 8:
+                self._apply_migration_8(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (8, utc_now()),
+                )
+                current = 8
+            if current < 9:
+                self._apply_migration_9(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (9, utc_now()),
+                )
+                current = 9
+            if current < 10:
+                columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(campaigns)")
+                }
+                if "message_revision_id" not in columns:
+                    connection.execute("ALTER TABLE campaigns ADD COLUMN message_revision_id TEXT")
+                self._apply_migration_10(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (10, utc_now()),
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -854,6 +1162,29 @@ class CampaignStore:
         # the script. Execute each migration statement on the caller's
         # transaction so a failed upgrade rolls back as one unit.
         for statement in MIGRATION_7_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_8(connection: sqlite3.Connection) -> None:
+        # Keep migration 8 inside the caller transaction; executescript would
+        # implicitly commit and make a failed upgrade difficult to recover.
+        for statement in MIGRATION_8_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_9(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_9_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_10(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_10_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
@@ -1982,6 +2313,7 @@ class CampaignStore:
         audience_source_id: str | None = None,
         audience_revision_id: str | None = None,
         audience_run_key: str = "primary",
+        message_revision_id: str | None = None,
     ) -> str:
         _assert_no_secrets({"name": name, "description": description}, "campaign")
         _assert_safe_reference(sender_config_ref, "sender_config_ref")
@@ -1995,8 +2327,8 @@ class CampaignStore:
                 "INSERT INTO campaigns "
                 "(id, name, description, sender_config_ref, template_ref, audience_list_id, "
                 "audience_source_type, audience_source_id, audience_revision_id, audience_run_key, "
-                "status, authorization, configuration_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "message_revision_id, status, authorization, configuration_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
                     name,
@@ -2008,6 +2340,7 @@ class CampaignStore:
                     audience_source_id or audience_list_id,
                     audience_revision_id,
                     audience_run_key,
+                    message_revision_id,
                     CampaignStatus.DRAFT.value,
                     ExecutionAuthorization.UNAUTHORIZED.value,
                     _json(configuration),

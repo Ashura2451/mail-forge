@@ -74,7 +74,16 @@ def test_console_routes_have_no_axe_critical_or_serious_findings(tmp_path: Path)
             page.keyboard.press("Tab")
             assert page.locator(":focus-visible").count() == 1
             page.get_by_role("button", name="Dashboard", exact=True).click()
-            for label in ("Dashboard", "Contacts", "Campaigns", "Inbound", "Providers", "Activity"):
+            for label in (
+                "Dashboard",
+                "Contacts",
+                "Message Studio",
+                "Campaigns",
+                "Automations",
+                "Inbound",
+                "Providers",
+                "Activity",
+            ):
                 if label != "Dashboard":
                     page.get_by_role("button", name=label).click()
                 result = page.evaluate(

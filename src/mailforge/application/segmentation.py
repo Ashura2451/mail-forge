@@ -772,6 +772,24 @@ class SegmentationService:
             "explanation": compiled.definition["root"],
         }
 
+    def matches_contact(
+        self,
+        segment_id: str,
+        contact_id: str,
+        *,
+        revision_id: str | None = None,
+    ) -> bool:
+        """Evaluate one contact with the same compiled predicate as previews."""
+
+        segment = self.get_segment(segment_id, revision_id)
+        compiled = self.compile(segment["definition"], canonical_numbers=True)
+        with self.store.connect() as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM contacts c WHERE c.id = ? AND ({compiled.sql}) LIMIT 1",
+                (contact_id, *compiled.parameters),
+            ).fetchone()
+        return row is not None
+
     def set_membership(
         self,
         list_id: str,
@@ -834,6 +852,20 @@ class SegmentationService:
                         key,
                         reason,
                     ),
+                )
+                self.store.record_event(
+                    connection,
+                    "list_membership",
+                    f"{list_id}:{contact_id}",
+                    "contact_added_to_list" if action == "add" else "contact_removed_from_list",
+                    {
+                        "list_id": list_id,
+                        "contact_id": contact_id,
+                        "source": source,
+                        "actor": actor,
+                        "idempotency_key": key,
+                        "reason": reason,
+                    },
                 )
         return {"changed": changed, "idempotency_key": key}
 

@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 
+from mailforge.application.automation import AutomationService
 from mailforge.application.campaigns import (
     CampaignService,
     ScriptedTransport,
@@ -22,6 +23,7 @@ from mailforge.application.mailer_compat import (
     migrate_legacy_state,
     prepare_legacy_campaign,
 )
+from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import run_outbound_demo
 from mailforge.application.providers import ProviderService
 from mailforge.application.segmentation import SegmentationService
@@ -154,6 +156,20 @@ def build_parser() -> argparse.ArgumentParser:
     segment_membership.add_argument("--list-id", required=True)
     segment_membership.add_argument("--contact-id", required=True)
     segment_membership.add_argument("--action", choices=["add", "remove"], required=True)
+    message = subparsers.add_parser(
+        "message", help="inspect and render local Message Studio content"
+    )
+    message_commands = message.add_subparsers(dest="message_command", required=True)
+    message_list = message_commands.add_parser("list")
+    message_list.add_argument("--database", type=Path, required=True)
+    message_validate = message_commands.add_parser("validate")
+    message_validate.add_argument("--database", type=Path, required=True)
+    message_validate.add_argument("--document", type=Path, required=True)
+    message_render = message_commands.add_parser("render")
+    message_render.add_argument("--database", type=Path, required=True)
+    message_render.add_argument("--revision-id", required=True)
+    message_render.add_argument("--contact-id")
+    message_render.add_argument("--condition-mode", choices=["true", "false"])
     campaign = subparsers.add_parser("campaign", help="manage durable local campaign state")
     campaign_commands = campaign.add_subparsers(dest="campaign_command", required=True)
     demo = campaign_commands.add_parser("demo", help="run the complete synthetic campaign workflow")
@@ -408,6 +424,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_diagnostics.add_argument("--database", type=Path, required=True)
     provider_diagnostics.add_argument("--ref")
+    automation = subparsers.add_parser("automation", help="manage durable visual workflows")
+    automation_commands = automation.add_subparsers(dest="automation_command", required=True)
+    automation_list = automation_commands.add_parser("list")
+    automation_list.add_argument("--database", type=Path, required=True)
+    automation_create = automation_commands.add_parser("create")
+    automation_create.add_argument("--database", type=Path, required=True)
+    automation_create.add_argument("--name", required=True)
+    automation_create.add_argument("--description", default="")
+    automation_save = automation_commands.add_parser("save")
+    automation_save.add_argument("--database", type=Path, required=True)
+    automation_save.add_argument("workflow_id")
+    automation_save.add_argument("--graph", type=Path, required=True)
+    automation_save.add_argument("--revision-id")
+    automation_validate = automation_commands.add_parser("validate")
+    automation_validate.add_argument("--database", type=Path, required=True)
+    automation_validate.add_argument("--graph", type=Path, required=True)
+    automation_publish = automation_commands.add_parser("publish")
+    automation_publish.add_argument("--database", type=Path, required=True)
+    automation_publish.add_argument("workflow_id")
+    automation_publish.add_argument("--revision-id")
+    automation_activate = automation_commands.add_parser("activate")
+    automation_activate.add_argument("--database", type=Path, required=True)
+    automation_activate.add_argument("workflow_id")
+    automation_activate.add_argument("--revision-id")
+    automation_enroll = automation_commands.add_parser("enroll")
+    automation_enroll.add_argument("--database", type=Path, required=True)
+    automation_enroll.add_argument("workflow_id")
+    automation_enroll.add_argument("--contact-id", required=True)
+    automation_advance = automation_commands.add_parser("advance")
+    automation_advance.add_argument("--database", type=Path, required=True)
+    automation_advance.add_argument("run_id")
     serve = subparsers.add_parser("serve", help="run the local browser operator console")
     serve.add_argument("--database", type=Path, default=Path("state/mailforge.sqlite3"))
     serve.add_argument("--host", default="127.0.0.1")
@@ -618,6 +665,63 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+    elif args.command == "message":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = MessageStudioService(CampaignStore(args.database))
+        if args.message_command == "list":
+            print(json.dumps(service.list_documents(), indent=2))
+        elif args.message_command == "validate":
+            document = json.loads(args.document.read_text(encoding="utf-8"))
+            print(
+                json.dumps(
+                    {"valid": True, "document": service.validate_document(document)}, indent=2
+                )
+            )
+        else:
+            print(
+                json.dumps(
+                    service.preview(
+                        revision_id=args.revision_id,
+                        contact_id=args.contact_id,
+                        condition_mode=args.condition_mode,
+                    ),
+                    indent=2,
+                )
+            )
+    elif args.command == "automation":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = AutomationService(CampaignStore(args.database))
+        if args.automation_command == "list":
+            print(json.dumps(service.list_workflows(), indent=2))
+        elif args.automation_command == "create":
+            print(json.dumps(service.create_workflow(args.name, args.description), indent=2))
+        elif args.automation_command == "validate":
+            graph = json.loads(args.graph.read_text(encoding="utf-8"))
+            print(json.dumps(service.validate_graph(graph), indent=2))
+        elif args.automation_command == "save":
+            graph = json.loads(args.graph.read_text(encoding="utf-8"))
+            print(
+                json.dumps(
+                    service.save_revision(args.workflow_id, graph, revision_id=args.revision_id),
+                    indent=2,
+                )
+            )
+        elif args.automation_command == "publish":
+            print(json.dumps(service.publish(args.workflow_id, args.revision_id), indent=2))
+        elif args.automation_command == "activate":
+            print(
+                json.dumps(
+                    service.set_lifecycle(args.workflow_id, "activate", args.revision_id), indent=2
+                )
+            )
+        elif args.automation_command == "enroll":
+            print(
+                json.dumps(service.enroll(args.workflow_id, contact_id=args.contact_id), indent=2)
+            )
+        else:
+            print(json.dumps(service.advance(args.run_id), indent=2))
     elif args.command == "campaign":
         if args.campaign_command == "demo":
             print(json.dumps(run_synthetic_demo(args.database), indent=2))

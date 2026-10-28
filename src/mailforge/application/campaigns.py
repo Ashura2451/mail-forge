@@ -351,6 +351,7 @@ class CampaignService:
         audience_source_id: str | None = None,
         audience_revision_id: str | None = None,
         audience_run_key: str = "primary",
+        message_revision_id: str | None = None,
     ) -> str:
         if audience_source_type not in {"list", "segment"}:
             raise ValueError("audience_source_type must be list or segment")
@@ -371,6 +372,7 @@ class CampaignService:
             audience_source_id=source_id,
             audience_revision_id=audience_revision_id,
             audience_run_key=audience_run_key,
+            message_revision_id=message_revision_id,
         )
 
     def prepare(self, campaign_id: str, *, run_key: str = "primary") -> CampaignReport:

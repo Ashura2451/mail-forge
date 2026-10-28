@@ -421,7 +421,7 @@ def test_schema_v1_database_migrates_to_outbound_schema(tmp_path):
     connection.close()
 
     store = CampaignStore(database)
-    assert store.schema_version() == 7
+    assert store.schema_version() == 10
     assert store.integrity_check()
     with store.connect() as migrated:
         columns = {row["name"] for row in migrated.execute("PRAGMA table_info(delivery_intents)")}

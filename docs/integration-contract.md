@@ -26,7 +26,7 @@ Template + primitive contact context + local assets
 
 Prepared bytes are the reviewable handoff between composition and dispatch.
 The policy database stores references and limits, never SMTP credentials.
-Provider profiles are secret-free schema 7 records; runtime SMTP/IMAP adapters
+Provider profiles are secret-free records in the current schema 8 authority; runtime SMTP/IMAP adapters
 resolve credentials through an injected boundary. The SMTP adapter is now
 loopback-protocol-tested and can be reached only through the canonical,
 explicitly gated campaign path. Provider health, DKIM signing, unsubscribe
@@ -149,3 +149,23 @@ It distinguishes local implementation, synthetic simulation, partial slices,
 external integration readiness, and decisions still owed. The sorting matrix
 and MAILER inventory remain detailed compatibility evidence; the atlas does
 not replace them.
+
+## Local workflow automation
+
+The visual automation path is an orchestration layer over the same authority:
+
+```text
+Trusted local event
+→ idempotent enrollment pinned to a published revision
+→ condition / UTC wait
+→ canonical list, campaign-preparation, or operator-note action
+→ durable step, run, and audit history
+```
+
+`application.automation.AutomationService` is the only workflow authority for
+the web API, CLI, and bounded in-process worker. It never evaluates a private
+copy of recipient policy and it never opens SMTP. Published graph revisions are
+immutable; a run stores its revision id, and every side effect receives one
+durable idempotency key. Source-event and once-per-contact constraints prevent
+replay and self-trigger loops. See `docs/specs/0007-visual-workflow-automation.md`
+and `docs/visual-workflow-automation.md`.
