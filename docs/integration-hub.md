@@ -74,3 +74,12 @@ All evidence is local or synthetic unless a separately approved credentialed
 qualification says otherwise. The public-hosted, unrestricted-live-send,
 arbitrary-HTTP, arbitrary-code, and cross-origin callback boundaries remain
 closed.
+
+## Synthetic throughput note
+
+On the local Python 3.15.2 environment, an injected deterministic HTTP
+transport through the canonical bounded adapter processed 10,000 JSON records
+in 0.0113 seconds (about 881,812 records/second) and 100,000 records in 0.1615
+seconds (about 619,224 records/second). These are parser/adapter measurements,
+not network or production capacity claims; slow endpoints, pagination, and
+external provider qualification remain unmeasured.
