@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from mailforge.application.automation import AutomationService
+from mailforge.application.campaign_operations import CampaignOperationsService
 from mailforge.application.campaigns import (
     CampaignService,
     ScriptedTransport,
@@ -27,7 +28,7 @@ from mailforge.application.mailer_compat import (
     prepare_legacy_campaign,
 )
 from mailforge.application.message_studio import MessageStudioService
-from mailforge.application.outbound import run_outbound_demo
+from mailforge.application.outbound import OutboundService, run_outbound_demo
 from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
 from mailforge.application.reporting import ReportFilters, ReportingError, ReportingService
@@ -40,7 +41,12 @@ from mailforge.application.transform import (
     write_legacy_list,
 )
 from mailforge.domain.campaign import AttemptOutcome, SuppressionCategory
-from mailforge.domain.outbound import ReconciliationDecision
+from mailforge.domain.outbound import (
+    CatchUpPolicy,
+    ReconciliationDecision,
+    ScheduleMode,
+    ScheduleSpec,
+)
 from mailforge.domain.policy import CommunicationPurpose, EvidenceStatus, PreferenceState
 from mailforge.domain.provider import (
     AuthenticationMethod,
@@ -214,6 +220,61 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--database", type=Path, required=True)
     prepare.add_argument("campaign_id")
     prepare.add_argument("--run-key", default="primary")
+    workspace = campaign_commands.add_parser(
+        "workspace", help="show the campaign operations workspace"
+    )
+    workspace.add_argument("--database", type=Path, required=True)
+    workspace.add_argument("campaign_id")
+    workspace.add_argument("--preview-limit", type=int, default=10)
+    update = campaign_commands.add_parser("update", help="optimistically update a draft campaign")
+    update.add_argument("--database", type=Path, required=True)
+    update.add_argument("campaign_id")
+    update.add_argument("--expected-updated-at")
+    update.add_argument("--name", required=True)
+    update.add_argument("--list-id")
+    update.add_argument("--segment-id")
+    update.add_argument("--segment-revision-id")
+    update.add_argument("--sender-email", default="sender@example.com")
+    update.add_argument("--subject", default="Synthetic Mailforge campaign")
+    update.add_argument("--text", default="Hello {{ email }}")
+    update.add_argument("--message-revision-id")
+    update.add_argument("--provider-account-ref")
+    update.add_argument("--description", default="")
+    preflight = campaign_commands.add_parser("preflight", help="run read-only campaign preflight")
+    preflight.add_argument("--database", type=Path, required=True)
+    preflight.add_argument("campaign_id")
+    schedule = campaign_commands.add_parser(
+        "schedule", help="save a timezone-aware campaign schedule"
+    )
+    schedule.add_argument("--database", type=Path, required=True)
+    schedule.add_argument("campaign_id")
+    schedule.add_argument(
+        "--mode", choices=[item.value for item in ScheduleMode], default="immediate"
+    )
+    schedule.add_argument("--timezone", default="UTC")
+    schedule.add_argument("--scheduled-at")
+    schedule.add_argument("--window-start")
+    schedule.add_argument("--window-end")
+    schedule.add_argument("--pacing-seconds", type=float, default=0.0)
+    schedule.add_argument("--cooldown-seconds", type=float, default=0.0)
+    schedule.add_argument("--recurrence", choices=["daily", "weekly"])
+    schedule.add_argument(
+        "--catch-up-policy", choices=[item.value for item in CatchUpPolicy], default="skip"
+    )
+    schedule.add_argument("--fold", type=int, choices=[0, 1])
+    for action in ("pause", "resume", "cancel", "recipients", "attempts"):
+        action_parser = campaign_commands.add_parser(action, help=f"{action} or inspect a campaign")
+        action_parser.add_argument("--database", type=Path, required=True)
+        action_parser.add_argument("campaign_id")
+        if action in {"recipients", "attempts"}:
+            action_parser.add_argument("--limit", type=int, default=100)
+            action_parser.add_argument("--offset", type=int, default=0)
+    campaign_export = campaign_commands.add_parser(
+        "export", help="export bounded campaign evidence"
+    )
+    campaign_export.add_argument("--database", type=Path, required=True)
+    campaign_export.add_argument("campaign_id")
+    campaign_export.add_argument("--format", choices=["json", "csv"], default="json")
     preview = campaign_commands.add_parser("preview", help="show prepared eligibility")
     preview.add_argument("--database", type=Path, required=True)
     preview.add_argument("campaign_id")
@@ -945,6 +1006,24 @@ def main(argv: list[str] | None = None) -> int:
             if args.campaign_command == "backup" and not args.database.is_file():
                 raise FileNotFoundError(f"campaign database does not exist: {args.database}")
             service = CampaignService(CampaignStore(args.database))
+            outbound = OutboundService(service.store)
+            segmentation = SegmentationService(service.store)
+            data_studio = DataStudioService(service.store)
+            message_studio = MessageStudioService(
+                service.store,
+                outbound=outbound,
+                segmentation=segmentation,
+                data_studio=data_studio,
+            )
+            operations = CampaignOperationsService(
+                service.store,
+                campaigns=service,
+                outbound=outbound,
+                message_studio=message_studio,
+                segmentation=segmentation,
+                provider_operations=ProviderOperationsService(service.store),
+                reporting=ReportingService(service.store),
+            )
             if args.campaign_command == "backup":
                 destination = service.store.backup_to(args.destination)
                 print(json.dumps({"backup": str(destination)}))
@@ -991,23 +1070,101 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             elif args.campaign_command == "create":
-                campaign_id = service.create_campaign(
-                    args.name,
-                    args.list_id,
-                    template_ref=args.template,
-                    sender_config_ref=args.sender,
-                    configuration={"communication_purpose": args.purpose},
-                    audience_source_type="segment" if args.segment_id else "list",
-                    audience_source_id=args.segment_id,
-                    audience_revision_id=args.segment_revision_id,
+                campaign_id = operations.create_draft(
+                    name=args.name,
+                    list_id=args.list_id,
+                    segment_id=args.segment_id,
+                    segment_revision_id=args.segment_revision_id,
+                    purpose=args.purpose,
                 )
                 print(json.dumps({"campaign_id": campaign_id}))
-            elif args.campaign_command == "prepare":
+            elif args.campaign_command == "workspace":
                 print(
                     json.dumps(
-                        service.prepare(args.campaign_id, run_key=args.run_key).to_dict(), indent=2
+                        operations.workspace(args.campaign_id, preview_limit=args.preview_limit),
+                        indent=2,
                     )
                 )
+            elif args.campaign_command == "update":
+                operations.update_draft(
+                    args.campaign_id,
+                    expected_updated_at=args.expected_updated_at,
+                    name=args.name,
+                    description=args.description,
+                    list_id=args.list_id,
+                    segment_id=args.segment_id,
+                    segment_revision_id=args.segment_revision_id,
+                    sender_email=args.sender_email,
+                    subject=args.subject,
+                    text=args.text,
+                    message_revision_id=args.message_revision_id,
+                    provider_account_ref=args.provider_account_ref,
+                )
+                print(json.dumps({"campaign_id": args.campaign_id, "updated": True}))
+            elif args.campaign_command == "preflight":
+                print(json.dumps(operations.preflight(args.campaign_id), indent=2))
+            elif args.campaign_command == "schedule":
+                print(
+                    json.dumps(
+                        operations.set_schedule(
+                            args.campaign_id,
+                            ScheduleSpec(
+                                mode=ScheduleMode(args.mode),
+                                timezone=args.timezone,
+                                scheduled_at=args.scheduled_at,
+                                window_start=args.window_start,
+                                window_end=args.window_end,
+                                pacing_seconds=args.pacing_seconds,
+                                cooldown_seconds=args.cooldown_seconds,
+                                recurrence=args.recurrence,
+                                catch_up_policy=CatchUpPolicy(args.catch_up_policy),
+                                fold=args.fold,
+                            ),
+                        ),
+                        indent=2,
+                    )
+                )
+            elif args.campaign_command in {"pause", "resume", "cancel"}:
+                print(
+                    json.dumps(
+                        operations.control(args.campaign_id, args.campaign_command), indent=2
+                    )
+                )
+            elif args.campaign_command == "recipients":
+                print(
+                    json.dumps(
+                        {
+                            "items": operations.recipients(
+                                args.campaign_id, limit=args.limit, offset=args.offset
+                            )
+                        },
+                        indent=2,
+                    )
+                )
+            elif args.campaign_command == "attempts":
+                print(
+                    json.dumps(
+                        {
+                            "items": operations.attempts(
+                                args.campaign_id, limit=args.limit, offset=args.offset
+                            )
+                        },
+                        indent=2,
+                    )
+                )
+            elif args.campaign_command == "export":
+                body, _media_type, _filename = operations.export(args.campaign_id, fmt=args.format)
+                print(body)
+            elif args.campaign_command == "prepare":
+                if args.run_key == "primary":
+                    print(json.dumps(operations.prepare(args.campaign_id), indent=2))
+                else:
+                    print(
+                        json.dumps(
+                            service.prepare(args.campaign_id, run_key=args.run_key).to_dict(),
+                            indent=2,
+                        )
+                    )
             elif args.campaign_command == "audience":
                 segmentation = SegmentationService(service.store)
                 print(

@@ -1,5 +1,24 @@
 # System changelog
 
+## 2026-10-28 — Campaign operations workspace
+
+- Added `CampaignOperationsService` as the shared browser/API/CLI orchestration
+  boundary for campaign drafts, audience and message preparation, sender
+  account preflight, schedules, synthetic controls, drilldowns, and bounded
+  exports.
+- Added optimistic draft editing, explicit schedule audit events, IANA/DST
+  validation, provider readiness findings, durable audience preparation, and
+  formula-safe recipient CSV export without creating a second campaign engine.
+- Added the responsive Campaign Operations browser workspace and CLI parity
+  commands. The execution boundary remains local synthetic simulation only;
+  no live provider or unrestricted delivery path was added.
+- Follow-up review fixes add due-schedule supervision, purpose propagation,
+  ordinary-list redaction, source-safe draft updates, bounded drilldown SQL,
+  message preview evidence, and export metadata/outcome correctness.
+- Final local validation pass: 225 Python tests, 5 browser/accessibility tests,
+  TypeScript/Vite build, and Oxlint (with the existing five React effect
+  warnings). The build used the available Node 24 executable.
+
 ## 2026-10-28 — Operational intelligence and reporting
 
 - Added schema-free `ReportingService` metric definitions and bounded,

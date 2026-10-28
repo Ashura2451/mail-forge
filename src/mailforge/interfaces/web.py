@@ -23,6 +23,10 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from mailforge.application.automation import AutomationError, AutomationService
+from mailforge.application.campaign_operations import (
+    CampaignOperationsError,
+    CampaignOperationsService,
+)
 from mailforge.application.campaigns import CampaignService
 from mailforge.application.data_studio import DataStudioError, DataStudioService, detect_schema
 from mailforge.application.inbound import InboundService
@@ -38,7 +42,13 @@ from mailforge.application.reporting import ReportFilters, ReportingError, Repor
 from mailforge.application.segmentation import SegmentationError, SegmentationService
 from mailforge.domain.campaign import CampaignStatus, ContactCandidate
 from mailforge.domain.email import extract_addresses, normalize_email, validate_email
-from mailforge.domain.outbound import SenderPolicy, TemplateDefinition
+from mailforge.domain.outbound import (
+    CatchUpPolicy,
+    ScheduleMode,
+    ScheduleSpec,
+    SenderPolicy,
+    TemplateDefinition,
+)
 from mailforge.domain.provider import (
     AuthenticationMethod,
     ExternalOperationGrant,
@@ -98,6 +108,8 @@ class DataStudioCampaignPrepareInput(BaseModel):
 
 class CampaignInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=500)
+    purpose: str = Field(default="transactional", min_length=1, max_length=80)
     list_id: str | None = None
     segment_id: str | None = None
     segment_revision_id: str | None = None
@@ -106,6 +118,24 @@ class CampaignInput(BaseModel):
     text: str = Field(default="Hello {{ email }}", max_length=100_000)
     message_revision_id: str | None = None
     provider_account_ref: str | None = None
+
+
+class CampaignUpdateInput(CampaignInput):
+    expected_updated_at: str | None = None
+
+
+class CampaignScheduleInput(BaseModel):
+    mode: ScheduleMode = ScheduleMode.IMMEDIATE
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+    scheduled_at: str | None = Field(default=None, max_length=80)
+    window_start: str | None = Field(default=None, max_length=20)
+    window_end: str | None = Field(default=None, max_length=20)
+    weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6], max_length=7)
+    pacing_seconds: float = Field(default=0.0, ge=0, le=86_400)
+    cooldown_seconds: float = Field(default=0.0, ge=0, le=86_400)
+    recurrence: str | None = Field(default=None, max_length=20)
+    catch_up_policy: CatchUpPolicy = CatchUpPolicy.SKIP
+    fold: int | None = Field(default=None, ge=0, le=1)
 
 
 class MessageDocumentInput(BaseModel):
@@ -405,6 +435,53 @@ class WorkerSupervisor:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
 
+class CampaignScheduleSupervisor:
+    """Starts only authorized, due synthetic schedules from durable rows."""
+
+    def __init__(self, store: CampaignStore, outbound: OutboundService, workers: WorkerSupervisor):
+        self.store = store
+        self.outbound = outbound
+        self.workers = workers
+        self.stop = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, name="mailforge-campaign-scheduler", daemon=True
+        )
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop.is_set():
+            try:
+                with self.store.connect() as connection:
+                    rows = connection.execute(
+                        "SELECT c.id, s.* FROM campaigns c JOIN campaign_schedules s "
+                        "ON s.campaign_id=c.id WHERE c.status='scheduled' "
+                        "AND c.authorization='simulation_authorized'"
+                    ).fetchall()
+                for row in rows:
+                    schedule = ScheduleSpec(
+                        mode=ScheduleMode(row["mode"]),
+                        timezone=row["timezone"],
+                        scheduled_at=row["scheduled_at"],
+                        window_start=row["window_start"],
+                        window_end=row["window_end"],
+                        weekdays=tuple(json.loads(row["weekdays_json"] or "[]")),
+                        pacing_seconds=float(row["pacing_seconds"]),
+                        cooldown_seconds=float(row["cooldown_seconds"]),
+                        recurrence=row["recurrence"],
+                        catch_up_policy=CatchUpPolicy(row["catch_up_policy"]),
+                        fold=row["fold"],
+                    )
+                    if self.outbound.schedules.due(schedule, self.outbound.now_fn()):
+                        self.workers.start(row["id"])
+            except Exception:
+                pass
+            self.stop.wait(0.1)
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=2)
+
+
 class AutomationWorkerSupervisor:
     """Bounded synthetic workflow worker; waits and history remain durable."""
 
@@ -500,6 +577,20 @@ class WebRuntime:
         self.provider_operations = ProviderOperationsService(self.store)
         self.reporting = ReportingService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
+        self.campaign_scheduler = CampaignScheduleSupervisor(
+            self.store, self.outbound, self.workers
+        )
+        self.campaign_operations = CampaignOperationsService(
+            self.store,
+            campaigns=self.campaigns,
+            outbound=self.outbound,
+            message_studio=self.message_studio,
+            segmentation=self.segmentation,
+            provider_operations=self.provider_operations,
+            reporting=self.reporting,
+            worker_active=self.workers.active,
+            worker_start=self.workers.start,
+        )
         self.automation = AutomationService(
             self.store,
             campaigns=self.campaigns,
@@ -541,6 +632,7 @@ class WebRuntime:
         self.automation_runtime.shutdown()
         self.list_processing.close()
         self.data_studio.close()
+        self.campaign_scheduler.shutdown()
         self.workers.shutdown()
         self.automation_workers.shutdown()
 
@@ -607,6 +699,7 @@ def _require_list(store: CampaignStore, list_id: str) -> None:
 
 def _campaign_view(runtime: WebRuntime, row: sqlite3.Row) -> dict[str, Any]:
     campaign = _row(row)
+    campaign.pop("configuration", None)
     report = runtime.campaigns.report(row["id"])
     campaign["report"] = report.to_dict()
     campaign["worker_active"] = runtime.workers.active(row["id"])
@@ -1859,56 +1952,26 @@ def create_app(
 
     @app.post(f"{API_PREFIX}/campaigns")
     async def create_campaign(payload: CampaignInput):
-        if not validate_email(payload.sender_email).valid:
-            return _error(400, "sender_invalid", "sender email is invalid")
-        if bool(payload.list_id) == bool(payload.segment_id):
-            return _error(400, "audience_required", "choose exactly one list or segment audience")
         try:
-            if payload.list_id:
-                _require_list(runtime.store, payload.list_id)
-                source_type = "list"
-                source_id = payload.list_id
-            else:
-                segment = runtime.segmentation.get_segment(
-                    payload.segment_id or "", payload.segment_revision_id
-                )
-                source_type = "segment"
-                source_id = segment["id"]
-                payload.segment_revision_id = segment["revision"]["id"]
-            if payload.message_revision_id:
-                with runtime.store.connect() as connection:
-                    revision = connection.execute(
-                        "SELECT status FROM message_revisions WHERE id = ?",
-                        (payload.message_revision_id,),
-                    ).fetchone()
-                if revision is None or revision["status"] != "published":
-                    return _error(
-                        400,
-                        "revision_not_published",
-                        "campaigns require a published message revision",
-                    )
-            campaign_id = runtime.campaigns.create_campaign(
-                payload.name.strip(),
-                payload.list_id,
-                template_ref=f"web-{secrets.token_hex(6)}",
-                sender_config_ref=f"web-{secrets.token_hex(6)}",
-                configuration={
-                    "communication_purpose": "transactional",
-                    "sender_email": payload.sender_email,
-                    "subject": payload.subject,
-                    "text": payload.text,
-                },
-                audience_source_type=source_type,
-                audience_source_id=source_id,
-                audience_revision_id=payload.segment_revision_id,
-                message_revision_id=payload.message_revision_id,
-                provider_account_ref=payload.provider_account_ref,
-            )
-        except KeyError:
-            return _error(404, "list_not_found", "audience list was not found")
-        except SegmentationError as error:
+            campaign_id = runtime.campaign_operations.create_draft(**payload.model_dump())
+        except CampaignOperationsError as error:
             return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
         return {"id": campaign_id}
+
+    @app.patch(f"{API_PREFIX}/campaigns/{{campaign_id}}")
+    async def update_campaign(campaign_id: str, payload: CampaignUpdateInput):
+        try:
+            values = payload.model_dump(exclude={"expected_updated_at"})
+            runtime.campaign_operations.update_draft(
+                campaign_id, expected_updated_at=payload.expected_updated_at, **values
+            )
+            return _campaign_view(runtime, runtime.store.get_campaign(campaign_id))
+        except CampaignOperationsError as error:
+            return _error(400, error.code, str(error))
+        except (KeyError, ValueError) as error:
+            return _error(
+                409 if "changed" in str(error) else 400, "campaign_update_failed", str(error)
+            )
 
     @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}")
     async def campaign_detail(campaign_id: str):
@@ -1917,9 +1980,54 @@ def create_app(
         except KeyError:
             return _error(404, "campaign_not_found", "campaign was not found")
 
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/workspace")
+    async def campaign_workspace(campaign_id: str, preview_limit: int = 10):
+        try:
+            return runtime.campaign_operations.workspace(campaign_id, preview_limit=preview_limit)
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/preflight")
+    async def campaign_preflight(campaign_id: str):
+        try:
+            return runtime.campaign_operations.preflight(campaign_id)
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.put(f"{API_PREFIX}/campaigns/{{campaign_id}}/schedule")
+    async def campaign_schedule(campaign_id: str, payload: CampaignScheduleInput):
+        try:
+            schedule = ScheduleSpec(
+                mode=payload.mode,
+                timezone=payload.timezone,
+                scheduled_at=payload.scheduled_at,
+                window_start=payload.window_start,
+                window_end=payload.window_end,
+                weekdays=tuple(payload.weekdays),
+                pacing_seconds=payload.pacing_seconds,
+                cooldown_seconds=payload.cooldown_seconds,
+                recurrence=payload.recurrence,
+                catch_up_policy=payload.catch_up_policy,
+                fold=payload.fold,
+            )
+            return runtime.campaign_operations.set_schedule(campaign_id, schedule)
+        except CampaignOperationsError as error:
+            return _error(400, error.code, str(error))
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepare")
     async def prepare_campaign(campaign_id: str, payload: PrepareInput | None = None):
         try:
+            if payload is None or (
+                payload.sender_email is None
+                and payload.subject is None
+                and payload.text is None
+                and payload.run_key == "primary"
+            ):
+                return runtime.campaign_operations.prepare(
+                    campaign_id, run_key=payload.run_key if payload else "primary"
+                )
             campaign = runtime.store.get_campaign(campaign_id)
             configuration = json.loads(campaign["configuration_json"])
             sender_email = (payload.sender_email if payload else None) or configuration.get(
@@ -1963,7 +2071,7 @@ def create_app(
                 campaign_id, template=template, sender=sender
             )
             return asdict(report)
-        except (KeyError, ValueError) as error:
+        except (KeyError, ValueError, CampaignOperationsError) as error:
             return _error(400, "campaign_not_ready", str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepare-data-studio")
@@ -2001,9 +2109,8 @@ def create_app(
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/authorize")
     async def authorize_campaign(campaign_id: str):
         try:
-            runtime.outbound.authorize_simulation(campaign_id)
-            return {"campaign_id": campaign_id, "authorized": True, "mode": "simulation"}
-        except (KeyError, ValueError, PermissionError) as error:
+            return runtime.campaign_operations.authorize(campaign_id)
+        except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
             return _error(400, "authorization_failed", str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/simulate")
@@ -2030,17 +2137,15 @@ def create_app(
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/pause")
     async def pause_campaign(campaign_id: str):
         try:
-            runtime.campaigns.pause(campaign_id)
-            return {"campaign_id": campaign_id, "requested": "pause"}
-        except (KeyError, ValueError) as error:
+            return runtime.campaign_operations.control(campaign_id, "pause")
+        except (KeyError, ValueError, CampaignOperationsError) as error:
             return _error(400, "pause_failed", str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/cancel")
     async def cancel_campaign(campaign_id: str):
         try:
-            runtime.campaigns.cancel(campaign_id)
-            return {"campaign_id": campaign_id, "canceled": True}
-        except (KeyError, ValueError) as error:
+            return runtime.campaign_operations.control(campaign_id, "cancel")
+        except (KeyError, ValueError, CampaignOperationsError) as error:
             return _error(400, "cancel_failed", str(error))
 
     @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/progress")
@@ -2100,6 +2205,50 @@ def create_app(
                 "items": runtime.segmentation.audience_recipients(campaign_id, run_key),
             }
         except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/recipients")
+    async def campaign_recipients(campaign_id: str, limit: int = 100, offset: int = 0):
+        try:
+            safe_limit = max(1, min(limit, 500))
+            safe_offset = max(0, offset)
+            return {
+                "items": runtime.campaign_operations.recipients(
+                    campaign_id, limit=safe_limit, offset=safe_offset
+                ),
+                "limit": safe_limit,
+                "offset": safe_offset,
+            }
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/attempts")
+    async def campaign_attempts(campaign_id: str, limit: int = 100, offset: int = 0):
+        try:
+            safe_limit = max(1, min(limit, 500))
+            safe_offset = max(0, offset)
+            return {
+                "items": runtime.campaign_operations.attempts(
+                    campaign_id, limit=safe_limit, offset=safe_offset
+                ),
+                "limit": safe_limit,
+                "offset": safe_offset,
+            }
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/export")
+    async def campaign_export(campaign_id: str, format: str = "json"):
+        try:
+            body, media_type, filename = runtime.campaign_operations.export(campaign_id, fmt=format)
+            return Response(
+                body,
+                media_type=media_type,
+                headers={"content-disposition": f'attachment; filename="{filename}"'},
+            )
+        except CampaignOperationsError as error:
+            return _error(400, error.code, str(error))
+        except KeyError, ReportingError:
             return _error(404, "campaign_not_found", "campaign was not found")
 
     @app.get(f"{API_PREFIX}/automations")
@@ -2237,19 +2386,8 @@ def create_app(
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/resume")
     async def resume_campaign(campaign_id: str):
         try:
-            campaign = runtime.store.get_campaign(campaign_id)
-            if campaign["authorization"] != "simulation_authorized":
-                return _error(
-                    400, "simulation_not_authorized", "authorize the campaign before resuming"
-                )
-            if campaign["status"] in {"completed", "canceled"}:
-                return {"campaign_id": campaign_id, "started": False, "mode": "synthetic"}
-            return {
-                "campaign_id": campaign_id,
-                "started": runtime.workers.start(campaign_id),
-                "mode": "synthetic",
-            }
-        except (KeyError, ValueError, PermissionError) as error:
+            return runtime.campaign_operations.control(campaign_id, "resume")
+        except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
             return _error(400, "resume_failed", str(error))
 
     @app.get(f"{API_PREFIX}/inbound")
