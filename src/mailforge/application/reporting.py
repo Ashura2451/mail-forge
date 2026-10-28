@@ -684,6 +684,42 @@ class ReportingService:
             {"jobs": [dict(row) for row in rows], "artifacts": [dict(row) for row in artifacts]},
         )
 
+    def email_standards(self, *, limit: int = 100) -> dict[str, Any]:
+        """Report durable standards observations without creating a second store."""
+
+        limit = max(1, min(int(limit), 500))
+        with self.store.connect() as connection:
+            runs = connection.execute(
+                "SELECT id,kind,subject_ref,status,ruleset_version,findings_json,evidence_json,observed_at "
+                "FROM email_standards_diagnostic_runs ORDER BY observed_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            reports = connection.execute(
+                "SELECT report_id,source_org,report_domain,period_begin,period_end,source_sha256,imported_at "
+                "FROM email_dmarc_aggregate_reports ORDER BY imported_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            identities = connection.execute(
+                "SELECT identity_ref,visible_from,reply_to,envelope_from,sending_domain,dkim_domain,"
+                "dkim_selector,provider_account_ref,provider_signing_status,updated_at "
+                "FROM email_sender_identities ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return {
+            "report_definition_version": REPORT_DEFINITION_VERSION,
+            "evidence_class": "durable_local_observation",
+            "identities": [dict(row) for row in identities],
+            "diagnostic_runs": [
+                {
+                    **dict(row),
+                    "findings": json.loads(row["findings_json"]),
+                    "evidence": json.loads(row["evidence_json"]),
+                }
+                for row in runs
+            ],
+            "dmarc_reports": [dict(row) for row in reports],
+        }
+
     def export(
         self, report_type: str, filters: ReportFilters | None = None, *, format: str = "json"
     ) -> tuple[bytes, str, str]:

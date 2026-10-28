@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1347,6 +1347,76 @@ SET source_path = (SELECT source_path FROM programmable_functions WHERE id = pro
 WHERE source_path IS NULL;
 """
 
+MIGRATION_21_SQL = """
+CREATE TABLE IF NOT EXISTS email_sender_identities (
+    id TEXT PRIMARY KEY,
+    identity_ref TEXT NOT NULL UNIQUE,
+    visible_from TEXT NOT NULL,
+    reply_to TEXT,
+    envelope_from TEXT,
+    sending_domain TEXT NOT NULL,
+    dkim_domain TEXT,
+    dkim_selector TEXT,
+    provider_account_ref TEXT,
+    provider_signing_status TEXT NOT NULL DEFAULT 'unknown',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_sender_identities_domain
+ON email_sender_identities(sending_domain, updated_at DESC);
+CREATE TABLE IF NOT EXISTS email_standards_diagnostic_runs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    subject_ref TEXT,
+    status TEXT NOT NULL,
+    ruleset_version TEXT NOT NULL,
+    findings_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_standards_runs_kind
+ON email_standards_diagnostic_runs(kind, observed_at DESC);
+CREATE TABLE IF NOT EXISTS email_unsubscribe_endpoints (
+    id TEXT PRIMARY KEY,
+    endpoint_ref TEXT NOT NULL UNIQUE,
+    base_url TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'list',
+    verification_status TEXT NOT NULL DEFAULT 'not_configured',
+    configured_at TEXT NOT NULL,
+    verified_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS email_unsubscribe_tokens (
+    id TEXT PRIMARY KEY,
+    endpoint_ref TEXT NOT NULL REFERENCES email_unsubscribe_endpoints(endpoint_ref),
+    token_hash TEXT NOT NULL UNIQUE,
+    list_id TEXT NOT NULL REFERENCES lists(id),
+    normalized_email TEXT NOT NULL,
+    contact_id TEXT REFERENCES contacts(id),
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_unsubscribe_tokens_lookup
+ON email_unsubscribe_tokens(endpoint_ref, token_hash, expires_at);
+CREATE TABLE IF NOT EXISTS email_dmarc_aggregate_reports (
+    id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL UNIQUE,
+    source_org TEXT NOT NULL,
+    report_domain TEXT NOT NULL,
+    period_begin TEXT,
+    period_end TEXT,
+    policy_json TEXT NOT NULL DEFAULT '{}',
+    records_json TEXT NOT NULL DEFAULT '[]',
+    source_sha256 TEXT NOT NULL,
+    imported_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_dmarc_reports_domain
+ON email_dmarc_aggregate_reports(report_domain, period_end DESC);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1655,6 +1725,13 @@ class CampaignStore:
                     (20, utc_now()),
                 )
                 current = 20
+            if current < 21:
+                self._apply_migration_21(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (21, utc_now()),
+                )
+                current = 21
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1792,6 +1869,13 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_20(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_20_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_21(connection: sqlite3.Connection) -> None:
+        for statement in MIGRATION_21_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
@@ -2684,6 +2768,7 @@ class CampaignStore:
         actor: str = "local-operator",
         source: str = "operator",
         policy_version: str = "1",
+        connection: sqlite3.Connection | None = None,
     ) -> str:
         _assert_no_secrets({"reason": reason, "actor": actor, "source": source}, "suppression")
         _assert_safe_reference(scope_id, "suppression.scope_id")
@@ -2691,9 +2776,23 @@ class CampaignStore:
             normalized_email = _validated_email(normalized_email)
         if not normalized_email and not contact_id:
             raise ValueError("suppression requires normalized_email or contact_id")
-        with self.transaction(immediate=True) as connection:
+        if connection is not None:
             return self._record_suppression(
                 connection,
+                category=category,
+                reason=reason,
+                normalized_email=normalized_email,
+                contact_id=contact_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                expires_at=expires_at,
+                actor=actor,
+                source=source,
+                policy_version=policy_version,
+            )
+        with self.transaction(immediate=True) as transaction:
+            return self._record_suppression(
+                transaction,
                 category=category,
                 reason=reason,
                 normalized_email=normalized_email,

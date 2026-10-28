@@ -50,7 +50,15 @@ def _safe_config(campaign: Any) -> dict[str, Any]:
     configuration = json.loads(campaign["configuration_json"] or "{}")
     return {
         key: configuration[key]
-        for key in ("communication_purpose", "sender_email", "subject", "text")
+        for key in (
+            "communication_purpose",
+            "sender_email",
+            "subject",
+            "text",
+            "unsubscribe_endpoint_ref",
+            "one_click_unsubscribe",
+            "dkim_signed",
+        )
         if key in configuration
     }
 
@@ -91,6 +99,7 @@ class CampaignOperationsService:
         segmentation,
         provider_operations,
         reporting: ReportingService,
+        email_standards=None,
         worker_active: Callable[[str], bool] | None = None,
         worker_start: Callable[[str], bool] | None = None,
     ):
@@ -101,6 +110,7 @@ class CampaignOperationsService:
         self.segmentation = segmentation
         self.provider_operations = provider_operations
         self.reporting = reporting
+        self.email_standards = email_standards
         self.worker_active = worker_active or (lambda _campaign_id: False)
         self.worker_start = worker_start or (lambda _campaign_id: False)
         self.schedules = ScheduleEngine()
@@ -149,6 +159,9 @@ class CampaignOperationsService:
         subject: str = "Synthetic Mailforge campaign",
         text: str = "Hello {{ email }}",
         purpose: str = "transactional",
+        unsubscribe_endpoint_ref: str | None = None,
+        one_click_unsubscribe: bool = False,
+        dkim_signed: bool = False,
         message_revision_id: str | None = None,
         provider_account_ref: str | None = None,
     ) -> str:
@@ -176,6 +189,9 @@ class CampaignOperationsService:
                 "sender_email": sender_email,
                 "subject": subject,
                 "text": text,
+                "unsubscribe_endpoint_ref": unsubscribe_endpoint_ref,
+                "one_click_unsubscribe": one_click_unsubscribe,
+                "dkim_signed": dkim_signed,
             },
             audience_source_type=source_type,
             audience_source_id=source_id,
@@ -219,6 +235,13 @@ class CampaignOperationsService:
             ),
             "subject": values.get("subject", old.get("subject", "Synthetic Mailforge campaign")),
             "text": values.get("text", old.get("text", "Hello {{ email }}")),
+            "unsubscribe_endpoint_ref": values.get(
+                "unsubscribe_endpoint_ref", old.get("unsubscribe_endpoint_ref")
+            ),
+            "one_click_unsubscribe": values.get(
+                "one_click_unsubscribe", old.get("one_click_unsubscribe", False)
+            ),
+            "dkim_signed": values.get("dkim_signed", old.get("dkim_signed", False)),
         }
         self.store.update_campaign_draft(
             campaign_id,
@@ -252,6 +275,37 @@ class CampaignOperationsService:
             max_concurrency=int(account["max_concurrency"]) if account else 1,
             enabled=bool(account.get("outbound_enabled", True)) if account else True,
         )
+
+    def preparation_options(self, campaign: Any) -> dict[str, Any]:
+        """Return standards-aware MIME options for every preparation entrypoint."""
+
+        config = _safe_config(campaign)
+        unsubscribe_url_callback = None
+        endpoint_ref = config.get("unsubscribe_endpoint_ref")
+        list_id = campaign["audience_list_id"]
+        if self.email_standards is not None and endpoint_ref and list_id:
+
+            def unsubscribe_url_callback(contact):
+                keys = contact.keys() if hasattr(contact, "keys") else contact
+                email = (
+                    contact["normalized_email"]
+                    if "normalized_email" in keys
+                    else contact["email"]
+                    if "email" in keys
+                    else None
+                )
+                return self.email_standards.create_unsubscribe_url(
+                    str(endpoint_ref), str(list_id), str(email)
+                )
+
+        return {
+            "unsubscribe_url_callback": unsubscribe_url_callback,
+            # The local build has no DKIM signer for final prepared bytes.
+            # Keep campaign preparation to List-Unsubscribe until a real
+            # signing boundary is supplied.
+            "one_click_unsubscribe": False,
+            "dkim_signed": False,
+        }
 
     def preflight(self, campaign_id: str) -> dict[str, Any]:
         campaign = self.store.get_campaign(campaign_id)
@@ -314,6 +368,37 @@ class CampaignOperationsService:
                         "A subject and message body are required.",
                         "campaign configuration",
                         "complete the message",
+                    )
+                )
+        if self.email_standards is not None:
+            standards = self.email_standards.preflight_campaign(campaign)
+            for finding in standards["findings"]:
+                severity = {
+                    "blocked": "blocker",
+                    "warning": "warning",
+                    "pass": "pass",
+                    "unknown": "not_verified",
+                }.get(finding["severity"], "not_verified")
+                findings.append(
+                    PreflightFinding(
+                        "standards",
+                        severity,
+                        finding["code"],
+                        finding["message"],
+                        finding["source"],
+                        finding.get("action") or None,
+                    )
+                )
+            if _safe_config(campaign).get("one_click_unsubscribe"):
+                findings.append(
+                    PreflightFinding(
+                        "standards",
+                        "blocker",
+                        "dkim_signing_unavailable",
+                        "Campaign preparation cannot emit RFC 8058 one-click headers "
+                        "without a real DKIM signing boundary.",
+                        "MessageComposer / provider signing",
+                        "use List-Unsubscribe only or provide a verified signing integration",
                     )
                 )
         account = None
@@ -448,6 +533,8 @@ class CampaignOperationsService:
             eligibility_service=self.eligibility,
         )
         sender = self._sender(campaign)
+        config = _safe_config(campaign)
+        preparation_options = self.preparation_options(campaign)
         if campaign["message_revision_id"]:
             if run_key != "primary":
                 raise CampaignOperationsError(
@@ -458,9 +545,9 @@ class CampaignOperationsService:
                 sender=sender,
                 revision_id=campaign["message_revision_id"],
                 run_key=run_key,
+                **preparation_options,
             )
             return asdict(report)
-        config = _safe_config(campaign)
         report = self.outbound.prepare_campaign(
             campaign_id,
             template=TemplateDefinition(
@@ -473,6 +560,7 @@ class CampaignOperationsService:
             schedule=self._schedule_from_row(self.store.get_schedule(campaign_id))
             if self.store.get_schedule(campaign_id)
             else None,
+            **preparation_options,
         )
         return asdict(report)
 

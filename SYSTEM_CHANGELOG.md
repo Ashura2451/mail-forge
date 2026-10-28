@@ -1,5 +1,21 @@
 # System changelog
 
+## 2026-10-28 — Email Standards and sender diagnostics
+
+- Added schema 21 sender identities, durable diagnostic runs, unsubscribe
+  endpoints/tokens, and deduplicated DMARC aggregate report metadata/rows.
+- Added the canonical `EmailStandardsService` for bounded SPF/DKIM/DMARC/DNS,
+  sender alignment, MIME/content validation, evidence classification, and
+  dated Google/Yahoo guidance without provider-acceptance claims.
+- Added cookie-free, POST-only RFC 8058 local processing with hashed,
+  recipient/list-scoped opaque tokens and idempotent suppression through the
+  existing policy authority. Marketing campaign preparation now derives these
+  URLs and emits `List-Unsubscribe`; one-click headers remain blocked at the
+  campaign boundary until a real DKIM signing integration exists.
+- Added shared browser/API/CLI diagnostics, campaign preflight findings,
+  reporting, bounded DMARC import, and synthetic fixture acceptance. No real
+  provider, mailbox, credential, recipient, DNS, or live send was used.
+
 ## 2026-10-28 — Read-only data connections and immutable snapshots
 
 - Added schema 18 durable connection profiles, append-only connection events,

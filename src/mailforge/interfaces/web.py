@@ -33,6 +33,11 @@ from mailforge.application.campaign_operations import (
 from mailforge.application.campaigns import CampaignService
 from mailforge.application.data_connections import DataConnectionError, DataConnectionsService
 from mailforge.application.data_studio import DataStudioError, DataStudioService, detect_schema
+from mailforge.application.email_standards import (
+    MAX_REPORT_BYTES,
+    EmailStandardsError,
+    EmailStandardsService,
+)
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_operations import InboundOperations, InboundOperationsError
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
@@ -140,6 +145,53 @@ class ProgrammableRevisionInput(BaseModel):
     definition: dict[str, Any]
 
 
+class SenderIdentityInput(BaseModel):
+    identity_ref: str = Field(min_length=1, max_length=120)
+    visible_from: str = Field(min_length=3, max_length=320)
+    reply_to: str | None = Field(default=None, max_length=320)
+    envelope_from: str | None = Field(default=None, max_length=320)
+    dkim_domain: str | None = Field(default=None, max_length=253)
+    dkim_selector: str | None = Field(default=None, max_length=120)
+    provider_account_ref: str | None = Field(default=None, max_length=120)
+    provider_signing_status: str = Field(default="unknown", max_length=64)
+
+
+class DomainDiagnosticInput(BaseModel):
+    domain: str = Field(min_length=1, max_length=253)
+    sender_ip: str | None = Field(default=None, max_length=64)
+    envelope_from: str | None = Field(default=None, max_length=320)
+    dkim_selector: str | None = Field(default=None, max_length=120)
+    allow_network: bool = False
+
+
+class MessageDiagnosticInput(BaseModel):
+    message: str = Field(min_length=1, max_length=25 * 1024 * 1024)
+    communication_purpose: str = Field(default="transactional", max_length=80)
+    expected_identity: str | None = Field(default=None, max_length=120)
+
+
+class UnsubscribeEndpointInput(BaseModel):
+    endpoint_ref: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=8, max_length=500)
+    verification_status: str = Field(default="not_configured", max_length=64)
+
+
+class UnsubscribeTokenInput(BaseModel):
+    list_id: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=320)
+    ttl_days: int = Field(default=30, ge=1, le=365)
+
+
+class UnsubscribeRequestInput(BaseModel):
+    body: str = Field(max_length=100)
+
+
+class UnsubscribeReadinessInput(BaseModel):
+    communication_purpose: str = Field(default="marketing", max_length=80)
+    endpoint_ref: str | None = Field(default=None, max_length=120)
+    message: str | None = Field(default=None, max_length=25 * 1024 * 1024)
+
+
 class DataStudioContactImportInput(BaseModel):
     list_id: str
     mappings: dict[str, str]
@@ -174,6 +226,9 @@ class CampaignInput(BaseModel):
     sender_email: str = "sender@example.com"
     subject: str = Field(default="Synthetic Mailforge campaign", max_length=200)
     text: str = Field(default="Hello {{ email }}", max_length=100_000)
+    unsubscribe_endpoint_ref: str | None = Field(default=None, max_length=120)
+    one_click_unsubscribe: bool = False
+    dkim_signed: bool = False
     message_revision_id: str | None = None
     provider_account_ref: str | None = None
 
@@ -423,10 +478,15 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
         host = (urlsplit(f"//{raw_host}").hostname or "").lower()
         if host not in self.session.allowed_hosts:
             return _error(400, "invalid_host", "Mailforge only accepts loopback Host headers")
-        if request.url.path.startswith(API_PREFIX) and request.url.path != f"{API_PREFIX}/session":
+        one_click_path = request.url.path.startswith(f"{API_PREFIX}/unsubscribe/")
+        if (
+            request.url.path.startswith(API_PREFIX)
+            and request.url.path != f"{API_PREFIX}/session"
+            and not one_click_path
+        ):
             if request.cookies.get(SESSION_COOKIE) != self.session.session_id:
                 return _error(401, "session_required", "a local operator session is required")
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not one_click_path:
             origin = request.headers.get("origin")
             if origin:
                 parsed = urlsplit(origin)
@@ -678,6 +738,7 @@ class WebRuntime:
         self.providers = ProviderService(self.store)
         self.provider_operations = ProviderOperationsService(self.store)
         self.reporting = ReportingService(self.store)
+        self.email_standards = EmailStandardsService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
         self.campaign_scheduler = CampaignScheduleSupervisor(
             self.store, self.outbound, self.workers
@@ -690,6 +751,7 @@ class WebRuntime:
             segmentation=self.segmentation,
             provider_operations=self.provider_operations,
             reporting=self.reporting,
+            email_standards=self.email_standards,
             worker_active=self.workers.active,
             worker_start=self.workers.start,
         )
@@ -1261,6 +1323,10 @@ def create_app(
     @app.get(f"{API_PREFIX}/reports/definitions")
     async def report_definitions():
         return runtime.reporting.definitions()
+
+    @app.get(f"{API_PREFIX}/reports/email-standards")
+    async def report_email_standards(limit: int = 100):
+        return runtime.reporting.email_standards(limit=limit)
 
     @app.get(f"{API_PREFIX}/reports/summary")
     async def report_summary(
@@ -2375,6 +2441,113 @@ def create_app(
             code = getattr(error, "code", "function_invalid")
             return _error(404 if code == "function_not_found" else 400, code, str(error))
 
+    @app.get(f"{API_PREFIX}/email-standards")
+    async def email_standards():
+        return {
+            "identities": runtime.email_standards.list_sender_identities(),
+            "guidance": runtime.email_standards.provider_guidance(),
+            "history": runtime.email_standards.history(limit=25),
+            "aggregate": runtime.email_standards.report_summary(),
+        }
+
+    @app.post(f"{API_PREFIX}/email-standards/identities")
+    async def register_email_sender_identity(payload: SenderIdentityInput):
+        try:
+            return runtime.email_standards.register_sender_identity(**payload.model_dump())
+        except EmailStandardsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/email-standards/identities/{{identity_ref}}")
+    async def email_sender_identity(identity_ref: str):
+        try:
+            return runtime.email_standards.get_sender_identity(identity_ref)
+        except EmailStandardsError as error:
+            return _error(404, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/email-standards/domains/diagnose")
+    async def diagnose_email_domain(payload: DomainDiagnosticInput):
+        try:
+            return runtime.email_standards.inspect_domain(**payload.model_dump())
+        except EmailStandardsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/email-standards/messages/validate")
+    async def validate_email_message(payload: MessageDiagnosticInput):
+        try:
+            return runtime.email_standards.validate_message(
+                payload.message.encode("utf-8"),
+                communication_purpose=payload.communication_purpose,
+                expected_identity=payload.expected_identity,
+            )
+        except EmailStandardsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/email-standards/history")
+    async def email_standards_history(kind: str | None = None, limit: int = 100):
+        return {"items": runtime.email_standards.history(kind=kind, limit=limit)}
+
+    @app.get(f"{API_PREFIX}/email-standards/guidance")
+    async def email_standards_guidance():
+        return {"items": runtime.email_standards.provider_guidance()}
+
+    @app.post(f"{API_PREFIX}/email-standards/unsubscribe/endpoints")
+    async def configure_email_unsubscribe(payload: UnsubscribeEndpointInput):
+        try:
+            return runtime.email_standards.configure_unsubscribe_endpoint(**payload.model_dump())
+        except EmailStandardsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/email-standards/unsubscribe/endpoints/{{endpoint_ref}}/tokens")
+    async def create_email_unsubscribe_token(endpoint_ref: str, payload: UnsubscribeTokenInput):
+        try:
+            return runtime.email_standards.create_unsubscribe_token(
+                endpoint_ref, **payload.model_dump()
+            )
+        except EmailStandardsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/email-standards/unsubscribe/readiness")
+    async def email_unsubscribe_readiness(payload: UnsubscribeReadinessInput):
+        try:
+            return runtime.email_standards.unsubscribe_readiness(
+                communication_purpose=payload.communication_purpose,
+                endpoint_ref=payload.endpoint_ref,
+                message=payload.message.encode("utf-8") if payload.message is not None else None,
+            )
+        except EmailStandardsError as error:
+            return _error(400, error.code, str(error))
+
+    @app.post(f"{API_PREFIX}/email-standards/dmarc/import")
+    async def import_email_dmarc_report(file: UploadFile = File(...)):  # noqa: B008
+        try:
+            raw = await file.read(MAX_REPORT_BYTES + 1)
+            if len(raw) > MAX_REPORT_BYTES:
+                return _error(400, "report_limit", "DMARC aggregate report exceeds the 5 MiB limit")
+            return runtime.email_standards.import_dmarc_report(raw, filename=file.filename)
+        except (EmailStandardsError, OSError) as error:
+            return _error(400, getattr(error, "code", "report_invalid"), str(error))
+
+    @app.get(f"{API_PREFIX}/email-standards/dmarc/summary")
+    async def email_dmarc_summary():
+        return runtime.email_standards.report_summary()
+
+    @app.post(f"{API_PREFIX}/unsubscribe/{{endpoint_ref}}/{{token}}")
+    async def process_email_unsubscribe(request: Request, endpoint_ref: str, token: str):
+        try:
+            raw_body = await request.body()
+            if len(raw_body) > 100:
+                return _error(400, "request_invalid", "unsubscribe request body is too large")
+            body = raw_body.decode("ascii")
+            return runtime.email_standards.process_unsubscribe(
+                endpoint_ref, token, method="POST", body=body
+            )
+        except (EmailStandardsError, UnicodeDecodeError) as error:
+            if isinstance(error, UnicodeDecodeError):
+                return _error(400, "request_invalid", "unsubscribe request body is not ASCII")
+            return _error(
+                400 if error.code != "method_not_allowed" else 405, error.code, str(error)
+            )
+
     @app.get(f"{API_PREFIX}/campaigns")
     async def campaigns(limit: int = 100, offset: int = 0):
         safe_limit = max(1, min(limit, 500))
@@ -2471,7 +2644,13 @@ def create_app(
                     campaign_id, run_key=payload.run_key if payload else "primary"
                 )
             campaign = runtime.store.get_campaign(campaign_id)
+            preflight = runtime.campaign_operations.preflight(campaign_id)
+            if not preflight["ready"]:
+                raise CampaignOperationsError(
+                    "campaign preflight has blockers", "preflight_blocked"
+                )
             configuration = json.loads(campaign["configuration_json"])
+            preparation_options = runtime.campaign_operations.preparation_options(campaign)
             sender_email = (payload.sender_email if payload else None) or configuration.get(
                 "sender_email", "sender@example.com"
             )
@@ -2497,6 +2676,7 @@ def create_app(
                     sender=sender,
                     revision_id=campaign["message_revision_id"],
                     run_key=run_key,
+                    **preparation_options,
                 )
                 return asdict(report)
             template = TemplateDefinition(
@@ -2510,7 +2690,10 @@ def create_app(
                     "audience": runtime.segmentation.get_audience(campaign_id, run_key),
                 }
             report = runtime.outbound.prepare_campaign(
-                campaign_id, template=template, sender=sender
+                campaign_id,
+                template=template,
+                sender=sender,
+                **preparation_options,
             )
             return asdict(report)
         except (KeyError, ValueError, CampaignOperationsError) as error:
@@ -2522,7 +2705,13 @@ def create_app(
     ):
         try:
             campaign = runtime.store.get_campaign(campaign_id)
+            preflight = runtime.campaign_operations.preflight(campaign_id)
+            if not preflight["ready"]:
+                raise CampaignOperationsError(
+                    "campaign preflight has blockers", "preflight_blocked"
+                )
             configuration = json.loads(campaign["configuration_json"] or "{}")
+            preparation_options = runtime.campaign_operations.preparation_options(campaign)
             sender = SenderPolicy(
                 ref=campaign["sender_config_ref"],
                 provider="synthetic",
@@ -2543,9 +2732,16 @@ def create_app(
                 revision_id=payload.message_revision_id,
                 run_key=payload.run_key,
                 data_snapshot_id=snapshot["id"],
+                **preparation_options,
             )
             return {**asdict(report), "data_snapshot": snapshot}
-        except (DataStudioError, KeyError, ValueError, MessageStudioError) as error:
+        except (
+            CampaignOperationsError,
+            DataStudioError,
+            KeyError,
+            ValueError,
+            MessageStudioError,
+        ) as error:
             return _error(400, getattr(error, "code", "campaign_not_ready"), str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/authorize")

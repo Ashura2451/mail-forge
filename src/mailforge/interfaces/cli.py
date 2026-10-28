@@ -18,6 +18,7 @@ from mailforge.application.campaigns import (
 )
 from mailforge.application.data_connections import DataConnectionError, DataConnectionsService
 from mailforge.application.data_studio import DataStudioService, detect_schema
+from mailforge.application.email_standards import EmailStandardsService
 from mailforge.application.inbound import InboundService
 from mailforge.application.inbound_demo import run_inbound_demo
 from mailforge.application.inbound_operations import InboundOperations
@@ -667,6 +668,46 @@ def build_parser() -> argparse.ArgumentParser:
     function_install.add_argument(
         "--confirm-checksum", required=True, help="type the source SHA-256 to confirm local trust"
     )
+    standards = subparsers.add_parser(
+        "email-standards",
+        help="inspect sender identity, email standards, and unsubscribe readiness",
+    )
+    standards_commands = standards.add_subparsers(dest="standards_command", required=True)
+    standards_list = standards_commands.add_parser("identities")
+    standards_list.add_argument("--database", type=Path, required=True)
+    standards_register = standards_commands.add_parser("register-identity")
+    standards_register.add_argument("--database", type=Path, required=True)
+    standards_register.add_argument("--ref", required=True)
+    standards_register.add_argument("--from", dest="visible_from", required=True)
+    standards_register.add_argument("--reply-to")
+    standards_register.add_argument("--envelope-from")
+    standards_register.add_argument("--dkim-domain")
+    standards_register.add_argument("--dkim-selector")
+    standards_register.add_argument("--provider-account")
+    standards_register.add_argument("--provider-signing-status", default="unknown")
+    standards_domain = standards_commands.add_parser("domain")
+    standards_domain.add_argument("--database", type=Path, required=True)
+    standards_domain.add_argument("domain")
+    standards_domain.add_argument("--sender-ip")
+    standards_domain.add_argument("--envelope-from")
+    standards_domain.add_argument("--dkim-selector")
+    standards_domain.add_argument("--network", action="store_true")
+    standards_message = standards_commands.add_parser("message")
+    standards_message.add_argument("--database", type=Path, required=True)
+    standards_message.add_argument("--path", type=Path, required=True)
+    standards_message.add_argument("--purpose", default="transactional")
+    standards_message.add_argument("--identity")
+    standards_history = standards_commands.add_parser("history")
+    standards_history.add_argument("--database", type=Path, required=True)
+    standards_history.add_argument("--kind")
+    standards_history.add_argument("--limit", type=int, default=100)
+    standards_guidance = standards_commands.add_parser("guidance")
+    standards_guidance.add_argument("--database", type=Path, required=True)
+    standards_import = standards_commands.add_parser("dmarc-import")
+    standards_import.add_argument("--database", type=Path, required=True)
+    standards_import.add_argument("--path", type=Path, required=True)
+    standards_summary = standards_commands.add_parser("dmarc-summary")
+    standards_summary.add_argument("--database", type=Path, required=True)
     data_studio = subparsers.add_parser("data-studio", help="process structured local data")
     data_commands = data_studio.add_subparsers(dest="data_command", required=True)
     data_schema = data_commands.add_parser("schema", help="inspect source fields")
@@ -896,6 +937,60 @@ def main(argv: list[str] | None = None) -> int:
                     service.install_python_extension(args.source, manifest, confirm=True), indent=2
                 )
             )
+    elif args.command == "email-standards":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = EmailStandardsService(CampaignStore(args.database))
+        if args.standards_command == "identities":
+            print(json.dumps(service.list_sender_identities(), indent=2))
+        elif args.standards_command == "register-identity":
+            print(
+                json.dumps(
+                    service.register_sender_identity(
+                        args.ref,
+                        visible_from=args.visible_from,
+                        reply_to=args.reply_to,
+                        envelope_from=args.envelope_from,
+                        dkim_domain=args.dkim_domain,
+                        dkim_selector=args.dkim_selector,
+                        provider_account_ref=args.provider_account,
+                        provider_signing_status=args.provider_signing_status,
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.standards_command == "domain":
+            print(
+                json.dumps(
+                    service.inspect_domain(
+                        args.domain,
+                        sender_ip=args.sender_ip,
+                        envelope_from=args.envelope_from,
+                        dkim_selector=args.dkim_selector,
+                        allow_network=args.network,
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.standards_command == "message":
+            print(
+                json.dumps(
+                    service.validate_message(
+                        args.path.read_bytes(),
+                        communication_purpose=args.purpose,
+                        expected_identity=args.identity,
+                    ),
+                    indent=2,
+                )
+            )
+        elif args.standards_command == "history":
+            print(json.dumps(service.history(kind=args.kind, limit=args.limit), indent=2))
+        elif args.standards_command == "guidance":
+            print(json.dumps(service.provider_guidance(), indent=2))
+        elif args.standards_command == "dmarc-import":
+            print(json.dumps(service.import_dmarc_report(args.path), indent=2))
+        elif args.standards_command == "dmarc-summary":
+            print(json.dumps(service.report_summary(), indent=2))
     elif args.command == "serve":
         import uvicorn
 
@@ -1220,6 +1315,7 @@ def main(argv: list[str] | None = None) -> int:
                 segmentation=segmentation,
                 provider_operations=ProviderOperationsService(service.store),
                 reporting=ReportingService(service.store),
+                email_standards=EmailStandardsService(service.store),
             )
             if args.campaign_command == "backup":
                 destination = service.store.backup_to(args.destination)
