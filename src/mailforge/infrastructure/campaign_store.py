@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1417,6 +1417,108 @@ CREATE INDEX IF NOT EXISTS idx_email_dmarc_reports_domain
 ON email_dmarc_aggregate_reports(report_domain, period_end DESC);
 """
 
+MIGRATION_22_SQL = """
+CREATE TABLE IF NOT EXISTS integration_clients (
+    id TEXT PRIMARY KEY,
+    client_ref TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL UNIQUE,
+    scopes_json TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    rotated_at TEXT,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_clients_active
+ON integration_clients(revoked_at, expires_at, updated_at DESC);
+CREATE TABLE IF NOT EXISTS integration_client_audits (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES integration_clients(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_client_audits_client
+ON integration_client_audits(client_id, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS integration_events (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES integration_clients(id),
+    source_identity TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    auth_result TEXT NOT NULL,
+    trust_class TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('accepted','duplicate','conflict','invalid','unauthorized','expired')),
+    workflow_run_ids_json TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(client_id, source_identity, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_integration_events_received
+ON integration_events(received_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_integration_events_type
+ON integration_events(event_type, received_at DESC);
+CREATE TABLE IF NOT EXISTS integration_event_conflicts (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES integration_clients(id),
+    source_identity TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    prior_event_id TEXT NOT NULL REFERENCES integration_events(id),
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_integration_event_conflicts_identity
+ON integration_event_conflicts(client_id, source_identity, event_id, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS integration_webhook_subscriptions (
+    id TEXT PRIMARY KEY,
+    subscription_ref TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL UNIQUE,
+    endpoint_url TEXT NOT NULL,
+    event_types_json TEXT NOT NULL,
+    payload_version TEXT NOT NULL,
+    secret_ref TEXT NOT NULL,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+    local_fixture INTEGER NOT NULL DEFAULT 0 CHECK(local_fixture IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_success_at TEXT,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_integration_webhooks_enabled
+ON integration_webhook_subscriptions(enabled, updated_at DESC);
+CREATE TABLE IF NOT EXISTS integration_webhook_deliveries (
+    id TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL REFERENCES integration_webhook_subscriptions(id) ON DELETE CASCADE,
+    operational_event_id INTEGER NOT NULL REFERENCES operational_events(id),
+    event_type TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','delivering','completed','retrying','failed','ambiguous','suspended')),
+    attempt_number INTEGER NOT NULL DEFAULT 0,
+    next_due_at TEXT NOT NULL,
+    last_http_status INTEGER,
+    last_error TEXT,
+    ambiguous INTEGER NOT NULL DEFAULT 0 CHECK(ambiguous IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(subscription_id, operational_event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_integration_deliveries_due
+ON integration_webhook_deliveries(status, next_due_at);
+CREATE INDEX IF NOT EXISTS idx_integration_deliveries_subscription
+ON integration_webhook_deliveries(subscription_id, created_at DESC);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1732,6 +1834,13 @@ class CampaignStore:
                     (21, utc_now()),
                 )
                 current = 21
+            if current < 22:
+                self._apply_migration_22(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (22, utc_now()),
+                )
+                current = 22
             return SCHEMA_VERSION
 
     @staticmethod
@@ -1876,6 +1985,94 @@ class CampaignStore:
     @staticmethod
     def _apply_migration_21(connection: sqlite3.Connection) -> None:
         for statement in MIGRATION_21_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_22(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='data_connections'"
+        )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_connections'"
+        ).fetchone():
+            connection.execute("ALTER TABLE data_connection_events RENAME TO data_connection_events_legacy")
+            connection.execute("ALTER TABLE data_connection_snapshots RENAME TO data_connection_snapshots_legacy")
+            connection.execute("ALTER TABLE data_connections RENAME TO data_connections_legacy")
+            for index in (
+                "idx_data_connection_snapshots_status",
+                "idx_data_connection_snapshots_connection",
+                "idx_data_connection_events_connection",
+                "idx_data_connection_events_snapshot",
+            ):
+                connection.execute(f"DROP INDEX IF EXISTS {index}")
+            connection.executescript(
+                """
+                CREATE TABLE data_connections (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    source_type TEXT NOT NULL CHECK(source_type IN ('sqlite', 'postgresql', 'xlsx', 'http')),
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    credential_ref TEXT,
+                    selection_json TEXT NOT NULL DEFAULT '{}',
+                    limits_json TEXT NOT NULL DEFAULT '{}',
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                    last_test_status TEXT,
+                    last_test_message TEXT,
+                    last_tested_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO data_connections SELECT * FROM data_connections_legacy;
+                CREATE TABLE data_connection_snapshots (
+                    id TEXT PRIMARY KEY,
+                    connection_id TEXT NOT NULL REFERENCES data_connections(id),
+                    revision INTEGER NOT NULL,
+                    selection_json TEXT NOT NULL,
+                    schema_json TEXT NOT NULL DEFAULT '{}',
+                    source_signature TEXT,
+                    consistency_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed', 'canceled')),
+                    artifact_path TEXT,
+                    artifact_sha256 TEXT,
+                    record_count INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    idempotency_key TEXT NOT NULL,
+                    worker_token TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(connection_id, revision),
+                    UNIQUE(connection_id, idempotency_key)
+                );
+                INSERT INTO data_connection_snapshots SELECT * FROM data_connection_snapshots_legacy;
+                CREATE TABLE data_connection_events (
+                    id TEXT PRIMARY KEY,
+                    connection_id TEXT NOT NULL REFERENCES data_connections(id),
+                    snapshot_id TEXT REFERENCES data_connection_snapshots(id),
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO data_connection_events SELECT * FROM data_connection_events_legacy;
+                CREATE INDEX idx_data_connection_snapshots_status
+                ON data_connection_snapshots(status, updated_at DESC);
+                CREATE INDEX idx_data_connection_snapshots_connection
+                ON data_connection_snapshots(connection_id, revision DESC);
+                CREATE INDEX idx_data_connection_events_connection
+                ON data_connection_events(connection_id, created_at DESC);
+                CREATE INDEX idx_data_connection_events_snapshot
+                ON data_connection_events(snapshot_id, created_at DESC);
+                DROP TABLE data_connection_events_legacy;
+                DROP TABLE data_connection_snapshots_legacy;
+                DROP TABLE data_connections_legacy;
+                """
+            )
+        for statement in MIGRATION_22_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)

@@ -1,5 +1,22 @@
 # System changelog
 
+## 2026-10-28 — Integration Hub
+
+- Added schema 22 scoped integration clients, client audits, typed incoming
+  event observations/conflicts, webhook subscriptions, and durable delivery
+  attempts with visible retry, suspension, failure, and ambiguity states.
+- Added fixed-origin, GET-only HTTP/REST source acquisition to Data Connections
+  for bounded JSON, JSONL, and CSV reads with pagination limits, DNS/private
+  address checks, credential references, provenance, and immutable snapshots.
+- Added shared browser/API/CLI Integration Hub surfaces, Reporting inventory,
+  Automation event enrollment, HMAC-SHA256 webhook signatures, and local
+  diagnostics. No hosted callback, arbitrary proxy, unrestricted workflow, or
+  live email path was added.
+- Local synthetic tests cover migration, HTTP acquisition, token lifecycle,
+  event idempotency/conflicts, bearer boundaries, webhook retries/signatures,
+  and recovery semantics. No external credentials, provider, mailbox,
+  recipient, or public endpoint was accessed.
+
 ## 2026-10-28 — Email Standards and sender diagnostics
 
 - Added schema 21 sender identities, durable diagnostic runs, unsubscribe

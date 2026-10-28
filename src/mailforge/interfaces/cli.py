@@ -24,6 +24,7 @@ from mailforge.application.inbound_demo import run_inbound_demo
 from mailforge.application.inbound_operations import InboundOperations
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import collect_unique_addresses, iter_jsonl_email_field
+from mailforge.application.integration_hub import IntegrationHubError, IntegrationHubService
 from mailforge.application.legacy_migration import rehearse_legacy_migration
 from mailforge.application.local_application import (
     DEFAULT_PORT,
@@ -775,6 +776,47 @@ def build_parser() -> argparse.ArgumentParser:
     connection_handoff.add_argument("--database", type=Path, required=True)
     connection_handoff.add_argument("snapshot_id")
     connection_handoff.add_argument("--recipe-revision-id", required=True)
+    integrations = subparsers.add_parser(
+        "integrations", help="manage local integration clients, events, and webhooks"
+    )
+    integration_commands = integrations.add_subparsers(dest="integration_command", required=True)
+    integration_list = integration_commands.add_parser("list")
+    integration_list.add_argument("--database", type=Path, required=True)
+    integration_issue = integration_commands.add_parser("issue-client")
+    integration_issue.add_argument("--database", type=Path, required=True)
+    integration_issue.add_argument("--name", required=True)
+    integration_issue.add_argument("--scope", action="append", required=True)
+    integration_issue.add_argument("--expires-at", required=True)
+    integration_rotate = integration_commands.add_parser("rotate-client")
+    integration_rotate.add_argument("--database", type=Path, required=True)
+    integration_rotate.add_argument("client_ref")
+    integration_rotate.add_argument("--expires-at")
+    integration_revoke = integration_commands.add_parser("revoke-client")
+    integration_revoke.add_argument("--database", type=Path, required=True)
+    integration_revoke.add_argument("client_ref")
+    integration_catalog = integration_commands.add_parser("event-catalog")
+    integration_catalog.add_argument("--database", type=Path, required=True)
+    integration_event = integration_commands.add_parser("submit-event")
+    integration_event.add_argument("--database", type=Path, required=True)
+    integration_event.add_argument("--token", required=True)
+    integration_event.add_argument("--event", type=Path, required=True)
+    integration_webhooks = integration_commands.add_parser("webhooks")
+    integration_webhooks.add_argument("--database", type=Path, required=True)
+    integration_webhook_create = integration_commands.add_parser("create-webhook")
+    integration_webhook_create.add_argument("--database", type=Path, required=True)
+    integration_webhook_create.add_argument("--name", required=True)
+    integration_webhook_create.add_argument("--endpoint", required=True)
+    integration_webhook_create.add_argument("--event-type", action="append", required=True)
+    integration_webhook_create.add_argument("--secret-ref", required=True)
+    integration_webhook_create.add_argument("--enable", action="store_true")
+    integration_webhook_state = integration_commands.add_parser("webhook-state")
+    integration_webhook_state.add_argument("--database", type=Path, required=True)
+    integration_webhook_state.add_argument("subscription_ref")
+    integration_webhook_state.add_argument("--enable", action="store_true")
+    integration_deliveries = integration_commands.add_parser("deliveries")
+    integration_deliveries.add_argument("--database", type=Path, required=True)
+    integration_diagnostics = integration_commands.add_parser("diagnostics")
+    integration_diagnostics.add_argument("--database", type=Path, required=True)
     app = subparsers.add_parser("app", help="start and maintain the local Mailforge application")
     app_subparsers = app.add_subparsers(dest="app_command", required=True)
     for command, help_text in (
@@ -1861,6 +1903,54 @@ def main(argv: list[str] | None = None) -> int:
             service.close()
             if data_studio is not None:
                 data_studio.close()
+    elif args.command == "integrations":
+        from mailforge.infrastructure.campaign_store import CampaignStore
+
+        service = IntegrationHubService(CampaignStore(args.database))
+        try:
+            if args.integration_command == "list":
+                print(json.dumps({
+                    "clients": service.list_clients(),
+                    "subscriptions": service.list_subscriptions(),
+                    "events": service.list_events(),
+                    "deliveries": service.deliveries(),
+                }, indent=2, default=str))
+            elif args.integration_command == "issue-client":
+                print(json.dumps(
+                    service.issue_client(
+                        args.name, args.scope, expires_at=args.expires_at
+                    ), indent=2
+                ))
+            elif args.integration_command == "rotate-client":
+                print(json.dumps(
+                    service.rotate_client(args.client_ref, expires_at=args.expires_at), indent=2
+                ))
+            elif args.integration_command == "revoke-client":
+                print(json.dumps(service.revoke_client(args.client_ref), indent=2))
+            elif args.integration_command == "event-catalog":
+                print(json.dumps(service.event_catalog(), indent=2))
+            elif args.integration_command == "submit-event":
+                envelope = json.loads(args.event.read_text())
+                client = service.authenticate(args.token, "INGEST_LOCAL_EVENT")
+                print(json.dumps(service.submit_event(client, envelope), indent=2, default=str))
+            elif args.integration_command == "webhooks":
+                print(json.dumps(service.list_subscriptions(), indent=2, default=str))
+            elif args.integration_command == "create-webhook":
+                print(json.dumps(service.create_subscription(
+                    args.name, args.endpoint, args.event_type,
+                    secret_ref=args.secret_ref, enabled=args.enable,
+                ), indent=2, default=str))
+            elif args.integration_command == "webhook-state":
+                print(json.dumps(
+                    service.set_subscription(args.subscription_ref, enabled=args.enable),
+                    indent=2, default=str,
+                ))
+            elif args.integration_command == "deliveries":
+                print(json.dumps(service.deliveries(), indent=2, default=str))
+            elif args.integration_command == "diagnostics":
+                print(json.dumps(service.diagnostics(), indent=2, default=str))
+        except (IntegrationHubError, ValueError, OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"{getattr(error, 'code', 'integration_invalid')}: {error}") from error
     elif args.command == "interactive":
         overrides = {}
         if args.results_dir is not None:

@@ -720,6 +720,60 @@ class ReportingService:
             "dmarc_reports": [dict(row) for row in reports],
         }
 
+    def integration(self, *, limit: int = 100) -> dict[str, Any]:
+        """Report integration inventory and durable delivery observations."""
+
+        safe_limit = max(1, min(int(limit), 500))
+        with self.store.connect() as connection:
+            clients = connection.execute(
+                "SELECT client_ref,name,scopes_json,expires_at,revoked_at,last_used_at,created_at FROM integration_clients ORDER BY created_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+            sources = connection.execute(
+                "SELECT source_type,COUNT(*) AS count FROM data_connections GROUP BY source_type ORDER BY source_type"
+            ).fetchall()
+            snapshots = connection.execute(
+                "SELECT status,COUNT(*) AS count FROM data_connection_snapshots GROUP BY status"
+            ).fetchall()
+            events = connection.execute(
+                "SELECT outcome,COUNT(*) AS count FROM integration_events GROUP BY outcome"
+            ).fetchall()
+            conflicts = connection.execute(
+                "SELECT COUNT(*) FROM integration_event_conflicts"
+            ).fetchone()[0]
+            subscriptions = connection.execute(
+                "SELECT enabled,COUNT(*) AS count FROM integration_webhook_subscriptions GROUP BY enabled"
+            ).fetchall()
+            deliveries = connection.execute(
+                "SELECT status,COUNT(*) AS count FROM integration_webhook_deliveries GROUP BY status"
+            ).fetchall()
+            last_success = connection.execute(
+                "SELECT MAX(last_success_at) FROM integration_webhook_subscriptions"
+            ).fetchone()[0]
+            errors = connection.execute(
+                "SELECT subscription_ref,last_error,updated_at FROM integration_webhook_subscriptions WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        return {
+            "report_definition_version": REPORT_DEFINITION_VERSION,
+            "evidence_class": "durable_local_observation",
+            "clients": [
+                {**dict(row), "scopes": json.loads(row["scopes_json"])} for row in clients
+            ],
+            "sources": [dict(row) for row in sources],
+            "snapshots": {row["status"]: row["count"] for row in snapshots},
+            "events": {row["outcome"]: row["count"] for row in events},
+            "event_conflicts": conflicts,
+            "subscriptions": {"enabled" if row["enabled"] else "disabled": row["count"] for row in subscriptions},
+            "deliveries": {row["status"]: row["count"] for row in deliveries},
+            "last_success_at": last_success,
+            "errors": [dict(row) for row in errors],
+            "limitations": [
+                "HTTP 2xx is a receiving transport observation, not downstream business completion",
+                "external providers and remote webhook services are not qualified by local fixtures",
+            ],
+        }
+
     def export(
         self, report_type: str, filters: ReportFilters | None = None, *, format: str = "json"
     ) -> tuple[bytes, str, str]:
@@ -774,6 +828,7 @@ class ReportingService:
             "workflows": self.workflows,
             "inbound": self.inbound,
             "jobs": self.jobs,
+            "integration": lambda filters: self.integration(),
         }
         if report_type not in methods:
             raise ReportingError("unsupported report type", "report_type_invalid")

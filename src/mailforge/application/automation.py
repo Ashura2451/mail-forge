@@ -43,6 +43,7 @@ TRIGGER_KINDS = {
     "scheduled_occurrence",
     "trusted_inbound_event",
     "list_processing_completed",
+    "integration_event",
 }
 NODE_KINDS = {
     "TRIGGER",
