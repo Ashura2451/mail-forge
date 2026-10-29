@@ -1,5 +1,57 @@
 # System changelog
 
+## 2026-10-29 — Unified workspace final closure evidence
+
+- Completed the 029 browser acceptance slice across the current workbenches,
+  including mobile overlay navigation with Escape/focus restoration, truthful
+  schema/integrity reporting, Integration Hub local client/event/webhook
+  controls, Data Connections → Data Studio handoff, Email Standards actions,
+  and staged Maintenance restore.
+- Captured 26 current rendered-screen views plus console/request results: the
+  original 22-screen set and four post-operation working-state captures for
+  Integration Hub, Data Connections, Email Standards, and Maintenance. The
+  baseline capture reported no console errors or failed requests; the
+  targeted captures completed their browser assertions. The local browser
+  workflow completed scoped-client authorization and revocation,
+  event duplicate handling, signed loopback delivery, source preview and
+  snapshot, sender diagnostics, unsubscribe readiness, and backup restore.
+- Exercised the arm64 package across launch, browser operations, stop, restart
+  against the same data directory, and durable-state verification. The bundle
+  served the corrected frontend in a disposable packaged smoke. The final
+  independent r3 review approved the correction pass with no remaining major
+  or minor findings. No external provider, public callback, mailbox,
+  recipient, live send, or signing/notarization is claimed; PR #17 remains
+  open and unmerged pending integration.
+- Correction pass for the initial independent review fixed mobile drawer
+  scrolling and closed-drawer focus, removed unsafe mutation replay from
+  Retry, protected dirty Maintenance edits while hydrating saved preferences,
+  preserved Marketing purpose in the mobile campaign flow, and restored the
+  narrow split-card layout. The final independent re-review approved these
+  corrections.
+- Final local validation: 248 non-browser Python tests and 6 browser/
+  accessibility tests passed; frontend build, Ruff check, secret scan, and
+  diff hygiene passed. Ruff format check retains the documented baseline drift.
+
+## 2026-10-28 — Unified operator workspace
+
+- Added a proposed unified-workspace specification and grouped React shell
+  navigation for Data, Audiences, Communication, Incoming, Automation,
+  Connectivity, Insights, and Application work.
+- Added stable browser paths with refresh and Back/Forward recovery, responsive
+  labelled navigation, related-work handoffs, page context, and retryable
+  shell/action error feedback without changing backend authorities.
+- Follow-up visual qualification added the shared panel, form, table, status,
+  empty-state, and responsive layout foundation that the shell requires. The
+  representative dashboard, Campaign Operations, mobile navigation, and
+  Integration Hub screenshots now show the intended operator-console hierarchy
+  and usable narrow-screen controls.
+- Regenerated the packaged frontend assets and extended browser acceptance for
+  direct routes, history navigation, and the narrow-screen navigation menu.
+- Local evidence: 248 non-browser Python tests and 5 browser/accessibility
+  tests passed; the arm64 package built with a clean pre-launch manifest check
+  and its packaged launcher printed help. Signing/notarization, independent
+  review, and real-provider qualification are not claimed.
+
 ## 2026-10-28 — Integration Hub
 
 - Added schema 22 scoped integration clients, client audits, typed incoming

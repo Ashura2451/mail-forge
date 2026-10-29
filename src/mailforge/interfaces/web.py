@@ -814,6 +814,7 @@ class WebRuntime:
         self.integrations = IntegrationHubService(
             self.store,
             automation=self.automation,
+            allow_local_fixtures=os.environ.get("MAILFORGE_ENABLE_LOCAL_FIXTURES") == "1",
         )
         self.inbound_operations = InboundOperations(
             self.store, message_studio=self.message_studio, programmable=self.programmable
@@ -1485,6 +1486,9 @@ def create_app(
         inbound = runtime.inbound.stats()
         return {
             "counts": {"contacts": contacts, "lists": lists, "inbound": inbound},
+            "schema_version": runtime.store.schema_version(),
+            "supported_schema_version": SCHEMA_VERSION,
+            "database_integrity": runtime.store.integrity_check(),
             "campaigns": [
                 _campaign_view(runtime, runtime.store.get_campaign(item["id"]))
                 for item in campaigns
