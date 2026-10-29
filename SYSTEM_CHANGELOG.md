@@ -8,11 +8,17 @@
 - Added stable browser paths with refresh and Back/Forward recovery, responsive
   labelled navigation, related-work handoffs, page context, and retryable
   shell/action error feedback without changing backend authorities.
+- Follow-up visual qualification added the shared panel, form, table, status,
+  empty-state, and responsive layout foundation that the shell requires. The
+  representative dashboard, Campaign Operations, mobile navigation, and
+  Integration Hub screenshots now show the intended operator-console hierarchy
+  and usable narrow-screen controls.
 - Regenerated the packaged frontend assets and extended browser acceptance for
   direct routes, history navigation, and the narrow-screen navigation menu.
 - Local evidence: 248 non-browser Python tests and 5 browser/accessibility
-  tests passed; no packaged release, independent review, or real-provider
-  qualification is claimed.
+  tests passed; the arm64 package built with a clean pre-launch manifest check
+  and its packaged launcher printed help. Signing/notarization, independent
+  review, and real-provider qualification are not claimed.
 
 ## 2026-10-28 — Integration Hub
 
