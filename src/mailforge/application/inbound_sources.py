@@ -22,7 +22,7 @@ from mailforge.infrastructure.credentials import (
     CredentialResolver,
     EnvironmentCredentialResolver,
     UnsupportedAuthenticationMechanism,
-    oauth_token_from_material,
+    resolve_oauth_token,
 )
 from mailforge.infrastructure.smtp import xoauth2_initial_response
 
@@ -267,9 +267,7 @@ class ImapSource:
     def _oauth_response(self) -> bytes:
         if not self.config.credential_ref:
             raise CredentialError("OAuth credential is unavailable")
-        token = oauth_token_from_material(
-            self.credential_resolver.resolve(self.config.credential_ref)
-        )
+        token = resolve_oauth_token(self.credential_resolver, self.config.credential_ref)
         if token.expired:
             raise CredentialError("OAuth access token is expired")
         return xoauth2_initial_response(self.config.username or "", token.access_token).encode()

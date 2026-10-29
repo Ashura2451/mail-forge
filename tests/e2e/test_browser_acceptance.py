@@ -134,6 +134,18 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
                 page.get_by_role("button", name=label).click()
                 assert page.get_by_role("heading", name=label).is_visible()
 
+            page.get_by_role("button", name="Providers").click()
+            page.get_by_label("Provider profile").select_option("generic_smtp")
+            page.get_by_label("Authentication method").select_option("password")
+            page.get_by_role("button", name="Save account configuration").click()
+            page.get_by_text("Provider account saved without a network connection").wait_for()
+            page.locator("table tbody tr").filter(has_text="local-smtp").get_by_role(
+                "cell"
+            ).first.wait_for()
+            page.get_by_role("button", name="Validate config").click()
+            page.get_by_text("Configuration validated without network contact").wait_for()
+            assert page.get_by_text("configuration_validated", exact=True).is_visible()
+
             page.get_by_role("button", name="Reports & Insights").click()
             page.get_by_role("heading", name="Reports & Insights", exact=True).first.wait_for()
             page.get_by_text("Evidence boundary:").wait_for()

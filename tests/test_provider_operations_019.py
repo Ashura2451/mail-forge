@@ -1,5 +1,6 @@
 """Acceptance evidence for provider account operations 019."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,7 +17,11 @@ from mailforge.domain.provider import (
     TLSMode,
 )
 from mailforge.infrastructure.campaign_store import CampaignStore
-from mailforge.infrastructure.credentials import MappingCredentialResolver, OAuthTokenMaterial
+from mailforge.infrastructure.credentials import (
+    MappingCredentialResolver,
+    OAuthTokenMaterial,
+    RefreshingOAuthCredentialResolver,
+)
 from mailforge.infrastructure.smtp import (
     LiveSendGate,
     SMTPConnectionPool,
@@ -285,3 +290,71 @@ def test_oauth_xoauth2_transport_and_refresh_fixture_do_not_persist_token(tmp_pa
         expected_identity="sender@example.com",
     )
     assert refreshed.access_token == "new-access"
+
+
+def test_expired_oauth_token_refreshes_once_per_reference_without_persistence():
+    class Client:
+        def __init__(self):
+            self.esmtp_features = {"auth": "XOAUTH2"}
+            self.auth_payload = ""
+
+        def ehlo(self):
+            return 250, b"ok"
+
+        def auth(self, _mechanism, authobject):
+            self.auth_payload = authobject(None)
+            return 235, b"ok"
+
+        def noop(self):
+            return 250, b"ok"
+
+        def quit(self):
+            return None
+
+    resolver = MappingCredentialResolver(
+        {
+            "test:expired-oauth": (
+                '{"access_token":"expired","refresh_token":"fixture-refresh",'
+                '"expires_at":"2000-01-01T00:00:00+00:00","identity":"sender@example.com"}'
+            )
+        }
+    )
+    calls: list[str] = []
+
+    def refresh(value: str) -> OAuthTokenMaterial:
+        calls.append(value)
+        return OAuthTokenMaterial(
+            access_token="refreshed-access",
+            refresh_token=value,
+            expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            identity="sender@example.com",
+        )
+
+    refreshing = RefreshingOAuthCredentialResolver(
+        resolver, refresh, expected_identity="sender@example.com"
+    )
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        tokens = list(executor.map(lambda _: refreshing.oauth("test:expired-oauth"), range(4)))
+
+    assert [token.access_token for token in tokens] == ["refreshed-access"] * 4
+    assert calls == ["fixture-refresh"]
+    assert "refreshed-access" not in repr(refreshing)
+    client = Client()
+    pool = SMTPConnectionPool(
+        [
+            SMTPTransportConfig(
+                host="127.0.0.1",
+                port=465,
+                username="sender@example.com",
+                credential_ref="test:expired-oauth",
+                auth_method=AuthenticationMethod.OAUTH2,
+                provider_ref="oauth-refresh-fixture",
+                implicit_tls=True,
+            )
+        ],
+        gate=LiveSendGate(enabled=True),
+        connector_factory=lambda _config: client,
+        credential_resolver=refreshing,
+    )
+    assert pool.health_check() == {"127.0.0.1": True}
+    assert "refreshed-access" in client.auth_payload

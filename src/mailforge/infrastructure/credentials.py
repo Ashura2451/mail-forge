@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import RLock
 from typing import Protocol
 
 
@@ -63,6 +65,12 @@ class CredentialResolver(Protocol):
     def available(self, reference: str) -> bool: ...
 
 
+class OAuthCredentialResolver(CredentialResolver, Protocol):
+    """Credential resolver that can provide runtime-only OAuth token material."""
+
+    def oauth(self, reference: str) -> OAuthTokenMaterial: ...
+
+
 def oauth_token_from_material(material: CredentialMaterial) -> OAuthTokenMaterial:
     """Decode an externally supplied JSON OAuth credential without persisting it."""
 
@@ -78,6 +86,73 @@ def oauth_token_from_material(material: CredentialMaterial) -> OAuthTokenMateria
         expires_at=payload.get("expires_at"),
         identity=payload.get("identity"),
     )
+
+
+def resolve_oauth_token(resolver: CredentialResolver, reference: str) -> OAuthTokenMaterial:
+    """Resolve OAuth material without exposing a token beyond the adapter boundary."""
+
+    oauth = getattr(resolver, "oauth", None)
+    if callable(oauth):
+        return oauth(reference)
+    return oauth_token_from_material(resolver.resolve(reference))
+
+
+class RefreshingOAuthCredentialResolver:
+    """Runtime-only OAuth refresh adapter with one refresh in flight per reference.
+
+    The wrapper deliberately retains refreshed tokens only in process memory. A
+    caller supplies the provider-specific token exchange; no endpoint, client
+    secret, refresh token, or token response is persisted by Mailforge.
+    """
+
+    def __init__(
+        self,
+        delegate: CredentialResolver,
+        refresh: Callable[[str], OAuthTokenMaterial],
+        *,
+        expected_identity: str | None = None,
+    ) -> None:
+        self.delegate = delegate
+        self.refresh = refresh
+        self.expected_identity = expected_identity
+        self._tokens: dict[str, OAuthTokenMaterial] = {}
+        self._locks: dict[str, RLock] = {}
+        self._guard = RLock()
+
+    def resolve(self, reference: str) -> CredentialMaterial:
+        return self.delegate.resolve(reference)
+
+    def available(self, reference: str) -> bool:
+        return self.delegate.available(reference)
+
+    def _lock_for(self, reference: str) -> RLock:
+        with self._guard:
+            return self._locks.setdefault(reference, RLock())
+
+    def oauth(self, reference: str) -> OAuthTokenMaterial:
+        token = self._tokens.get(reference) or resolve_oauth_token(self.delegate, reference)
+        if not token.expired:
+            self._tokens[reference] = token
+            return token
+        with self._lock_for(reference):
+            token = self._tokens.get(reference) or resolve_oauth_token(self.delegate, reference)
+            if not token.expired:
+                return token
+            if not token.refresh_token:
+                raise CredentialError(
+                    "OAuth refresh token is unavailable; reauthorization required"
+                )
+            refreshed = self.refresh(token.refresh_token)
+            if not isinstance(refreshed, OAuthTokenMaterial):
+                raise CredentialError("OAuth refresh did not return token material")
+            if (
+                self.expected_identity
+                and refreshed.identity
+                and refreshed.identity != self.expected_identity
+            ):
+                raise CredentialError("OAuth refresh returned a different account identity")
+            self._tokens[reference] = refreshed
+            return refreshed
 
 
 _REFERENCE = re.compile(r"^(?P<kind>env|test|keychain):(?P<name>[A-Za-z0-9_.:-]+)$")
