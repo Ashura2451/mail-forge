@@ -1,6 +1,6 @@
 # 0019. Unified operator workspace and connected UX
 
-**Status**: Proposed
+**Status**: Implemented locally; acceptance pending independent review and merge
 
 ## Summary
 
@@ -63,9 +63,21 @@ already exist.
   local browser harness permits.
 - Python regression suite to confirm the FastAPI contract is unchanged.
 
-## Open evidence
+## Closure evidence — 2026-10-29
 
-This is a proposed build specification. Packaged macOS qualification,
-application-wide connected journeys, independent review, and milestone-level
-acceptance remain separate evidence obligations and must not be inferred from
-the shell implementation.
+The local implementation now has current rendered-screen evidence for the
+dashboard, activity, data, audience, communication, incoming, automation,
+connectivity, insights, email-standards, and maintenance workbenches. The
+browser acceptance suite also exercises durable local business operations:
+scoped client authorization and revocation, typed event idempotency, signed
+loopback webhook delivery, SQLite source preview/snapshot and Data Studio
+handoff, sender diagnostics, unsubscribe readiness, and staged backup restore.
+
+The arm64 macOS bundle was launched, exercised, stopped, relaunched against
+the same data directory, and verified to retain a published Message Studio
+revision and a staged restore. Evidence is local and synthetic: no external
+provider, public callback, mailbox, recipient, or live send was used. The
+independent review, signing/notarization, external-provider qualification, and
+merge remain separate obligations.
+
+Current evidence index: `.orchestra/evidence/029/index.html`.

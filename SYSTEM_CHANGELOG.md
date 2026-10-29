@@ -1,5 +1,25 @@
 # System changelog
 
+## 2026-10-29 — Unified workspace final closure evidence
+
+- Completed the 029 browser acceptance slice across the current workbenches,
+  including mobile overlay navigation with Escape/focus restoration, truthful
+  schema/integrity reporting, Integration Hub local client/event/webhook
+  controls, Data Connections → Data Studio handoff, Email Standards actions,
+  and staged Maintenance restore.
+- Captured 22 current rendered-screen views plus console/request results. The
+  local browser workflow completed scoped-client authorization and revocation,
+  event duplicate handling, signed loopback delivery, source preview and
+  snapshot, sender diagnostics, unsubscribe readiness, and backup restore.
+- Exercised the arm64 package across launch, browser operations, stop, restart
+  against the same data directory, and durable-state verification. The bundle
+  passed its pre-launch manifest check. No external provider, public callback,
+  mailbox, recipient, live send, signing/notarization, or independent review
+  is claimed; PR #17 remains open and unmerged.
+- Final local validation: 248 non-browser Python tests and 6 browser/
+  accessibility tests passed; frontend build, Ruff check, secret scan, and
+  diff hygiene passed. Ruff format check retains the documented baseline drift.
+
 ## 2026-10-28 — Unified operator workspace
 
 - Added a proposed unified-workspace specification and grouped React shell
