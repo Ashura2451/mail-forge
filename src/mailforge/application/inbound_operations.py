@@ -587,7 +587,9 @@ class InboundOperations:
                 (idempotency_key,),
             ).fetchone()
             if existing:
-                return _decode(existing)
+                result = _decode(existing)
+                result["_idempotency_reused"] = True
+                return result
             if (
                 connection.execute(
                     "SELECT 1 FROM inbound_sources WHERE ref = ?", (source_ref,)
@@ -622,7 +624,9 @@ class InboundOperations:
             "requested",
             {"action": action, "source_ref": source_ref},
         )
-        return self.mailbox_action(action_id)
+        result = self.mailbox_action(action_id)
+        result["_idempotency_reused"] = False
+        return result
 
     def mailbox_action(self, action_id: str) -> dict[str, Any]:
         with self.store.connect() as connection:

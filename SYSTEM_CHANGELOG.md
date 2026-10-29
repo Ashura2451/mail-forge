@@ -414,3 +414,13 @@
   validation boundaries.
 - Preserved loopback security, SQLite authority, supervised workers, and the
   explicit simulation-only external-operation boundary.
+
+## 2026-10-29 — Mailbox operations closure hardening
+
+- Hardened fixture-only mailbox actions with same-connection UIDVALIDITY
+  checks, atomic idempotency claims, identity-aware postcondition verification,
+  conservative disconnect/read-failure ambiguity, and fenced inbound-run
+  recovery.
+- Updated loopback protocol coverage for folder discovery, flags, COPY/MOVE,
+  message identity, and durable mailbox projection updates. No real provider,
+  mailbox, credential, or recipient data was accessed.

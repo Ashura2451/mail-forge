@@ -26,4 +26,5 @@ The workload retained parsed local evidence and used the current default
 processing path; it did not measure network latency, provider throttling,
 remote mutation confirmation, or concurrent workers. Future provider
 qualification should repeat the same workload against an authorized fixture
-with explicit timeout and resource limits.
+with explicit timeout and resource limits. Peak process memory was not
+measured in this run and is therefore not claimed.

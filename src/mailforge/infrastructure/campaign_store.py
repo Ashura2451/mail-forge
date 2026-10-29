@@ -2188,10 +2188,16 @@ class CampaignStore:
             """
             INSERT INTO inbound_mailbox_actions(
                 id,source_ref,message_id,action,target_folder,authorization_ref,idempotency_key,
-                status,error_message,created_at,updated_at
+                status,error_message,created_at,updated_at,action_state
             )
             SELECT id,source_ref,message_id,action,target_folder,authorization_ref,idempotency_key,
-                status,error_message,created_at,updated_at
+                status,error_message,created_at,updated_at,
+                CASE status
+                    WHEN 'applied' THEN 'confirmed'
+                    WHEN 'failed' THEN 'failed'
+                    WHEN 'canceled' THEN 'refused'
+                    ELSE 'requested'
+                END
             FROM inbound_mailbox_actions_legacy
             """
         )
@@ -2563,6 +2569,8 @@ class CampaignStore:
         last_sync_status: str | None = None,
         last_sync_error: str | None = None,
         capabilities: tuple[str, ...] | None = None,
+        source_ref: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist mailbox controls and sanitized synchronization evidence."""
 
@@ -2589,6 +2597,13 @@ class CampaignStore:
         assignments.append("updated_at = ?")
         values.extend((utc_now(), ref))
         with self.transaction(immediate=True) as connection:
+            if run_id is not None and source_ref is not None:
+                latest = connection.execute(
+                    "SELECT id FROM inbound_runs WHERE source_ref=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                    (source_ref,),
+                ).fetchone()
+                if latest is None or latest["id"] != run_id:
+                    return self.get_provider_account(ref)["inbound"]
             connection.execute(
                 f"UPDATE provider_inbound_settings SET {', '.join(assignments)} WHERE account_ref = ?",
                 values,
@@ -4753,7 +4768,12 @@ class CampaignStore:
                 (source_ref,),
             ).fetchone()
             if active is not None:
-                raise RuntimeError(f"inbound synchronization is already running for {source_ref}")
+                connection.execute(
+                    "UPDATE inbound_runs SET status='interrupted', finished_at=?, "
+                    "error_message='recovered abandoned inbound synchronization' "
+                    "WHERE id=? AND status IN ('running', 'queued')",
+                    (utc_now(), active["id"]),
+                )
             cursor = connection.execute(
                 "SELECT cursor FROM inbound_cursors WHERE source_ref = ?", (source_ref,)
             ).fetchone()
@@ -4762,6 +4782,27 @@ class CampaignStore:
                 (run_id, source_ref, utc_now(), cursor["cursor"] if cursor else None),
             )
         return run_id, (cursor["cursor"] if cursor else None)
+
+    def latest_inbound_run_status(self, source_ref: str) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM inbound_runs WHERE source_ref=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                (source_ref,),
+            ).fetchone()
+        return row["status"] if row else None
+
+    def is_latest_inbound_run(self, run_id: str | None, source_ref: str | None = None) -> bool:
+        if not run_id:
+            return False
+        with self.connect() as connection:
+            query = "SELECT id FROM inbound_runs"
+            params: tuple[Any, ...] = ()
+            if source_ref is not None:
+                query += " WHERE source_ref = ?"
+                params = (source_ref,)
+            query += " ORDER BY started_at DESC, id DESC LIMIT 1"
+            row = connection.execute(query, params).fetchone()
+        return bool(row and row["id"] == run_id)
 
     def finish_inbound_run(
         self,
@@ -4777,7 +4818,7 @@ class CampaignStore:
         _assert_no_secrets({"error_message": error_message or ""}, "inbound_run")
         with self.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE inbound_runs SET finished_at = ?, status = ?, cursor_after = ?, acquired_count = ?, processed_count = ?, failure_count = ?, error_message = ? WHERE id = ?",
+                "UPDATE inbound_runs SET finished_at = ?, status = ?, cursor_after = ?, acquired_count = ?, processed_count = ?, failure_count = ?, error_message = ? WHERE id = ? AND status = 'running'",
                 (
                     utc_now(),
                     status,
@@ -4791,18 +4832,35 @@ class CampaignStore:
             )
 
     def set_inbound_cursor(
-        self, source_ref: str, cursor: str | None, *, uidvalidity: str | None = None
+        self,
+        source_ref: str,
+        cursor: str | None,
+        *,
+        uidvalidity: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         with self.transaction(immediate=True) as connection:
+            if run_id is not None and connection.execute(
+                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                (run_id, source_ref),
+            ).fetchone() is None:
+                raise RuntimeError("inbound synchronization run no longer owns its cursor")
             connection.execute(
                 "INSERT INTO inbound_cursors(source_ref, uidvalidity, cursor, generation, updated_at) VALUES (?, ?, ?, 0, ?) "
                 "ON CONFLICT(source_ref) DO UPDATE SET uidvalidity=excluded.uidvalidity, cursor=excluded.cursor, generation=inbound_cursors.generation + 1, updated_at=excluded.updated_at, last_error=NULL",
                 (source_ref, uidvalidity, cursor, utc_now()),
             )
 
-    def invalidate_inbound_cursor(self, source_ref: str, error: str) -> None:
+    def invalidate_inbound_cursor(
+        self, source_ref: str, error: str, *, run_id: str | None = None
+    ) -> None:
         _assert_no_secrets({"error": error}, "inbound_cursor")
         with self.transaction(immediate=True) as connection:
+            if run_id is not None and connection.execute(
+                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                (run_id, source_ref),
+            ).fetchone() is None:
+                return
             connection.execute(
                 "UPDATE inbound_cursors SET cursor = NULL, generation = generation + 1, last_error = ?, updated_at = ? WHERE source_ref = ?",
                 (error, utc_now(), source_ref),
@@ -4828,6 +4886,7 @@ class CampaignStore:
         last_sync_at: str | None = None,
         last_sync_status: str | None = None,
         last_sync_error: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         _assert_safe_reference(account_ref, "inbound_mailbox.account_ref")
         _assert_safe_reference(source_ref, "inbound_mailbox.source_ref")
@@ -4836,6 +4895,17 @@ class CampaignStore:
         now = utc_now()
         mailbox_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"inbound-mailbox:{account_ref}:{mailbox}"))
         with self.transaction(immediate=True) as connection:
+            if run_id is not None:
+                latest = connection.execute(
+                    "SELECT id FROM inbound_runs WHERE source_ref=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                    (source_ref,),
+                ).fetchone()
+                if latest is None or latest["id"] != run_id:
+                    row = connection.execute(
+                        "SELECT * FROM inbound_mailboxes WHERE account_ref = ? AND mailbox = ?",
+                        (account_ref, mailbox),
+                    ).fetchone()
+                    return self._decode_inbound_row(row)
             connection.execute(
                 """
                 INSERT INTO inbound_mailboxes(
@@ -4979,6 +5049,25 @@ class CampaignStore:
         self.record_inbound_action_event(action_id, action_state, {"status": status, "detail": response_detail})
         return dict(row)
 
+    def claim_inbound_mailbox_action(self, action_id: str) -> dict[str, Any] | None:
+        """Atomically claim a newly requested action for one executor."""
+
+        with self.transaction(immediate=True) as connection:
+            update = connection.execute(
+                "UPDATE inbound_mailbox_actions SET action_state='validated', updated_at=? "
+                "WHERE id=? AND action_state='requested'",
+                (utc_now(), action_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM inbound_mailbox_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"mailbox action not found: {action_id}")
+        if update.rowcount != 1:
+            return None
+        self.record_inbound_action_event(action_id, "validated", {"claimed": True})
+        return dict(row)
+
     def inbound_action_events(self, action_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -5074,6 +5163,10 @@ class CampaignStore:
         flags: tuple[str, ...] | None = None,
         state: str | None = None,
         observed_at: str | None = None,
+        source_ref: str | None = None,
+        folder: str | None = None,
+        remote_uidvalidity: str | None = None,
+        remote_uid: str | None = None,
     ) -> None:
         assignments: list[str] = []
         values: list[Any] = []
@@ -5086,6 +5179,15 @@ class CampaignStore:
         if observed_at is not None:
             assignments.append("last_remote_seen_at = ?")
             values.append(observed_at)
+        for column, value in (
+            ("source_ref", source_ref),
+            ("folder", folder),
+            ("remote_uidvalidity", remote_uidvalidity),
+            ("remote_uid", remote_uid),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(value)
         if not assignments:
             return
         values.append(message_id)

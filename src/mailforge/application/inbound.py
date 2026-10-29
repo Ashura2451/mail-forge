@@ -409,7 +409,10 @@ class InboundService:
                 duplicates += int(duplicate)
                 cursor_after = item.source_identity
                 self.store.set_inbound_cursor(
-                    source.source_ref, cursor_after, uidvalidity=item.uidvalidity
+                    source.source_ref,
+                    cursor_after,
+                    uidvalidity=item.uidvalidity,
+                    run_id=run_id,
                 )
                 if fault_after is not None and acquired >= fault_after:
                     raise RuntimeError("inbound fault injection after durable acquisition")
@@ -434,7 +437,7 @@ class InboundService:
                 failures=failures,
             )
         except CursorInvalidated as error:
-            self.store.invalidate_inbound_cursor(source.source_ref, str(error))
+            self.store.invalidate_inbound_cursor(source.source_ref, str(error), run_id=run_id)
             self.store.finish_inbound_run(
                 run_id,
                 status="cursor_invalidated",
@@ -444,6 +447,7 @@ class InboundService:
                 failures=failures + 1,
                 error_message=str(error),
             )
+            error.inbound_run_id = run_id
             raise
         except Exception as error:
             self.store.finish_inbound_run(
@@ -455,6 +459,7 @@ class InboundService:
                 failures=failures + 1,
                 error_message=str(error),
             )
+            error.inbound_run_id = run_id
             raise
         return InboundBatchReport(
             run_id,

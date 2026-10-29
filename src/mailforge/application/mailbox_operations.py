@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import imaplib
 import ipaddress
 import json
 from datetime import UTC, datetime
@@ -192,62 +193,58 @@ class MailboxOperationsService:
             configuration={"account_ref": account_ref},
         )
         try:
-            state = source.mailbox_state(mailbox)
-            self.store.upsert_inbound_mailbox(
-                account_ref=account_ref,
-                source_ref=source_ref,
-                mailbox=mailbox,
-                capabilities=tuple(state.get("capabilities", ())),
-                readonly=not bool(account["inbound"].get("mutation_enabled", False)),
-                mutation_enabled=bool(account["inbound"].get("mutation_enabled", False)),
-                uidvalidity=str(state["uidvalidity"]),
-                uidnext=str(state["uidnext"]) if state.get("uidnext") is not None else None,
-                total_count=state.get("total_count"),
-                unseen_count=state.get("unseen_count"),
-                last_sync_status="running",
-                last_sync_error=None,
-            )
             report = self.inbound.ingest(source, batch_limit=batch_limit, retain_raw=retain_raw)
-            self.store.upsert_inbound_mailbox(
-                account_ref=account_ref,
-                source_ref=source_ref,
-                mailbox=mailbox,
-                capabilities=tuple(source.last_capabilities),
-                readonly=not bool(account["inbound"].get("mutation_enabled", False)),
-                mutation_enabled=bool(account["inbound"].get("mutation_enabled", False)),
-                uidvalidity=str(state["uidvalidity"]),
-                last_sync_at=_now(),
-                last_sync_status="completed",
-                last_sync_error=None,
-            )
-            self.store.update_provider_inbound_state(
-                account_ref,
-                last_sync_at=_now(),
-                last_sync_status="completed",
-                last_sync_error=None,
-                capabilities=tuple(source.last_capabilities),
-            )
+            if self.store.is_latest_inbound_run(report.run_id, source_ref):
+                state = source.mailbox_state(mailbox)
+                self.store.upsert_inbound_mailbox(
+                    account_ref=account_ref,
+                    source_ref=source_ref,
+                    mailbox=mailbox,
+                    capabilities=tuple(source.last_capabilities),
+                    readonly=not bool(account["inbound"].get("mutation_enabled", False)),
+                    mutation_enabled=bool(account["inbound"].get("mutation_enabled", False)),
+                    uidvalidity=str(state["uidvalidity"]),
+                    last_sync_at=_now(),
+                    last_sync_status="completed",
+                    last_sync_error=None,
+                    run_id=report.run_id,
+                )
+                self.store.update_provider_inbound_state(
+                    account_ref,
+                    last_sync_at=_now(),
+                    last_sync_status="completed",
+                    last_sync_error=None,
+                    capabilities=tuple(source.last_capabilities),
+                    source_ref=source_ref,
+                    run_id=report.run_id,
+                )
             return report
-        except CursorInvalidated:
-            self.store.upsert_inbound_mailbox(
-                account_ref=account_ref,
-                source_ref=source_ref,
-                mailbox=mailbox,
-                last_sync_at=_now(),
-                last_sync_status="uidvalidity_changed",
-                last_sync_error="mailbox identity changed; resynchronization is required",
-            )
+        except CursorInvalidated as error:
+            run_id = getattr(error, "inbound_run_id", None)
+            if run_id is not None and self.store.is_latest_inbound_run(run_id, source_ref):
+                self.store.upsert_inbound_mailbox(
+                    account_ref=account_ref,
+                    source_ref=source_ref,
+                    mailbox=mailbox,
+                    last_sync_at=_now(),
+                    last_sync_status="uidvalidity_changed",
+                    last_sync_error="mailbox identity changed; resynchronization is required",
+                    run_id=run_id,
+                )
             raise
         except Exception as error:
             detail = type(error).__name__
-            self.store.upsert_inbound_mailbox(
-                account_ref=account_ref,
-                source_ref=source_ref,
-                mailbox=mailbox,
-                last_sync_at=_now(),
-                last_sync_status="failed",
-                last_sync_error=detail,
-            )
+            run_id = getattr(error, "inbound_run_id", None)
+            if run_id is not None and self.store.is_latest_inbound_run(run_id, source_ref):
+                self.store.upsert_inbound_mailbox(
+                    account_ref=account_ref,
+                    source_ref=source_ref,
+                    mailbox=mailbox,
+                    last_sync_at=_now(),
+                    last_sync_status="failed",
+                    last_sync_error=detail,
+                    run_id=run_id,
+                )
             raise
 
     def execute_action(
@@ -300,11 +297,6 @@ class MailboxOperationsService:
                 "UID identity does not match the selected message",
                 "identity_mismatch",
             )
-        with self.store.connect() as connection:
-            existing = connection.execute(
-                "SELECT id FROM inbound_mailbox_actions WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
         request = self.inbound_operations.request_mailbox_action(
             source_ref,
             action=action,
@@ -313,8 +305,43 @@ class MailboxOperationsService:
             message_id=message_id,
             target_folder=target_folder,
         )
-        if existing:
-            if request.get("action_state") == "requested":
+        if request.get("_idempotency_reused"):
+            if (
+                request.get("source_ref") != source_ref
+                or request.get("action") != action
+                or request.get("message_id") != message_id
+                or request.get("target_folder") != target_folder
+                or request.get("authorization_ref") != authorization_ref
+                or (request.get("uid") is not None and request.get("uid") != uid)
+                or (
+                    request.get("uidvalidity") is not None
+                    and request.get("uidvalidity") != uidvalidity
+                )
+                or (
+                    request.get("expected_state")
+                    and tuple(json.loads(request["expected_state"]).get("flags", ()))
+                    != tuple(flags)
+                )
+            ):
+                raise MailboxOperationsError(
+                    "idempotency key is bound to a different mailbox action",
+                    "idempotency_conflict",
+                )
+            if request.get("action_state") in {"requested", "validated", "queued"} and (
+                not request.get("uid")
+                or not request.get("uidvalidity")
+                or not request.get("expected_state")
+            ):
+                raise MailboxOperationsError(
+                    "idempotency key belongs to an incomplete action request",
+                    "idempotency_incomplete",
+                )
+            if request.get("action_state") in {
+                "requested",
+                "validated",
+                "queued",
+                "in_progress",
+            }:
                 request = self.store.transition_inbound_mailbox_action(
                     request["id"],
                     action_state="requires_review",
@@ -324,6 +351,7 @@ class MailboxOperationsService:
                     ),
                 )
             request["events"] = self.store.inbound_action_events(request["id"])
+            request.pop("_idempotency_reused", None)
             return request
         if request.get("action_state") in {
             "confirmed",
@@ -333,6 +361,7 @@ class MailboxOperationsService:
             "requires_review",
         }:
             request["events"] = self.store.inbound_action_events(request["id"])
+            request.pop("_idempotency_reused", None)
             return request
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
@@ -343,51 +372,139 @@ class MailboxOperationsService:
                     row["folder"] or "INBOX",
                     uidvalidity,
                     uid,
-                    json.dumps({"flags": list(flags)}),
+                    json.dumps(
+                        {
+                            "action": action,
+                            "flags": list(flags),
+                            "target_folder": target_folder,
+                        }
+                    ),
                     request["id"],
                 ),
             )
-        self.store.transition_inbound_mailbox_action(request["id"], action_state="validated")
+        if self.store.claim_inbound_mailbox_action(request["id"]) is None:
+            current = self.action(request["id"])
+            return current
         self.store.transition_inbound_mailbox_action(request["id"], action_state="queued")
         source = self._source(account_ref, row["folder"] or "INBOX", resolver)
+        target_uidvalidity = None
+        mutation_started = False
         try:
             current = source.mailbox_state(row["folder"] or "INBOX")
             if str(current["uidvalidity"]) != uidvalidity:
                 raise CursorInvalidated("UIDVALIDITY changed before mailbox action")
+            if action in {"copy", "move", "archive"}:
+                if not target_folder:
+                    raise MailboxOperationsError(
+                        "target folder is required", "target_folder_required"
+                    )
+                target_state = source.mailbox_state(target_folder)
+                target_uidvalidity = str(target_state["uidvalidity"])
+                with self.store.transaction(immediate=True) as connection:
+                    connection.execute(
+                        "UPDATE inbound_mailbox_actions SET expected_state=? WHERE id=?",
+                        (
+                            json.dumps(
+                                {
+                                    "action": action,
+                                    "flags": list(flags),
+                                    "target_folder": target_folder,
+                                    "target_uidvalidity": target_uidvalidity,
+                                }
+                            ),
+                            request["id"],
+                        ),
+                    )
             self.store.transition_inbound_mailbox_action(
                 request["id"],
                 action_state="in_progress",
                 attempt_count=1,
                 remote_command=f"UID {action.upper()} {uid}",
             )
+            mutation_started = True
             result = source.mutate(
                 mailbox_name=row["folder"] or "INBOX",
                 uid=uid,
                 action=action,
                 flags=flags,
                 target_folder=target_folder,
+                expected_uidvalidity=uidvalidity,
             )
+            if result.get("target_uid") is not None:
+                expected = json.loads(
+                    self.inbound_operations.mailbox_action(request["id"])["expected_state"]
+                    or "{}"
+                )
+                expected["target_uid"] = result["target_uid"]
+                with self.store.transaction(immediate=True) as connection:
+                    connection.execute(
+                        "UPDATE inbound_mailbox_actions SET expected_state=? WHERE id=?",
+                        (json.dumps(expected), request["id"]),
+                    )
             observed_flags = (
-                source.flags_for(row["folder"] or "INBOX", uid)
+                source.flags_for(
+                    row["folder"] or "INBOX",
+                    uid,
+                    expected_uidvalidity=uidvalidity,
+                )
                 if action in {"mark_read", "mark_unread", "flag", "unflag"}
-                else flags
+                else ()
             )
-            self.store.update_inbound_message_remote_state(
-                message_id,
-                flags=observed_flags,
-                state="confirmed"
-                if action in {"mark_read", "mark_unread", "flag", "unflag"}
-                else action,
-                observed_at=_now(),
+            postcondition = self._postcondition(
+                source,
+                action=action,
+                mailbox=row["folder"] or "INBOX",
+                uid=uid,
+                message_id=row["message_id"],
+                content_hash=row["content_hash"],
+                target_folder=target_folder,
+                expected_uidvalidity=uidvalidity,
+                expected_target_uidvalidity=target_uidvalidity,
+                target_uid=result.get("target_uid"),
+                flags=flags,
+                observed_flags=observed_flags,
             )
-            result_row = self.store.transition_inbound_mailbox_action(
-                request["id"],
-                action_state="confirmed",
-                status="applied",
-                observed_state=json.dumps({"flags": list(observed_flags), "result": result}),
-                response_detail="loopback fixture command confirmed",
-                reconciled_at=_now(),
-            )
+            if not postcondition["satisfied"]:
+                result_row = self.store.transition_inbound_mailbox_action(
+                    request["id"],
+                    action_state="requires_review",
+                    status="ambiguous",
+                    observed_state=json.dumps(postcondition),
+                    response_detail=(
+                        "remote command completed but its requested postcondition was not observed"
+                    ),
+                )
+            else:
+                self.store.update_inbound_message_remote_state(
+                    message_id,
+                    flags=observed_flags,
+                    state="confirmed"
+                    if action in {"mark_read", "mark_unread", "flag", "unflag"}
+                    else action,
+                    observed_at=_now(),
+                )
+                if action in {"move", "archive"} and target_folder and result.get("target_uid"):
+                    with self.store.transaction(immediate=True) as connection:
+                        connection.execute(
+                            "UPDATE inbound_messages SET source_ref=?, folder=?, "
+                            "source_identity=?, remote_uidvalidity=?, remote_uid=? WHERE id=?",
+                            (
+                                self.source_ref(account_ref, target_folder),
+                                target_folder,
+                                f"{target_uidvalidity}:{result['target_uid']}",
+                                target_uidvalidity,
+                                result["target_uid"],
+                                message_id,
+                            ),
+                        )
+                result_row = self.store.transition_inbound_mailbox_action(
+                    request["id"],
+                    action_state="confirmed",
+                    status="applied",
+                    observed_state=json.dumps({"flags": list(observed_flags), "result": result}),
+                    response_detail="loopback fixture command confirmed",
+                    reconciled_at=_now(),
+                )
         except CursorInvalidated as error:
             result_row = self.store.transition_inbound_mailbox_action(
                 request["id"],
@@ -395,7 +512,7 @@ class MailboxOperationsService:
                 status="ambiguous",
                 response_detail=str(error),
             )
-        except (TimeoutError, ConnectionError, OSError) as error:
+        except (imaplib.IMAP4.abort, TimeoutError, ConnectionError, OSError) as error:
             result_row = self.store.transition_inbound_mailbox_action(
                 request["id"],
                 action_state="ambiguous",
@@ -403,16 +520,98 @@ class MailboxOperationsService:
                 response_detail=type(error).__name__,
             )
         except SourceError as error:
-            state = "refused" if "not supported" in str(error).lower() else "failed"
+            detail = str(error).lower()
+            state = (
+                "refused"
+                if (
+                    "not supported" in detail
+                    or "not advertised" in detail
+                    or "unsupported imap flag" in detail
+                )
+                else "ambiguous"
+                if mutation_started
+                else "failed"
+            )
             result_row = self.store.transition_inbound_mailbox_action(
                 request["id"],
                 action_state=state,
-                status="failed" if state == "failed" else "canceled",
+                status=(
+                    "ambiguous"
+                    if state == "ambiguous"
+                    else "failed"
+                    if state == "failed"
+                    else "canceled"
+                ),
                 response_detail=str(error),
             )
         result = dict(result_row)
         result["events"] = self.store.inbound_action_events(request["id"])
         return result
+
+    @staticmethod
+    def _postcondition(
+        source,
+        *,
+        action: str,
+        mailbox: str,
+        uid: str,
+        message_id: str | None,
+        content_hash: str | None,
+        target_folder: str | None,
+        expected_uidvalidity: str | None,
+        expected_target_uidvalidity: str | None,
+        target_uid: str | None,
+        flags: tuple[str, ...],
+        observed_flags: tuple[str, ...],
+    ) -> dict[str, Any]:
+        observed = set(observed_flags)
+        if action == "mark_read":
+            satisfied = r"\Seen" in observed
+        elif action == "mark_unread":
+            satisfied = r"\Seen" not in observed
+        elif action == "flag":
+            satisfied = set(flags).issubset(observed)
+        elif action == "unflag":
+            satisfied = not set(flags).intersection(observed)
+        elif action == "copy":
+            target_match, _, target_count = source.message_id_present(
+                target_folder or "",
+                message_id,
+                expected_uidvalidity=expected_target_uidvalidity,
+                content_hash=content_hash,
+                expected_uid=target_uid,
+            )
+            satisfied = bool(target_folder and target_uid and target_match and target_count == 1)
+        elif action in {"move", "archive"}:
+            target_match, _, target_count = source.message_id_present(
+                target_folder or "",
+                message_id,
+                expected_uidvalidity=expected_target_uidvalidity,
+                content_hash=content_hash,
+                expected_uid=target_uid,
+            )
+            source_match, _, source_count = source.message_id_present(
+                mailbox,
+                message_id,
+                expected_uidvalidity=expected_uidvalidity,
+                content_hash=content_hash,
+            )
+            satisfied = bool(
+                target_folder
+                and target_uid
+                and target_match
+                and target_count == 1
+                and not source_match
+                and source_count == 0
+            )
+        else:
+            satisfied = False
+        return {
+            "satisfied": satisfied,
+            "action": action,
+            "flags": sorted(observed),
+            "target_folder": target_folder,
+        }
 
     def action(self, action_id: str) -> dict[str, Any]:
         result = self.inbound_operations.mailbox_action(action_id)
@@ -423,7 +622,7 @@ class MailboxOperationsService:
         self, action_id: str, *, resolver: CredentialResolver | None = None
     ) -> dict[str, Any]:
         action = self.action(action_id)
-        if action.get("action_state") not in {"ambiguous", "requires_review"}:
+        if action.get("action_state") not in {"in_progress", "ambiguous", "requires_review"}:
             raise MailboxOperationsError(
                 "only ambiguous or review-required actions may be reconciled",
                 "reconciliation_not_required",
@@ -437,8 +636,31 @@ class MailboxOperationsService:
             raise MailboxOperationsError(
                 "UIDVALIDITY changed; action remains unresolved", "uidvalidity_changed"
             )
-        observed_flags = source.flags_for(action["mailbox"], action["uid"])
-        if action["action"] in {"mark_read", "mark_unread", "flag", "unflag"}:
+        observed_flags = (
+            source.flags_for(
+                action["mailbox"],
+                action["uid"],
+                expected_uidvalidity=str(action["uidvalidity"]),
+            )
+            if action["action"] in {"mark_read", "mark_unread", "flag", "unflag"}
+            else ()
+        )
+        expected = json.loads(action.get("expected_state") or "{}")
+        postcondition = self._postcondition(
+            source,
+            action=action["action"],
+            mailbox=action["mailbox"],
+            uid=action["uid"],
+            message_id=self.store.get_inbound_message(action["message_id"])["message_id"],
+            content_hash=self.store.get_inbound_message(action["message_id"])["content_hash"],
+            target_folder=action.get("target_folder") or expected.get("target_folder"),
+            expected_uidvalidity=str(action["uidvalidity"]),
+            expected_target_uidvalidity=expected.get("target_uidvalidity"),
+            target_uid=expected.get("target_uid"),
+            flags=tuple(expected.get("flags", ())),
+            observed_flags=observed_flags,
+        )
+        if postcondition["satisfied"]:
             self.store.update_inbound_message_remote_state(
                 action["message_id"],
                 flags=observed_flags,
@@ -449,17 +671,34 @@ class MailboxOperationsService:
                 action_id,
                 action_state="confirmed",
                 status="applied",
-                observed_state=json.dumps({"flags": list(observed_flags)}),
+                observed_state=json.dumps(postcondition),
                 response_detail="loopback fixture state reconciled",
                 reconciled_at=_now(),
             )
+            if action["action"] in {"move", "archive"} and expected.get("target_uid"):
+                target = action.get("target_folder") or expected.get("target_folder")
+                with self.store.transaction(immediate=True) as connection:
+                    connection.execute(
+                        "UPDATE inbound_messages SET source_ref=?, folder=?, "
+                        "source_identity=?, remote_uidvalidity=?, remote_uid=? WHERE id=?",
+                        (
+                            self.source_ref(action["account_ref"], target),
+                            target,
+                            f"{expected.get('target_uidvalidity')}:{expected.get('target_uid')}",
+                            expected.get("target_uidvalidity"),
+                            expected.get("target_uid"),
+                            action["message_id"],
+                        ),
+                    )
         else:
             result = self.store.transition_inbound_mailbox_action(
                 action_id,
                 action_state="requires_review",
                 status="ambiguous",
-                observed_state=json.dumps({"source_presence": True, "flags": list(observed_flags)}),
-                response_detail="source state observed; target-folder outcome remains unverified",
+                observed_state=json.dumps(postcondition),
+                response_detail=(
+                    "remote state was observed but the requested postcondition was not verified"
+                ),
                 reconciled_at=_now(),
             )
         result = dict(result)
