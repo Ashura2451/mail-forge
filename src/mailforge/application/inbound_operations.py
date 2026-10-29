@@ -88,7 +88,11 @@ class InboundOperations:
     ):
         self.store = store
         self.message_studio = message_studio or MessageStudioService(store)
-        self.programmable = programmable or getattr(self.message_studio, "programmable", None) or ProgrammableOperationsService(store)
+        self.programmable = (
+            programmable
+            or getattr(self.message_studio, "programmable", None)
+            or ProgrammableOperationsService(store)
+        )
 
     @staticmethod
     def validate_rule(definition: Mapping[str, Any]) -> dict[str, Any]:
@@ -122,7 +126,9 @@ class InboundOperations:
                     raise InboundOperationsError("extract action contains an unsupported field")
             if action["type"] == "function":
                 if not action.get("function_id") or not action.get("revision_id"):
-                    raise InboundOperationsError("function actions require a pinned function revision")
+                    raise InboundOperationsError(
+                        "function actions require a pinned function revision"
+                    )
                 if not action.get("content_hash"):
                     raise InboundOperationsError("function actions require content_hash")
             if action["type"] in {"prepare_reply", "prepare_forward"}:
@@ -355,7 +361,10 @@ class InboundOperations:
                         try:
                             revision = self.programmable.get_revision(action["revision_id"])
                             if revision["content_hash"] != action["content_hash"]:
-                                raise InboundOperationsError("function revision content hash does not match", "reference_not_found")
+                                raise InboundOperationsError(
+                                    "function revision content hash does not match",
+                                    "reference_not_found",
+                                )
                             execution = self.programmable.execute(
                                 action["function_id"],
                                 context,
@@ -431,8 +440,8 @@ class InboundOperations:
     def prepare_draft(
         self, message_id: str, kind: str, *, body: str = "", account_ref: str | None = None
     ) -> dict[str, Any]:
-        if kind not in {"reply", "forward"}:
-            raise InboundOperationsError("draft kind must be reply or forward")
+        if kind not in {"reply", "reply_all", "forward"}:
+            raise InboundOperationsError("draft kind must be reply, reply_all, or forward")
         row = self.store.get_inbound_message(message_id)
         with self.store.connect() as connection:
             existing = connection.execute(
@@ -440,7 +449,7 @@ class InboundOperations:
             ).fetchone()
         if existing:
             return self.draft_detail(existing["id"])
-        prefix = "Re: " if kind == "reply" else "Fwd: "
+        prefix = "Fwd: " if kind == "forward" else "Re: "
         subject = row["subject"] or "No subject"
         if not subject.lower().startswith(prefix.lower()):
             subject = prefix + subject
@@ -451,6 +460,18 @@ class InboundOperations:
         document = MessageStudioService.blank_document(f"Inbound {kind}: {subject}")
         document["subject"] = subject
         document["blocks"] = [{"type": "text", "text": content or "Write your reply here."}]
+        recipients = json.loads(row["recipients_json"] or "[]")
+        reply_to = (json.loads(row["headers_json"] or "{}").get("reply-to") or [None])[0]
+        if kind == "reply":
+            document["to"] = [reply_to or row["sender"]] if (reply_to or row["sender"]) else []
+            document["cc"] = []
+        elif kind == "reply_all":
+            primary = reply_to or row["sender"]
+            document["to"] = [primary] if primary else []
+            document["cc"] = [value for value in recipients if value != primary]
+        else:
+            document["to"] = []
+            document["cc"] = []
         created = self.message_studio.create_document(document["name"], document=document)
         revision_id = created["current_draft_revision_id"]
         draft_id = str(uuid.uuid4())
@@ -460,6 +481,11 @@ class InboundOperations:
             "message_id_header": row["message_id"],
             "in_reply_to": row["in_reply_to"],
             "references": json.loads(row["references_json"] or "[]"),
+            "reply_mode": kind,
+            "recipients": recipients,
+            "to": document["to"],
+            "cc": document["cc"],
+            "headers": json.loads(row["headers_json"] or "{}"),
         }
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
@@ -540,14 +566,14 @@ class InboundOperations:
         target_folder: str | None = None,
     ) -> dict[str, Any]:
         if (
-            action not in {"mark_read", "move", "copy"}
+            action not in {"mark_read", "mark_unread", "flag", "unflag", "move", "copy", "archive"}
             or not authorization_ref.strip()
             or not idempotency_key.strip()
         ):
             raise InboundOperationsError(
                 "mailbox action, authorization, and idempotency key are required"
             )
-        if action in {"move", "copy"} and not target_folder:
+        if action in {"move", "copy", "archive"} and not target_folder:
             raise InboundOperationsError("move and copy require target_folder")
         _assert_no_secrets(
             {"authorization_ref": authorization_ref, "target_folder": target_folder or ""},
@@ -561,7 +587,9 @@ class InboundOperations:
                 (idempotency_key,),
             ).fetchone()
             if existing:
-                return _decode(existing)
+                result = _decode(existing)
+                result["_idempotency_reused"] = True
+                return result
             if (
                 connection.execute(
                     "SELECT 1 FROM inbound_sources WHERE ref = ?", (source_ref,)
@@ -591,7 +619,14 @@ class InboundOperations:
                 "inbound_mailbox_action_requested",
                 {"action_id": action_id, "action": action, "authorization_ref": authorization_ref},
             )
-        return self.mailbox_action(action_id)
+        self.store.record_inbound_action_event(
+            action_id,
+            "requested",
+            {"action": action, "source_ref": source_ref},
+        )
+        result = self.mailbox_action(action_id)
+        result["_idempotency_reused"] = False
+        return result
 
     def mailbox_action(self, action_id: str) -> dict[str, Any]:
         with self.store.connect() as connection:
@@ -600,7 +635,9 @@ class InboundOperations:
             ).fetchone()
         if row is None:
             raise InboundOperationsError("mailbox action was not found", "action_not_found")
-        return _decode(row)
+        result = _decode(row)
+        result["events"] = self.store.inbound_action_events(action_id)
+        return result
 
     def search(
         self,
@@ -611,6 +648,14 @@ class InboundOperations:
         subject: str | None = None,
         classification: str | None = None,
         source_ref: str | None = None,
+        account_ref: str | None = None,
+        folder: str | None = None,
+        read: bool | None = None,
+        flagged: bool | None = None,
+        has_attachment: bool | None = None,
+        thread_key: str | None = None,
+        received_after: str | None = None,
+        received_before: str | None = None,
         processed: bool | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -627,6 +672,9 @@ class InboundOperations:
             ("m.sender", sender),
             ("m.subject", subject),
             ("m.source_ref", source_ref),
+            ("m.account_ref", account_ref),
+            ("m.folder", folder),
+            ("m.thread_key", thread_key),
         ):
             if value:
                 clauses.append(f"lower(COALESCE({column},'')) LIKE lower(?)")
@@ -637,6 +685,27 @@ class InboundOperations:
         if classification:
             clauses.append("c.kind = ?")
             params.append(classification)
+        if read is not None:
+            clauses.append(
+                "m.remote_flags_json LIKE ?" if read else "m.remote_flags_json NOT LIKE ?"
+            )
+            params.append("%Seen%")
+        if flagged is not None:
+            clauses.append(
+                "m.remote_flags_json LIKE ?" if flagged else "m.remote_flags_json NOT LIKE ?"
+            )
+            params.append("%Flagged%")
+        if has_attachment is not None:
+            attachment_clause = (
+                "EXISTS (SELECT 1 FROM inbound_attachments a WHERE a.message_id = m.id)"
+            )
+            clauses.append(attachment_clause if has_attachment else f"NOT {attachment_clause}")
+        if received_after:
+            clauses.append("m.received_at >= ?")
+            params.append(received_after)
+        if received_before:
+            clauses.append("m.received_at < ?")
+            params.append(received_before)
         if processed is not None:
             clauses.append("m.processed_at IS " + ("NOT NULL" if processed else "NULL"))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
@@ -657,6 +726,26 @@ class InboundOperations:
                 item["correlations"] = [_decode(correlation) for correlation in correlations]
                 items.append(item)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def conversation(self, message_id: str, *, limit: int = 100) -> dict[str, Any]:
+        message = self.store.get_inbound_message(message_id)
+        thread_key = message["thread_key"]
+        if not thread_key:
+            return {
+                "thread_key": None,
+                "confidence": "unthreaded",
+                "items": [self.detail(message_id)],
+            }
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM inbound_messages WHERE thread_key = ? ORDER BY COALESCE(received_at, acquired_at), id LIMIT ?",
+                (thread_key, max(1, min(limit, MAX_LIMIT))),
+            ).fetchall()
+        return {
+            "thread_key": thread_key,
+            "confidence": "header_evidence",
+            "items": [self.detail(row["id"]) for row in rows],
+        }
 
     def detail(self, message_id: str) -> dict[str, Any]:
         item = _decode(self.store.get_inbound_message(message_id))
@@ -689,4 +778,6 @@ class InboundOperations:
         item["rule_runs"] = [_decode(row) for row in runs]
         item["drafts"] = [_decode(row) for row in drafts]
         item["correlations"] = [_decode(row) for row in correlations]
+        for action in item["actions"]:
+            action["events"] = self.store.inbound_action_events(action["id"])
         return item

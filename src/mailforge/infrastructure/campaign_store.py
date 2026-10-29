@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1519,6 +1519,43 @@ CREATE INDEX IF NOT EXISTS idx_integration_deliveries_subscription
 ON integration_webhook_deliveries(subscription_id, created_at DESC);
 """
 
+MIGRATION_23_SQL = """
+CREATE TABLE IF NOT EXISTS inbound_mailboxes (
+    id TEXT PRIMARY KEY,
+    account_ref TEXT NOT NULL REFERENCES provider_accounts(ref) ON DELETE CASCADE,
+    source_ref TEXT NOT NULL REFERENCES inbound_sources(ref) ON DELETE CASCADE,
+    mailbox TEXT NOT NULL,
+    parent_mailbox TEXT,
+    delimiter TEXT,
+    flags_json TEXT NOT NULL DEFAULT '[]',
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    selectable INTEGER NOT NULL DEFAULT 1 CHECK(selectable IN (0, 1)),
+    readonly INTEGER NOT NULL DEFAULT 1 CHECK(readonly IN (0, 1)),
+    mutation_enabled INTEGER NOT NULL DEFAULT 0 CHECK(mutation_enabled IN (0, 1)),
+    uidvalidity TEXT,
+    uidnext TEXT,
+    total_count INTEGER,
+    unseen_count INTEGER,
+    last_sync_at TEXT,
+    last_sync_status TEXT,
+    last_sync_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(account_ref, mailbox)
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_mailboxes_account
+ON inbound_mailboxes(account_ref, mailbox);
+CREATE TABLE IF NOT EXISTS inbound_action_events (
+    id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL REFERENCES inbound_mailbox_actions(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_action_events_action
+ON inbound_action_events(action_id, occurred_at);
+"""
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1841,6 +1878,13 @@ class CampaignStore:
                     (22, utc_now()),
                 )
                 current = 22
+            if current < 23:
+                self._apply_migration_23(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (23, utc_now()),
+                )
+                current = 23
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2073,6 +2117,120 @@ class CampaignStore:
                 """
             )
         for statement in MIGRATION_22_SQL.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_23(connection: sqlite3.Connection) -> None:
+        inbound_settings = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_inbound_settings)")
+        }
+        for column, definition in (
+            ("sync_enabled", "INTEGER NOT NULL DEFAULT 1 CHECK(sync_enabled IN (0, 1))"),
+            ("mutation_enabled", "INTEGER NOT NULL DEFAULT 0 CHECK(mutation_enabled IN (0, 1))"),
+            ("last_sync_at", "TEXT"),
+            ("last_sync_status", "TEXT"),
+            ("last_sync_error", "TEXT"),
+            ("capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ):
+            if column not in inbound_settings:
+                connection.execute(
+                    f"ALTER TABLE provider_inbound_settings ADD COLUMN {column} {definition}"
+                )
+
+        message_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(inbound_messages)")
+        }
+        for column, definition in (
+            ("remote_flags_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("remote_state", "TEXT NOT NULL DEFAULT 'observed'"),
+            ("last_remote_seen_at", "TEXT"),
+            ("remote_uidvalidity", "TEXT"),
+            ("remote_uid", "TEXT"),
+        ):
+            if column not in message_columns:
+                connection.execute(
+                    f"ALTER TABLE inbound_messages ADD COLUMN {column} {definition}"
+                )
+
+        connection.execute("ALTER TABLE inbound_mailbox_actions RENAME TO inbound_mailbox_actions_legacy")
+        connection.execute(
+            """
+            CREATE TABLE inbound_mailbox_actions (
+                id TEXT PRIMARY KEY,
+                source_ref TEXT NOT NULL REFERENCES inbound_sources(ref),
+                message_id TEXT REFERENCES inbound_messages(id) ON DELETE SET NULL,
+                action TEXT NOT NULL CHECK(action IN ('mark_read', 'mark_unread', 'flag', 'unflag', 'move', 'copy', 'archive')),
+                target_folder TEXT,
+                authorization_ref TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested', 'applied', 'failed', 'ambiguous', 'canceled')),
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                account_ref TEXT REFERENCES provider_accounts(ref),
+                mailbox TEXT,
+                uidvalidity TEXT,
+                uid TEXT,
+                expected_state TEXT,
+                observed_state TEXT,
+                remote_command TEXT,
+                response_detail TEXT,
+                action_state TEXT NOT NULL DEFAULT 'requested',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                reconciled_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO inbound_mailbox_actions(
+                id,source_ref,message_id,action,target_folder,authorization_ref,idempotency_key,
+                status,error_message,created_at,updated_at,action_state
+            )
+            SELECT id,source_ref,message_id,action,target_folder,authorization_ref,idempotency_key,
+                status,error_message,created_at,updated_at,
+                CASE status
+                    WHEN 'applied' THEN 'confirmed'
+                    WHEN 'failed' THEN 'failed'
+                    WHEN 'canceled' THEN 'refused'
+                    ELSE 'requested'
+                END
+            FROM inbound_mailbox_actions_legacy
+            """
+        )
+        connection.execute("DROP TABLE inbound_mailbox_actions_legacy")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inbound_mailbox_actions_source "
+            "ON inbound_mailbox_actions(source_ref, created_at DESC)"
+        )
+
+        connection.execute("ALTER TABLE inbound_drafts RENAME TO inbound_drafts_legacy")
+        connection.execute(
+            """
+            CREATE TABLE inbound_drafts (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL REFERENCES inbound_messages(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('reply', 'reply_all', 'forward')),
+                document_id TEXT NOT NULL REFERENCES message_documents(id),
+                revision_id TEXT NOT NULL REFERENCES message_revisions(id),
+                account_ref TEXT,
+                subject TEXT NOT NULL,
+                provenance_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'ready', 'sent', 'canceled')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(message_id, kind)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO inbound_drafts SELECT * FROM inbound_drafts_legacy"
+        )
+        connection.execute("DROP TABLE inbound_drafts_legacy")
+        for statement in MIGRATION_23_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
@@ -2322,6 +2480,9 @@ class CampaignStore:
         result = dict(row)
         if inbound is not None:
             result["inbound"] = dict(inbound)
+            for key in ("read_only", "sync_enabled", "mutation_enabled"):
+                if key in result["inbound"]:
+                    result["inbound"][key] = bool(result["inbound"][key])
         result["profile_enabled"] = bool(result["profile_enabled"])
         result["outbound_enabled"] = bool(result["outbound_enabled"])
         result["inbound_enabled"] = bool(result["inbound_enabled"])
@@ -2361,7 +2522,14 @@ class CampaignStore:
         return self.get_provider_account(ref)
 
     def upsert_provider_inbound_settings(
-        self, ref: str, *, mailbox: str, read_only: bool = True, max_fetch: int = 100
+        self,
+        ref: str,
+        *,
+        mailbox: str,
+        read_only: bool = True,
+        max_fetch: int = 100,
+        sync_enabled: bool = True,
+        mutation_enabled: bool = False,
     ) -> dict[str, Any]:
         _assert_safe_reference(ref, "provider_inbound.account_ref")
         if not mailbox.strip() or max_fetch <= 0:
@@ -2375,10 +2543,70 @@ class CampaignStore:
             ):
                 raise KeyError(f"provider account not found: {ref}")
             connection.execute(
-                "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_ref) DO UPDATE SET mailbox=excluded.mailbox, "
-                "read_only=excluded.read_only, max_fetch=excluded.max_fetch, updated_at=excluded.updated_at",
-                (ref, mailbox.strip(), int(read_only), max_fetch, utc_now()),
+                "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, sync_enabled, mutation_enabled, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_ref) DO UPDATE SET mailbox=excluded.mailbox, "
+                "read_only=excluded.read_only, max_fetch=excluded.max_fetch, sync_enabled=excluded.sync_enabled, "
+                "mutation_enabled=excluded.mutation_enabled, updated_at=excluded.updated_at",
+                (
+                    ref,
+                    mailbox.strip(),
+                    int(read_only),
+                    max_fetch,
+                    int(sync_enabled),
+                    int(mutation_enabled),
+                    utc_now(),
+                ),
+            )
+        return self.get_provider_account(ref)["inbound"]
+
+    def update_provider_inbound_state(
+        self,
+        ref: str,
+        *,
+        sync_enabled: bool | None = None,
+        mutation_enabled: bool | None = None,
+        last_sync_at: str | None = None,
+        last_sync_status: str | None = None,
+        last_sync_error: str | None = None,
+        capabilities: tuple[str, ...] | None = None,
+        source_ref: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist mailbox controls and sanitized synchronization evidence."""
+
+        _assert_safe_reference(ref, "provider_inbound.account_ref")
+        if last_sync_error:
+            _assert_no_secrets({"last_sync_error": last_sync_error}, "provider_inbound_state")
+        assignments: list[str] = []
+        values: list[Any] = []
+        for column, value in (
+            ("sync_enabled", sync_enabled),
+            ("mutation_enabled", mutation_enabled),
+            ("last_sync_at", last_sync_at),
+            ("last_sync_status", last_sync_status),
+            ("last_sync_error", last_sync_error),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(int(value) if isinstance(value, bool) else value)
+        if capabilities is not None:
+            assignments.append("capabilities_json = ?")
+            values.append(_json(sorted(set(capabilities))))
+        if not assignments:
+            return self.get_provider_account(ref)["inbound"]
+        assignments.append("updated_at = ?")
+        values.extend((utc_now(), ref))
+        with self.transaction(immediate=True) as connection:
+            if run_id is not None and source_ref is not None:
+                latest = connection.execute(
+                    "SELECT id FROM inbound_runs WHERE source_ref=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                    (source_ref,),
+                ).fetchone()
+                if latest is None or latest["id"] != run_id:
+                    return self.get_provider_account(ref)["inbound"]
+            connection.execute(
+                f"UPDATE provider_inbound_settings SET {', '.join(assignments)} WHERE account_ref = ?",
+                values,
             )
         return self.get_provider_account(ref)["inbound"]
 
@@ -4535,6 +4763,17 @@ class CampaignStore:
             ).fetchone()
             if source is None:
                 raise KeyError(f"enabled inbound source not found: {source_ref}")
+            active = connection.execute(
+                "SELECT id FROM inbound_runs WHERE source_ref = ? AND status IN ('running', 'queued') LIMIT 1",
+                (source_ref,),
+            ).fetchone()
+            if active is not None:
+                connection.execute(
+                    "UPDATE inbound_runs SET status='interrupted', finished_at=?, "
+                    "error_message='recovered abandoned inbound synchronization' "
+                    "WHERE id=? AND status IN ('running', 'queued')",
+                    (utc_now(), active["id"]),
+                )
             cursor = connection.execute(
                 "SELECT cursor FROM inbound_cursors WHERE source_ref = ?", (source_ref,)
             ).fetchone()
@@ -4543,6 +4782,27 @@ class CampaignStore:
                 (run_id, source_ref, utc_now(), cursor["cursor"] if cursor else None),
             )
         return run_id, (cursor["cursor"] if cursor else None)
+
+    def latest_inbound_run_status(self, source_ref: str) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM inbound_runs WHERE source_ref=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                (source_ref,),
+            ).fetchone()
+        return row["status"] if row else None
+
+    def is_latest_inbound_run(self, run_id: str | None, source_ref: str | None = None) -> bool:
+        if not run_id:
+            return False
+        with self.connect() as connection:
+            query = "SELECT id FROM inbound_runs"
+            params: tuple[Any, ...] = ()
+            if source_ref is not None:
+                query += " WHERE source_ref = ?"
+                params = (source_ref,)
+            query += " ORDER BY started_at DESC, id DESC LIMIT 1"
+            row = connection.execute(query, params).fetchone()
+        return bool(row and row["id"] == run_id)
 
     def finish_inbound_run(
         self,
@@ -4558,7 +4818,7 @@ class CampaignStore:
         _assert_no_secrets({"error_message": error_message or ""}, "inbound_run")
         with self.transaction(immediate=True) as connection:
             connection.execute(
-                "UPDATE inbound_runs SET finished_at = ?, status = ?, cursor_after = ?, acquired_count = ?, processed_count = ?, failure_count = ?, error_message = ? WHERE id = ?",
+                "UPDATE inbound_runs SET finished_at = ?, status = ?, cursor_after = ?, acquired_count = ?, processed_count = ?, failure_count = ?, error_message = ? WHERE id = ? AND status = 'running'",
                 (
                     utc_now(),
                     status,
@@ -4572,22 +4832,257 @@ class CampaignStore:
             )
 
     def set_inbound_cursor(
-        self, source_ref: str, cursor: str | None, *, uidvalidity: str | None = None
+        self,
+        source_ref: str,
+        cursor: str | None,
+        *,
+        uidvalidity: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         with self.transaction(immediate=True) as connection:
+            if run_id is not None and connection.execute(
+                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                (run_id, source_ref),
+            ).fetchone() is None:
+                raise RuntimeError("inbound synchronization run no longer owns its cursor")
             connection.execute(
                 "INSERT INTO inbound_cursors(source_ref, uidvalidity, cursor, generation, updated_at) VALUES (?, ?, ?, 0, ?) "
                 "ON CONFLICT(source_ref) DO UPDATE SET uidvalidity=excluded.uidvalidity, cursor=excluded.cursor, generation=inbound_cursors.generation + 1, updated_at=excluded.updated_at, last_error=NULL",
                 (source_ref, uidvalidity, cursor, utc_now()),
             )
 
-    def invalidate_inbound_cursor(self, source_ref: str, error: str) -> None:
+    def invalidate_inbound_cursor(
+        self, source_ref: str, error: str, *, run_id: str | None = None
+    ) -> None:
         _assert_no_secrets({"error": error}, "inbound_cursor")
         with self.transaction(immediate=True) as connection:
+            if run_id is not None and connection.execute(
+                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                (run_id, source_ref),
+            ).fetchone() is None:
+                return
             connection.execute(
                 "UPDATE inbound_cursors SET cursor = NULL, generation = generation + 1, last_error = ?, updated_at = ? WHERE source_ref = ?",
                 (error, utc_now(), source_ref),
             )
+
+    def upsert_inbound_mailbox(
+        self,
+        *,
+        account_ref: str,
+        source_ref: str,
+        mailbox: str,
+        parent_mailbox: str | None = None,
+        delimiter: str | None = None,
+        flags: tuple[str, ...] = (),
+        capabilities: tuple[str, ...] = (),
+        selectable: bool = True,
+        readonly: bool = True,
+        mutation_enabled: bool = False,
+        uidvalidity: str | None = None,
+        uidnext: str | None = None,
+        total_count: int | None = None,
+        unseen_count: int | None = None,
+        last_sync_at: str | None = None,
+        last_sync_status: str | None = None,
+        last_sync_error: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        _assert_safe_reference(account_ref, "inbound_mailbox.account_ref")
+        _assert_safe_reference(source_ref, "inbound_mailbox.source_ref")
+        if not mailbox.strip() or len(mailbox) > 240:
+            raise ValueError("mailbox name is invalid")
+        now = utc_now()
+        mailbox_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"inbound-mailbox:{account_ref}:{mailbox}"))
+        with self.transaction(immediate=True) as connection:
+            if run_id is not None:
+                latest = connection.execute(
+                    "SELECT id FROM inbound_runs WHERE source_ref=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                    (source_ref,),
+                ).fetchone()
+                if latest is None or latest["id"] != run_id:
+                    row = connection.execute(
+                        "SELECT * FROM inbound_mailboxes WHERE account_ref = ? AND mailbox = ?",
+                        (account_ref, mailbox),
+                    ).fetchone()
+                    return self._decode_inbound_row(row)
+            connection.execute(
+                """
+                INSERT INTO inbound_mailboxes(
+                    id,account_ref,source_ref,mailbox,parent_mailbox,delimiter,flags_json,
+                    capabilities_json,selectable,readonly,mutation_enabled,uidvalidity,uidnext,
+                    total_count,unseen_count,last_sync_at,last_sync_status,last_sync_error,
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(account_ref, mailbox) DO UPDATE SET
+                    source_ref=excluded.source_ref,parent_mailbox=excluded.parent_mailbox,
+                    delimiter=excluded.delimiter,flags_json=excluded.flags_json,
+                    capabilities_json=excluded.capabilities_json,selectable=excluded.selectable,
+                    readonly=excluded.readonly,mutation_enabled=excluded.mutation_enabled,
+                    uidvalidity=COALESCE(excluded.uidvalidity, inbound_mailboxes.uidvalidity),
+                    uidnext=COALESCE(excluded.uidnext, inbound_mailboxes.uidnext),
+                    total_count=COALESCE(excluded.total_count, inbound_mailboxes.total_count),
+                    unseen_count=COALESCE(excluded.unseen_count, inbound_mailboxes.unseen_count),
+                    last_sync_at=COALESCE(excluded.last_sync_at, inbound_mailboxes.last_sync_at),
+                    last_sync_status=COALESCE(excluded.last_sync_status, inbound_mailboxes.last_sync_status),
+                    last_sync_error=excluded.last_sync_error,updated_at=excluded.updated_at
+                """,
+                (
+                    mailbox_id,
+                    account_ref,
+                    source_ref,
+                    mailbox,
+                    parent_mailbox,
+                    delimiter,
+                    _json(sorted(set(flags))),
+                    _json(sorted(set(capabilities))),
+                    int(selectable),
+                    int(readonly),
+                    int(mutation_enabled),
+                    uidvalidity,
+                    uidnext,
+                    total_count,
+                    unseen_count,
+                    last_sync_at,
+                    last_sync_status,
+                    last_sync_error,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM inbound_mailboxes WHERE account_ref = ? AND mailbox = ?",
+                (account_ref, mailbox),
+            ).fetchone()
+        return self._decode_inbound_row(row)
+
+    @staticmethod
+    def _decode_inbound_row(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            raise KeyError("inbound mailbox record not found")
+        value = dict(row)
+        for key in ("flags_json", "capabilities_json"):
+            if key in value:
+                try:
+                    value[key.removesuffix("_json")] = json.loads(value[key] or "[]")
+                except json.JSONDecodeError:
+                    value[key.removesuffix("_json")] = []
+        for key in ("selectable", "readonly", "mutation_enabled"):
+            if key in value:
+                value[key] = bool(value[key])
+        return value
+
+    def list_inbound_mailboxes(self, account_ref: str) -> list[dict[str, Any]]:
+        _assert_safe_reference(account_ref, "inbound_mailbox.account_ref")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM inbound_mailboxes WHERE account_ref = ? ORDER BY mailbox",
+                (account_ref,),
+            ).fetchall()
+        return [self._decode_inbound_row(row) for row in rows]
+
+    def record_inbound_action_event(
+        self, action_id: str, state: str, detail: dict[str, Any] | None = None
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        _assert_no_secrets(detail or {}, "inbound_action_event")
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO inbound_action_events(id,action_id,state,detail_json,occurred_at) VALUES(?,?,?,?,?)",
+                (event_id, action_id, state, _json(detail or {}), utc_now()),
+            )
+        return event_id
+
+    def transition_inbound_mailbox_action(
+        self,
+        action_id: str,
+        *,
+        action_state: str,
+        status: str | None = None,
+        expected_state: str | None = None,
+        observed_state: str | None = None,
+        remote_command: str | None = None,
+        response_detail: str | None = None,
+        attempt_count: int | None = None,
+        reconciled_at: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {
+            "requested",
+            "validated",
+            "queued",
+            "in_progress",
+            "confirmed",
+            "refused",
+            "ambiguous",
+            "failed",
+            "requires_review",
+        }
+        if action_state not in allowed:
+            raise ValueError("unsupported mailbox action state")
+        if response_detail:
+            _assert_no_secrets({"response_detail": response_detail}, "inbound_action")
+        assignments = ["action_state = ?", "updated_at = ?"]
+        values: list[Any] = [action_state, utc_now()]
+        for column, value in (
+            ("status", status),
+            ("expected_state", expected_state),
+            ("observed_state", observed_state),
+            ("remote_command", remote_command),
+            ("response_detail", response_detail),
+            ("attempt_count", attempt_count),
+            ("reconciled_at", reconciled_at),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(value)
+        values.append(action_id)
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                f"UPDATE inbound_mailbox_actions SET {', '.join(assignments)} WHERE id = ?",
+                values,
+            )
+            row = connection.execute(
+                "SELECT * FROM inbound_mailbox_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"mailbox action not found: {action_id}")
+        self.record_inbound_action_event(action_id, action_state, {"status": status, "detail": response_detail})
+        return dict(row)
+
+    def claim_inbound_mailbox_action(self, action_id: str) -> dict[str, Any] | None:
+        """Atomically claim a newly requested action for one executor."""
+
+        with self.transaction(immediate=True) as connection:
+            update = connection.execute(
+                "UPDATE inbound_mailbox_actions SET action_state='validated', updated_at=? "
+                "WHERE id=? AND action_state='requested'",
+                (utc_now(), action_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM inbound_mailbox_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"mailbox action not found: {action_id}")
+        if update.rowcount != 1:
+            return None
+        self.record_inbound_action_event(action_id, "validated", {"claimed": True})
+        return dict(row)
+
+    def inbound_action_events(self, action_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM inbound_action_events WHERE action_id = ? ORDER BY occurred_at, id",
+                (action_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["detail"] = json.loads(item.pop("detail_json"))
+            except json.JSONDecodeError:
+                pass
+            result.append(item)
+        return result
 
     def acquire_inbound_message(
         self, source: SourceMessage, *, retain_raw: bool = True
@@ -4604,6 +5099,21 @@ class CampaignStore:
                     "SELECT content_hash FROM inbound_messages WHERE id = ?", (existing["id"],)
                 ).fetchone()
                 if stored["content_hash"] == content_hash:
+                    connection.execute(
+                        "UPDATE inbound_messages SET remote_flags_json = ?, last_remote_seen_at = ?, "
+                        "remote_state = 'observed', account_ref = COALESCE(?, account_ref), "
+                        "folder = COALESCE(?, folder), remote_uidvalidity = COALESCE(?, remote_uidvalidity), "
+                        "remote_uid = COALESCE(?, remote_uid) WHERE id = ?",
+                        (
+                            _json(list(source.flags)),
+                            utc_now(),
+                            source.account_ref,
+                            source.mailbox,
+                            source.uidvalidity,
+                            source.uid,
+                            existing["id"],
+                        ),
+                    )
                     return existing["id"], True
                 source_identity = f"{source_identity}:sha256:{content_hash}"
                 changed = connection.execute(
@@ -4616,7 +5126,7 @@ class CampaignStore:
                 uuid.uuid5(uuid.NAMESPACE_URL, f"inbound:{source.source_ref}:{source_identity}")
             )
             connection.execute(
-                "INSERT INTO inbound_messages(id, source_ref, source_identity, content_hash, raw_bytes, raw_retained, size_bytes, received_at, acquired_at, account_ref, folder, retention_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO inbound_messages(id, source_ref, source_identity, content_hash, raw_bytes, raw_retained, size_bytes, received_at, acquired_at, account_ref, folder, retention_state, remote_flags_json, remote_state, last_remote_seen_at, remote_uidvalidity, remote_uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message_id,
                     source.source_ref,
@@ -4627,9 +5137,14 @@ class CampaignStore:
                     len(source.raw_bytes),
                     source.received_at,
                     utc_now(),
-                    source.source_ref if source.mailbox else None,
+                    source.account_ref or (source.source_ref if source.mailbox else None),
                     source.mailbox,
                     "retained" if retain_raw else "released",
+                    _json(list(source.flags)),
+                    "observed",
+                    utc_now() if source.uid else None,
+                    source.uidvalidity,
+                    source.uid,
                 ),
             )
             self.record_event(
@@ -4640,6 +5155,55 @@ class CampaignStore:
                 {"source_ref": source.source_ref, "size_bytes": len(source.raw_bytes)},
             )
         return message_id, False
+
+    def update_inbound_message_remote_state(
+        self,
+        message_id: str,
+        *,
+        flags: tuple[str, ...] | None = None,
+        state: str | None = None,
+        observed_at: str | None = None,
+        source_ref: str | None = None,
+        folder: str | None = None,
+        remote_uidvalidity: str | None = None,
+        remote_uid: str | None = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if flags is not None:
+            assignments.append("remote_flags_json = ?")
+            values.append(_json(sorted(set(flags))))
+        if state is not None:
+            assignments.append("remote_state = ?")
+            values.append(state)
+        if observed_at is not None:
+            assignments.append("last_remote_seen_at = ?")
+            values.append(observed_at)
+        for column, value in (
+            ("source_ref", source_ref),
+            ("folder", folder),
+            ("remote_uidvalidity", remote_uidvalidity),
+            ("remote_uid", remote_uid),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(value)
+        if not assignments:
+            return
+        values.append(message_id)
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                f"UPDATE inbound_messages SET {', '.join(assignments)} WHERE id = ?",
+                values,
+            )
+
+    def set_inbound_thread_key(self, message_id: str, thread_key: str) -> None:
+        _assert_safe_reference(thread_key, "inbound_message.thread_key")
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE inbound_messages SET thread_key = ? WHERE id = ?",
+                (thread_key, message_id),
+            )
 
     def get_inbound_message(self, message_id: str) -> sqlite3.Row:
         with self.connect() as connection:

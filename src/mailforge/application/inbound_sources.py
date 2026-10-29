@@ -6,9 +6,12 @@ import hashlib
 import imaplib
 import mailbox
 import poplib
+import re
 import ssl
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Protocol
 
@@ -34,6 +37,25 @@ class CursorInvalidated(SourceError):
 
 class ExternalSourceDisabled(SourceError):
     pass
+
+
+def _imap_mailbox_argument(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _status_uidvalidity(client: imaplib.IMAP4, mailbox_name: str) -> str:
+    status, data = client.status(mailbox_name, "(UIDVALIDITY)")
+    raw = (
+        data[0].decode("ascii", "replace")
+        if status == "OK" and data and isinstance(data[0], bytes)
+        else str(data[0])
+        if status == "OK" and data
+        else ""
+    )
+    match = re.search(r"UIDVALIDITY\s+(\d+)", raw)
+    if not match:
+        raise SourceError("IMAP STATUS did not return UIDVALIDITY")
+    return match.group(1)
 
 
 class InboundSource(Protocol):
@@ -170,6 +192,7 @@ class SimulatedImapSource:
                 mailbox=self.mailbox_name,
                 uidvalidity=uidvalidity,
                 uid=uid,
+                flags=tuple(getattr(self.endpoint, "flags", lambda _uid: ())(uid)),
             )
             count += 1
             if limit is not None and count >= limit:
@@ -219,10 +242,12 @@ class ImapSource:
         config: IMAPConnectionConfig,
         *,
         credential_resolver: CredentialResolver | None = None,
+        account_ref: str | None = None,
     ):
         self.source_ref = source_ref
         self.config = config
         self.credential_resolver = credential_resolver or EnvironmentCredentialResolver()
+        self.account_ref = account_ref or source_ref
         self.mailbox_name = config.mailbox
         self.last_capabilities: tuple[str, ...] = ()
 
@@ -269,7 +294,7 @@ class ImapSource:
         value = values[0]
         return value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
 
-    def _connect(self) -> tuple[imaplib.IMAP4, str]:
+    def _authenticate(self) -> imaplib.IMAP4:
         client = imaplib.IMAP4_SSL(
             self.config.host,
             self.config.port,
@@ -290,16 +315,327 @@ class ImapSource:
                 login_status, _ = client.login(self.config.username or "", self._credential())
             if login_status != "OK":
                 raise SourceError("IMAP authentication failed")
-            select_status, _ = client.select(self.config.mailbox, readonly=True)
-            if select_status != "OK":
-                raise SourceError("IMAP read-only mailbox selection failed")
-            return client, self._uidvalidity(client)
+            return client
         except BaseException:
             try:
                 client.logout()
             except Exception:
                 pass
             raise
+
+    def _connect(
+        self, *, mailbox_name: str | None = None, readonly: bool = True
+    ) -> tuple[imaplib.IMAP4, str]:
+        client = self._authenticate()
+        selected = mailbox_name or self.config.mailbox
+        select_status, _ = client.select(selected, readonly=readonly)
+        if select_status != "OK":
+            try:
+                client.logout()
+            except Exception:
+                pass
+            raise SourceError("IMAP mailbox selection failed")
+        return client, self._uidvalidity(client)
+
+    @staticmethod
+    def _parse_list_row(item: object) -> dict[str, object] | None:
+        raw = item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+        match = re.match(r"\((?P<flags>[^)]*)\)\s+\"(?P<delimiter>[^\"]*)\"\s+(?P<name>.*)$", raw)
+        if not match:
+            return None
+        name = match.group("name").strip()
+        if len(name) >= 2 and name[0] == name[-1] == '"':
+            name = name[1:-1].replace('\\"', '"')
+        delimiter = match.group("delimiter") or None
+        parent = name.rsplit(delimiter, 1)[0] if delimiter and delimiter in name else None
+        return {
+            "mailbox": name,
+            "parent_mailbox": parent,
+            "delimiter": delimiter,
+            "flags": tuple(sorted(match.group("flags").split())),
+            "selectable": "\\Noselect" not in match.group("flags"),
+        }
+
+    def discover_mailboxes(self) -> list[dict[str, object]]:
+        client = self._authenticate()
+        try:
+            status, data = client.list('""', '"*"')
+            if status != "OK":
+                raise SourceError("IMAP LIST failed")
+            result = [parsed for item in data if (parsed := self._parse_list_row(item)) is not None]
+            return result
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def mailbox_state(self, mailbox_name: str | None = None) -> dict[str, object]:
+        client, uidvalidity = self._connect(mailbox_name=mailbox_name, readonly=True)
+        try:
+            selected = mailbox_name or self.config.mailbox
+            status, data = client.status(selected, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")
+            values: dict[str, str] = {}
+            if status == "OK" and data:
+                raw = (
+                    data[0].decode("ascii", "replace")
+                    if isinstance(data[0], bytes)
+                    else str(data[0])
+                )
+                values = {
+                    key: value
+                    for key, value in re.findall(
+                        r"(MESSAGES|UNSEEN|UIDNEXT|UIDVALIDITY)\s+(\d+)", raw
+                    )
+                }
+            return {
+                "mailbox": selected,
+                "uidvalidity": uidvalidity,
+                "uidnext": values.get("UIDNEXT"),
+                "total_count": int(values["MESSAGES"]) if "MESSAGES" in values else None,
+                "unseen_count": int(values["UNSEEN"]) if "UNSEEN" in values else None,
+                "capabilities": self.last_capabilities,
+            }
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fetch_flags(data: object) -> tuple[str, ...]:
+        values: set[str] = set()
+        if isinstance(data, (list, tuple)):
+            for item in data:
+                raw = item.decode("ascii", "replace") if isinstance(item, bytes) else str(item)
+                match = re.search(r"FLAGS \(([^)]*)\)", raw)
+                if match:
+                    values.update(match.group(1).split())
+        return tuple(sorted(values))
+
+    def flags_for(
+        self,
+        mailbox_name: str,
+        uid: str,
+        *,
+        expected_uidvalidity: str | None = None,
+    ) -> tuple[str, ...]:
+        client, uidvalidity = self._connect(mailbox_name=mailbox_name, readonly=True)
+        try:
+            if expected_uidvalidity is not None and uidvalidity != expected_uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed while observing flags")
+            status, data = client.uid("FETCH", uid, "(FLAGS UID)")
+            if status != "OK":
+                raise SourceError(f"IMAP UID FLAG FETCH failed for {uid}")
+            raw_items = [
+                item.decode("ascii", "replace") if isinstance(item, bytes) else str(item)
+                for item in data
+                if not isinstance(item, tuple)
+            ] if isinstance(data, (list, tuple)) else []
+            if not any(re.search(rf"UID\s+{re.escape(uid)}\b", item) for item in raw_items):
+                raise SourceError(f"IMAP UID FLAG FETCH returned no matching UID for {uid}")
+            if not any("FLAGS (" in item for item in raw_items):
+                raise SourceError(f"IMAP UID FLAG FETCH returned no flags for {uid}")
+            flags = self._fetch_flags(data)
+            if _status_uidvalidity(client, mailbox_name) != uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed while observing flags")
+            return flags
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def message_id_present(
+        self,
+        mailbox_name: str,
+        message_id: str | None,
+        *,
+        expected_uidvalidity: str | None = None,
+        content_hash: str | None = None,
+        expected_uid: str | None = None,
+    ) -> tuple[bool, str, int]:
+        client, uidvalidity = self._connect(mailbox_name=mailbox_name, readonly=True)
+        try:
+            if expected_uidvalidity is not None and uidvalidity != expected_uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed while observing message identity")
+            if message_id:
+                status, data = client.uid("SEARCH", None, "HEADER", "Message-ID", message_id)
+            else:
+                status, data = client.uid("SEARCH", None, "ALL")
+            if status != "OK" or not data:
+                return False, uidvalidity, 0
+            raw_uids = data[0] if isinstance(data[0], bytes) else str(data[0]).encode()
+            matched_uids: list[str] = []
+            for candidate in raw_uids.split()[:1000]:
+                candidate_uid = candidate.decode("ascii", "replace")
+                fetch_status, fetched = client.uid(
+                    "FETCH", candidate_uid, "(BODY.PEEK[] UID)"
+                )
+                if fetch_status != "OK":
+                    continue
+                raw = next(
+                    (
+                        item[1]
+                        for item in fetched
+                        if isinstance(item, tuple)
+                        and len(item) > 1
+                        and isinstance(item[1], bytes)
+                    ),
+                    None,
+                )
+                if raw is None:
+                    continue
+                parsed = BytesParser(policy=policy.default).parsebytes(raw)
+                identity_match = bool(message_id and parsed.get("Message-ID") == message_id)
+                content_match = bool(
+                    content_hash and hashlib.sha256(raw).hexdigest() == content_hash
+                )
+                if (identity_match or content_match) and (
+                    message_id is None or identity_match
+                ) and (content_hash is None or content_match):
+                    matched_uids.append(candidate_uid)
+            if _status_uidvalidity(client, mailbox_name) != uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed while observing message identity")
+            unique_match = len(matched_uids) == 1
+            expected_match = expected_uid is None or expected_uid in matched_uids
+            return unique_match and expected_match, uidvalidity, len(matched_uids)
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def uid_present(self, mailbox_name: str, uid: str) -> bool:
+        client, _ = self._connect(mailbox_name=mailbox_name, readonly=True)
+        try:
+            status, data = client.uid("SEARCH", None, "UID", uid)
+            if status != "OK" or not data:
+                return False
+            raw = data[0] if isinstance(data[0], bytes) else str(data[0]).encode()
+            return uid.encode() in raw.split()
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def _mutate(
+        self,
+        mailbox_name: str,
+        uid: str,
+        command: str,
+        *arguments: str,
+        expected_uidvalidity: str | None = None,
+    ) -> dict[str, object]:
+        client, uidvalidity = self._connect(mailbox_name=mailbox_name, readonly=False)
+        try:
+            if expected_uidvalidity is not None and uidvalidity != expected_uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed on mutating connection")
+            if command == "STORE":
+                status, data = client.uid("STORE", uid, *arguments)
+            elif command == "COPY":
+                status, data = client.uid("COPY", uid, *arguments)
+            elif command == "MOVE":
+                if "MOVE" not in self.last_capabilities:
+                    raise SourceError("IMAP UID MOVE is not advertised by this server")
+                status, data = client.uid("MOVE", uid, *arguments)
+            else:
+                raise SourceError("unsupported IMAP mutation command")
+            if status != "OK":
+                raise SourceError(f"IMAP UID {command} failed")
+            response = str(data)
+            result: dict[str, object] = {
+                "uidvalidity": uidvalidity,
+                "command": command,
+                "response": response,
+            }
+            if command in {"COPY", "MOVE"}:
+                copyuid = re.search(r"COPYUID\s+\S+\s+\S+\s+(\d+)", response)
+                if copyuid:
+                    result["target_uid"] = copyuid.group(1)
+            return result
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def mutate(
+        self,
+        *,
+        mailbox_name: str,
+        uid: str,
+        action: str,
+        flags: tuple[str, ...] = (),
+        target_folder: str | None = None,
+        expected_uidvalidity: str | None = None,
+    ) -> dict[str, object]:
+        if action == "mark_read":
+            return self._mutate(
+                mailbox_name,
+                uid,
+                "STORE",
+                "+FLAGS.SILENT",
+                r"(\Seen)",
+                expected_uidvalidity=expected_uidvalidity,
+            )
+        if action == "mark_unread":
+            return self._mutate(
+                mailbox_name,
+                uid,
+                "STORE",
+                "-FLAGS.SILENT",
+                r"(\Seen)",
+                expected_uidvalidity=expected_uidvalidity,
+            )
+        if action == "flag":
+            if not flags or any(
+                flag not in {r"\Seen", r"\Flagged", r"\Answered", r"\Draft"} for flag in flags
+            ):
+                raise SourceError("unsupported IMAP flag")
+            return self._mutate(
+                mailbox_name,
+                uid,
+                "STORE",
+                "+FLAGS.SILENT",
+                f"({' '.join(flags)})",
+                expected_uidvalidity=expected_uidvalidity,
+            )
+        if action == "unflag":
+            if not flags or any(
+                flag not in {r"\Seen", r"\Flagged", r"\Answered", r"\Draft"} for flag in flags
+            ):
+                raise SourceError("unsupported IMAP flag")
+            return self._mutate(
+                mailbox_name,
+                uid,
+                "STORE",
+                "-FLAGS.SILENT",
+                f"({' '.join(flags)})",
+                expected_uidvalidity=expected_uidvalidity,
+            )
+        if action == "copy":
+            if not target_folder:
+                raise SourceError("IMAP COPY requires a target folder")
+            return self._mutate(
+                mailbox_name,
+                uid,
+                "COPY",
+                _imap_mailbox_argument(target_folder),
+                expected_uidvalidity=expected_uidvalidity,
+            )
+        if action in {"move", "archive"}:
+            if not target_folder:
+                raise SourceError("IMAP MOVE requires a target folder")
+            return self._mutate(
+                mailbox_name,
+                uid,
+                "MOVE",
+                _imap_mailbox_argument(target_folder),
+                expected_uidvalidity=expected_uidvalidity,
+            )
+        raise SourceError("permanent deletion and EXPUNGE are not supported")
 
     def messages(
         self, cursor: str | None = None, limit: int | None = None
@@ -327,7 +663,7 @@ class ImapSource:
             for uid in uid_values:
                 if uid <= previous_uid:
                     continue
-                status, fetched = client.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                status, fetched = client.uid("FETCH", str(uid), "(BODY.PEEK[] FLAGS UID)")
                 if status != "OK":
                     raise SourceError(f"IMAP UID FETCH failed for {uid}")
                 raw = next(
@@ -340,6 +676,7 @@ class ImapSource:
                 )
                 if raw is None:
                     raise SourceError(f"IMAP UID FETCH returned no message for {uid}")
+                flags = self._fetch_flags(fetched)
                 if len(raw) > self.config.max_message_bytes:
                     raise SourceError(f"IMAP message {uid} exceeds configured acquisition limit")
                 yield SourceMessage(
@@ -349,10 +686,14 @@ class ImapSource:
                     mailbox=self.config.mailbox,
                     uidvalidity=uidvalidity,
                     uid=str(uid),
+                    flags=flags,
+                    account_ref=self.account_ref,
                 )
                 count += 1
                 if limit is not None and count >= limit:
                     break
+            if _status_uidvalidity(client, self.config.mailbox) != uidvalidity:
+                raise CursorInvalidated("IMAP UIDVALIDITY changed during acquisition")
         finally:
             try:
                 client.logout()

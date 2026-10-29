@@ -301,6 +301,22 @@ class InboundService:
         )
         parsed = self.parser.parse(source)
         self.store.save_inbound_parse(message_id, parsed)
+        thread_anchor = parsed.references[0] if parsed.references else parsed.in_reply_to
+        inherited_thread_key: str | None = None
+        if thread_anchor:
+            with self.store.connect() as connection:
+                parent = connection.execute(
+                    "SELECT thread_key FROM inbound_messages "
+                    "WHERE source_ref = ? AND message_id = ? LIMIT 1",
+                    (row["source_ref"], thread_anchor),
+                ).fetchone()
+            inherited_thread_key = parent["thread_key"] if parent else None
+        else:
+            thread_anchor = parsed.message_id or message_id
+        thread_key = (
+            inherited_thread_key or f"{row['account_ref'] or row['source_ref']}:{thread_anchor}"
+        )
+        self.store.set_inbound_thread_key(message_id, thread_key)
         classification = self._classification(parsed)
         correlations = self._correlations(parsed)
         trust = TrustStatus(self.store.get_inbound_source(row["source_ref"])["trust_status"])
@@ -393,7 +409,10 @@ class InboundService:
                 duplicates += int(duplicate)
                 cursor_after = item.source_identity
                 self.store.set_inbound_cursor(
-                    source.source_ref, cursor_after, uidvalidity=item.uidvalidity
+                    source.source_ref,
+                    cursor_after,
+                    uidvalidity=item.uidvalidity,
+                    run_id=run_id,
                 )
                 if fault_after is not None and acquired >= fault_after:
                     raise RuntimeError("inbound fault injection after durable acquisition")
@@ -418,7 +437,7 @@ class InboundService:
                 failures=failures,
             )
         except CursorInvalidated as error:
-            self.store.invalidate_inbound_cursor(source.source_ref, str(error))
+            self.store.invalidate_inbound_cursor(source.source_ref, str(error), run_id=run_id)
             self.store.finish_inbound_run(
                 run_id,
                 status="cursor_invalidated",
@@ -428,6 +447,7 @@ class InboundService:
                 failures=failures + 1,
                 error_message=str(error),
             )
+            error.inbound_run_id = run_id
             raise
         except Exception as error:
             self.store.finish_inbound_run(
@@ -439,6 +459,7 @@ class InboundService:
                 failures=failures + 1,
                 error_message=str(error),
             )
+            error.inbound_run_id = run_id
             raise
         return InboundBatchReport(
             run_id,

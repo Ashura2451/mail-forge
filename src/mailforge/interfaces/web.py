@@ -55,6 +55,10 @@ from mailforge.application.local_application import (
     restore_backup,
     utc_now,
 )
+from mailforge.application.mailbox_operations import (
+    MailboxOperationsError,
+    MailboxOperationsService,
+)
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.programmable_operations import ProgrammableOperationsService
@@ -393,6 +397,8 @@ class ProviderDiagnosticInput(BaseModel):
 class ProviderInboundInput(BaseModel):
     mailbox: str = Field(min_length=1, max_length=240)
     max_fetch: int = Field(default=100, ge=1, le=10_000)
+    sync_enabled: bool = True
+    mutation_enabled: bool = False
 
 
 class ProviderTestSendInput(BaseModel):
@@ -457,9 +463,15 @@ class InboundMailboxActionInput(BaseModel):
     authorization_ref: str = Field(min_length=1, max_length=200)
     idempotency_key: str = Field(min_length=8, max_length=200)
     target_folder: str | None = Field(default=None, max_length=240)
+    uidvalidity: str | None = Field(default=None, max_length=120)
+    uid: str | None = Field(default=None, max_length=120)
+    flags: list[str] = Field(default_factory=list, max_length=8)
+    purpose: str | None = Field(default=None, max_length=500)
+    expires_at: str | None = None
 
 
 class InboundSyncInput(BaseModel):
+    mailbox: str | None = Field(default=None, max_length=240)
     batch_limit: int = Field(default=100, ge=1, le=10_000)
     retain_raw: bool = True
     authorization_ref: str | None = Field(default=None, max_length=200)
@@ -818,6 +830,12 @@ class WebRuntime:
         )
         self.inbound_operations = InboundOperations(
             self.store, message_studio=self.message_studio, programmable=self.programmable
+        )
+        self.mailbox_operations = MailboxOperationsService(
+            self.store,
+            inbound=self.inbound,
+            inbound_operations=self.inbound_operations,
+            provider_operations=self.provider_operations,
         )
         self.inbound.set_operations(self.inbound_operations)
         self.automation_workers = AutomationWorkerSupervisor(self.automation)
@@ -1418,8 +1436,11 @@ def create_app(
             return runtime.integrations.submit_event(client, payload.model_dump())
         except IntegrationHubError as error:
             status = (
-                401 if error.code in {"unauthorized", "client_revoked", "client_expired"}
-                else 409 if error.code == "event_conflict" else 400
+                401
+                if error.code in {"unauthorized", "client_revoked", "client_expired"}
+                else 409
+                if error.code == "event_conflict"
+                else 400
             )
             return _error(status, error.code, str(error))
 
@@ -3215,6 +3236,14 @@ def create_app(
         subject: str | None = None,
         classification: str | None = None,
         source_ref: str | None = None,
+        account_ref: str | None = None,
+        folder: str | None = None,
+        read: bool | None = None,
+        flagged: bool | None = None,
+        has_attachment: bool | None = None,
+        thread_key: str | None = None,
+        received_after: str | None = None,
+        received_before: str | None = None,
         processed: bool | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -3227,6 +3256,14 @@ def create_app(
             subject=subject,
             classification=classification,
             source_ref=source_ref,
+            account_ref=account_ref,
+            folder=folder,
+            read=read,
+            flagged=flagged,
+            has_attachment=has_attachment,
+            thread_key=thread_key,
+            received_after=received_after,
+            received_before=received_before,
             processed=processed,
             limit=limit,
             offset=offset,
@@ -3244,6 +3281,13 @@ def create_app(
             return runtime.inbound_operations.detail(message_id)
         except (KeyError, InboundOperationsError) as error:
             return _error(404, getattr(error, "code", "message_not_found"), str(error))
+
+    @app.get(f"{API_PREFIX}/inbound/messages/{{message_id}}/conversation")
+    async def inbound_message_conversation(message_id: str):
+        try:
+            return runtime.inbound_operations.conversation(message_id)
+        except (KeyError, InboundOperationsError) as error:
+            return _error(404, getattr(error, "code", "conversation_not_found"), str(error))
 
     @app.post(f"{API_PREFIX}/inbound/messages/{{message_id}}/extract")
     async def inbound_extract(message_id: str, payload: InboundExtractInput):
@@ -3324,36 +3368,189 @@ def create_app(
         except InboundOperationsError as error:
             return _error(400, error.code, str(error))
 
+    @app.get(f"{API_PREFIX}/inbound/actions/{{action_id}}")
+    async def inbound_mailbox_action(action_id: str):
+        try:
+            return runtime.mailbox_operations.action(action_id)
+        except (KeyError, InboundOperationsError) as error:
+            return _error(404, getattr(error, "code", "action_not_found"), str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/actions/{{action_id}}/reconcile")
+    async def reconcile_inbound_mailbox_action(action_id: str):
+        try:
+            return runtime.mailbox_operations.reconcile_action(
+                action_id, resolver=EnvironmentCredentialResolver()
+            )
+        except (
+            KeyError,
+            ValueError,
+            PermissionError,
+            RuntimeError,
+            MailboxOperationsError,
+        ) as error:
+            return _error(400, getattr(error, "code", "reconciliation_failed"), str(error))
+
+    @app.get(f"{API_PREFIX}/providers/{{provider_ref}}/mailboxes")
+    async def provider_mailboxes(provider_ref: str):
+        try:
+            account = runtime.provider_operations.account(provider_ref)
+            return {
+                "account": account,
+                "items": runtime.store.list_inbound_mailboxes(provider_ref),
+                "capabilities": json.loads(account["inbound"].get("capabilities_json", "[]"))
+                if isinstance(account["inbound"].get("capabilities_json"), str)
+                else account["inbound"].get("capabilities", []),
+            }
+        except (KeyError, ValueError) as error:
+            return _error(404, "provider_mailboxes_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/mailboxes/discover")
+    async def discover_provider_mailboxes(provider_ref: str, payload: InboundSyncInput):
+        try:
+            account = runtime.provider_operations.account(provider_ref)
+            if not payload.authorization_ref or not payload.purpose or not payload.expires_at:
+                return _error(
+                    400,
+                    "authorization_incomplete",
+                    "folder discovery requires purpose, expiry, and authorization",
+                )
+            grant = ExternalOperationGrant(
+                account_ref=provider_ref,
+                operation=ProviderOperation.INBOUND_SYNC,
+                host=account["host"],
+                port=account["port"],
+                purpose=payload.purpose,
+                expires_at=payload.expires_at,
+                authorization_ref=payload.authorization_ref,
+            )
+            return runtime.mailbox_operations.discover(
+                provider_ref, resolver=EnvironmentCredentialResolver(), grant=grant
+            )
+        except (KeyError, ValueError, PermissionError, MailboxOperationsError) as error:
+            return _error(400, getattr(error, "code", "mailbox_discovery_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/mailboxes/{{provider_ref}}/sync")
+    async def sync_mailbox(provider_ref: str, payload: InboundSyncInput):
+        try:
+            account = runtime.provider_operations.account(provider_ref)
+            mailbox = payload.mailbox or account["inbound"]["mailbox"]
+            if not payload.authorization_ref or not payload.purpose or not payload.expires_at:
+                return _error(
+                    400,
+                    "authorization_incomplete",
+                    "mailbox sync requires purpose, expiry, and authorization",
+                )
+            grant = ExternalOperationGrant(
+                account_ref=provider_ref,
+                operation=ProviderOperation.INBOUND_SYNC,
+                host=account["host"],
+                port=account["port"],
+                purpose=payload.purpose,
+                expires_at=payload.expires_at,
+                authorization_ref=payload.authorization_ref,
+            )
+            report = runtime.mailbox_operations.sync(
+                provider_ref,
+                mailbox=mailbox,
+                batch_limit=payload.batch_limit,
+                retain_raw=payload.retain_raw,
+                resolver=EnvironmentCredentialResolver(),
+                grant=grant,
+            )
+            return {"report": asdict(report), "stats": runtime.inbound.stats()}
+        except (
+            KeyError,
+            ValueError,
+            PermissionError,
+            RuntimeError,
+            MailboxOperationsError,
+        ) as error:
+            return _error(400, getattr(error, "code", "mailbox_sync_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/inbound/mailboxes/{{provider_ref}}/actions")
+    async def execute_mailbox_action(
+        provider_ref: str, payload: InboundMailboxActionInput, message_id: str
+    ):
+        try:
+            runtime.provider_operations.account(provider_ref)
+            if (
+                not payload.purpose
+                or not payload.expires_at
+                or not payload.uidvalidity
+                or not payload.uid
+            ):
+                return _error(
+                    400,
+                    "action_identity_incomplete",
+                    "action requires purpose, expiry, UIDVALIDITY, and UID",
+                )
+            source_ref = runtime.store.get_inbound_message(message_id)["source_ref"]
+            if source_ref != runtime.mailbox_operations.source_ref(
+                provider_ref, runtime.store.get_inbound_message(message_id)["folder"] or "INBOX"
+            ):
+                return _error(
+                    400, "message_scope_mismatch", "message is not in the selected account mailbox"
+                )
+            result = runtime.mailbox_operations.execute_action(
+                source_ref,
+                action=payload.action,
+                authorization_ref=payload.authorization_ref,
+                purpose=payload.purpose,
+                expires_at=payload.expires_at,
+                idempotency_key=payload.idempotency_key,
+                message_id=message_id,
+                uidvalidity=payload.uidvalidity,
+                uid=payload.uid,
+                target_folder=payload.target_folder,
+                flags=tuple(payload.flags),
+                resolver=EnvironmentCredentialResolver(),
+            )
+            return result
+        except (
+            KeyError,
+            ValueError,
+            PermissionError,
+            RuntimeError,
+            MailboxOperationsError,
+        ) as error:
+            return _error(400, getattr(error, "code", "mailbox_action_failed"), str(error))
+
     @app.post(f"{API_PREFIX}/inbound/sources/{{source_ref}}/sync")
     async def sync_inbound_source(source_ref: str, payload: InboundSyncInput):
         try:
             account = runtime.provider_operations.account(source_ref)
-            grant = None
-            if payload.authorization_ref:
-                if not payload.purpose or not payload.expires_at:
-                    return _error(
-                        400,
-                        "authorization_incomplete",
-                        "sync authorization requires purpose and expiry",
-                    )
-                grant = ExternalOperationGrant(
-                    account_ref=source_ref,
-                    operation=ProviderOperation.INBOUND_READINESS,
-                    host=account["host"],
-                    port=account["port"],
-                    purpose=payload.purpose,
-                    expires_at=payload.expires_at,
-                    authorization_ref=payload.authorization_ref,
+            if not payload.authorization_ref or not payload.purpose or not payload.expires_at:
+                return _error(
+                    400,
+                    "authorization_incomplete",
+                    "mailbox sync requires purpose, expiry, and authorization",
                 )
-            source = runtime.provider_operations.inbound_source(
-                source_ref, EnvironmentCredentialResolver(), grant=grant
+            grant = ExternalOperationGrant(
+                account_ref=source_ref,
+                operation=ProviderOperation.INBOUND_SYNC,
+                host=account["host"],
+                port=account["port"],
+                purpose=payload.purpose,
+                expires_at=payload.expires_at,
+                authorization_ref=payload.authorization_ref,
             )
-            report = runtime.inbound.ingest(
-                source, batch_limit=payload.batch_limit, retain_raw=payload.retain_raw
+            report = runtime.mailbox_operations.sync(
+                source_ref,
+                mailbox=payload.mailbox or account["inbound"]["mailbox"],
+                batch_limit=payload.batch_limit,
+                retain_raw=payload.retain_raw,
+                resolver=EnvironmentCredentialResolver(),
+                grant=grant,
             )
             return {"report": asdict(report), "stats": runtime.inbound.stats()}
-        except (KeyError, ValueError, PermissionError, RuntimeError) as error:
-            return _error(400, "inbound_sync_failed", str(error))
+        except (
+            KeyError,
+            ValueError,
+            PermissionError,
+            RuntimeError,
+            MailboxOperationsError,
+        ) as error:
+            return _error(400, getattr(error, "code", "inbound_sync_failed"), str(error))
 
     @app.get(f"{API_PREFIX}/inbound/reviews")
     async def inbound_reviews():
@@ -3501,7 +3698,11 @@ def create_app(
     async def configure_provider_inbound(provider_ref: str, payload: ProviderInboundInput):
         try:
             return runtime.provider_operations.configure_inbound(
-                provider_ref, mailbox=payload.mailbox, max_fetch=payload.max_fetch
+                provider_ref,
+                mailbox=payload.mailbox,
+                max_fetch=payload.max_fetch,
+                sync_enabled=payload.sync_enabled,
+                mutation_enabled=payload.mutation_enabled,
             )
         except (KeyError, ValueError) as error:
             return _error(400, "provider_inbound_invalid", str(error))

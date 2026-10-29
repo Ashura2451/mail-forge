@@ -757,14 +757,14 @@ class ReportingService:
         return {
             "report_definition_version": REPORT_DEFINITION_VERSION,
             "evidence_class": "durable_local_observation",
-            "clients": [
-                {**dict(row), "scopes": json.loads(row["scopes_json"])} for row in clients
-            ],
+            "clients": [{**dict(row), "scopes": json.loads(row["scopes_json"])} for row in clients],
             "sources": [dict(row) for row in sources],
             "snapshots": {row["status"]: row["count"] for row in snapshots},
             "events": {row["outcome"]: row["count"] for row in events},
             "event_conflicts": conflicts,
-            "subscriptions": {"enabled" if row["enabled"] else "disabled": row["count"] for row in subscriptions},
+            "subscriptions": {
+                "enabled" if row["enabled"] else "disabled": row["count"] for row in subscriptions
+            },
             "deliveries": {row["status"]: row["count"] for row in deliveries},
             "last_success_at": last_success,
             "errors": [dict(row) for row in errors],
@@ -980,6 +980,34 @@ class ReportingService:
                 f"SELECT a.status,COUNT(*) AS count FROM inbound_actions a JOIN inbound_messages m ON m.id=a.message_id WHERE a.proposed_at>=? AND a.proposed_at<? AND {message_scope} GROUP BY a.status",
                 (start, end, *scope_params),
             ).fetchall()
+            mailbox_actions = connection.execute(
+                "SELECT action_state,COUNT(*) AS count FROM inbound_mailbox_actions "
+                "WHERE created_at>=? AND created_at<?"
+                + (" AND account_ref=?" if (filters.account_ref or filters.provider_ref) else "")
+                + (" AND mailbox=?" if filters.folder else "")
+                + " GROUP BY action_state",
+                (start, end)
+                + (
+                    (filters.account_ref or filters.provider_ref,)
+                    if (filters.account_ref or filters.provider_ref)
+                    else ()
+                )
+                + ((filters.folder,) if filters.folder else ()),
+            ).fetchall()
+            mailbox_syncs = connection.execute(
+                "SELECT last_sync_status,COUNT(*) AS count FROM inbound_mailboxes "
+                "WHERE last_sync_at>=? AND last_sync_at<?"
+                + (" AND account_ref=?" if (filters.account_ref or filters.provider_ref) else "")
+                + (" AND mailbox=?" if filters.folder else "")
+                + " GROUP BY last_sync_status",
+                (start, end)
+                + (
+                    (filters.account_ref or filters.provider_ref,)
+                    if (filters.account_ref or filters.provider_ref)
+                    else ()
+                )
+                + ((filters.folder,) if filters.folder else ()),
+            ).fetchall()
         return {
             "messages": messages,
             "classifications": {row["kind"]: row["count"] for row in classifications},
@@ -995,6 +1023,10 @@ class ReportingService:
             if filters.account_ref or filters.folder
             else "selected_source_scope",
             "actions": {row["status"]: row["count"] for row in actions},
+            "mailbox_actions": {row["action_state"]: row["count"] for row in mailbox_actions},
+            "mailbox_syncs": {
+                row["last_sync_status"] or "unknown": row["count"] for row in mailbox_syncs
+            },
             "evidence_class": "durable_local_observation",
             "limitations": ["untrusted reports do not count as confirmed delivery failure"],
         }

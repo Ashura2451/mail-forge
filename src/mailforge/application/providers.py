@@ -157,26 +157,34 @@ class ProviderService:
             credential_resolver=resolver,
         )
 
-    def imap_source(self, ref: str, resolver: CredentialResolver) -> ImapSource:
+    def imap_source(
+        self,
+        ref: str,
+        resolver: CredentialResolver,
+        *,
+        mailbox: str | None = None,
+        source_ref: str | None = None,
+    ) -> ImapSource:
         profile = self.profile(ref)
         if profile.kind is not ProviderKind.IMAP:
             raise ValueError(f"provider profile is not IMAP: {ref}")
         if not profile.enabled:
             raise ValueError(f"provider profile is disabled: {ref}")
         return ImapSource(
-            profile.ref,
+            source_ref or profile.ref,
             IMAPConnectionConfig(
                 host=profile.host,
                 port=profile.port,
                 username=profile.username,
                 credential_ref=profile.credential_ref,
                 auth_method=profile.auth_method,
-                mailbox=profile.mailbox,
+                mailbox=mailbox or profile.mailbox,
                 timeout=profile.timeout,
                 ca_file=profile.ca_file,
                 max_message_bytes=profile.max_message_bytes,
             ),
             credential_resolver=resolver,
+            account_ref=profile.ref,
         )
 
     def local_protocol_diagnostic(
