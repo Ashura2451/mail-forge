@@ -1,5 +1,19 @@
 # System changelog
 
+## 2026-10-28 — Unified operator workspace
+
+- Added a proposed unified-workspace specification and grouped React shell
+  navigation for Data, Audiences, Communication, Incoming, Automation,
+  Connectivity, Insights, and Application work.
+- Added stable browser paths with refresh and Back/Forward recovery, responsive
+  labelled navigation, related-work handoffs, page context, and retryable
+  shell/action error feedback without changing backend authorities.
+- Regenerated the packaged frontend assets and extended browser acceptance for
+  direct routes, history navigation, and the narrow-screen navigation menu.
+- Local evidence: 248 non-browser Python tests and 5 browser/accessibility
+  tests passed; no packaged release, independent review, or real-provider
+  qualification is claimed.
+
 ## 2026-10-28 — Integration Hub
 
 - Added schema 22 scoped integration clients, client audits, typed incoming

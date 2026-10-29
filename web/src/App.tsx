@@ -7,13 +7,72 @@ const nav = [
   ['inbound', 'Inbound', '↘'], ['providers', 'Providers', '◈'], ['reports', 'Reports & Insights', '▥'], ['activity', 'Activity', '≡'], ['maintenance', 'Maintenance', '⚙'],
 ]
 
+const navigationGroups = [
+  { label: 'Overview', items: ['dashboard', 'activity'] },
+  { label: 'Data', items: ['list-tools', 'data-studio', 'data-connections'] },
+  { label: 'Audiences', items: ['contacts', 'segments'] },
+  { label: 'Communication', items: ['message-studio', 'campaigns'] },
+  { label: 'Incoming', items: ['inbound'] },
+  { label: 'Automation', items: ['automations', 'functions'] },
+  { label: 'Connectivity', items: ['providers', 'integrations'] },
+  { label: 'Insights', items: ['reports', 'email-standards'] },
+  { label: 'Application', items: ['maintenance'] },
+]
+
+const pageMeta: Record<string, { label: string, group: string, description: string }> = {
+  dashboard: { label: 'Dashboard', group: 'Overview', description: 'A durable view of local work and attention needed next.' },
+  'list-tools': { label: 'List Tools', group: 'Data', description: 'Process local source files without creating contacts or contacting providers.' },
+  'data-studio': { label: 'Data Studio', group: 'Data', description: 'Inspect, transform, and hand off durable local data artifacts.' },
+  'data-connections': { label: 'Data Connections', group: 'Data', description: 'Acquire bounded read-only snapshots from configured sources.' },
+  contacts: { label: 'Contacts', group: 'Audiences', description: 'Import and organize recipient records with source provenance.' },
+  segments: { label: 'Segments', group: 'Audiences', description: 'Build revisioned audiences using local, typed rules.' },
+  'message-studio': { label: 'Message Studio', group: 'Communication', description: 'Compose, preview, and publish structured message revisions.' },
+  campaigns: { label: 'Campaigns', group: 'Communication', description: 'Prepare and simulate policy-aware campaign operations.' },
+  inbound: { label: 'Inbound', group: 'Incoming', description: 'Acquire, classify, and review inbound evidence safely.' },
+  automations: { label: 'Automations', group: 'Automation', description: 'Define bounded workflows and inspect their durable runs.' },
+  functions: { label: 'Functions', group: 'Automation', description: 'Create reusable declarative transformations with pinned revisions.' },
+  providers: { label: 'Providers', group: 'Connectivity', description: 'Configure accounts and inspect local protocol evidence.' },
+  integrations: { label: 'Integration Hub', group: 'Connectivity', description: 'Manage scoped clients, typed events, and webhook evidence.' },
+  reports: { label: 'Reports & Insights', group: 'Insights', description: 'Explore bounded operational observations from local records.' },
+  'email-standards': { label: 'Email Standards', group: 'Insights', description: 'Check message and sender evidence before consequential work.' },
+  activity: { label: 'Activity', group: 'Overview', description: 'Inspect the append-only operational ledger.' },
+  maintenance: { label: 'Runtime & Maintenance', group: 'Application', description: 'Check runtime health and protect local state with backups.' },
+}
+
+const relatedViews: Record<string, string[]> = {
+  dashboard: ['contacts', 'message-studio', 'campaigns', 'reports'],
+  'list-tools': ['data-studio', 'contacts', 'reports'],
+  'data-connections': ['data-studio', 'reports'],
+  'data-studio': ['contacts', 'message-studio', 'campaigns'],
+  contacts: ['segments', 'message-studio', 'campaigns'],
+  segments: ['contacts', 'campaigns', 'message-studio'],
+  'message-studio': ['campaigns', 'automations', 'contacts'],
+  campaigns: ['contacts', 'message-studio', 'providers', 'reports'],
+  inbound: ['automations', 'message-studio', 'reports'],
+  automations: ['inbound', 'data-studio', 'campaigns', 'reports'],
+  functions: ['data-studio', 'message-studio'],
+  providers: ['campaigns', 'inbound', 'reports'],
+  integrations: ['data-connections', 'automations', 'reports'],
+  reports: ['campaigns', 'providers', 'activity'],
+  'email-standards': ['message-studio', 'campaigns', 'reports'],
+  activity: ['reports', 'maintenance'],
+  maintenance: ['activity', 'reports'],
+}
+
+function viewFromPath(pathname: string) {
+  const segment = pathname.replace(/^\/+/, '').split('/')[0]
+  return pageMeta[segment] ? segment : 'dashboard'
+}
+
 function App() {
-  const [view, setView] = useState('dashboard')
+  const [view, setView] = useState(() => viewFromPath(window.location.pathname))
   const [data, setData] = useState<ApiRecord>({})
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [setup, setSetup] = useState<ApiRecord>({})
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [retry, setRetry] = useState<(() => void) | null>(null)
   const loadSequence = useRef(0)
 
   const load = async (target = view) => {
@@ -21,29 +80,58 @@ function App() {
     setBusy(true); setError('')
     try {
       const next = await api(target === 'dashboard' ? '/dashboard' : target === 'list-tools' ? '/list-tools/jobs' : target === 'message-studio' ? '/message-studio/documents' : target === 'data-studio' ? '/data-studio/recipes' : target === 'reports' ? '/reports/summary' : target === 'maintenance' ? '/runtime' : target === 'email-standards' ? '/email-standards' : `/${target}`)
-      if (sequence === loadSequence.current) setData(next)
+      if (sequence === loadSequence.current) { setData(next); setRetry(null) }
     }
-    catch (err) { setError(err instanceof Error ? err.message : 'Unable to load this view') }
+    catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load this view')
+      setRetry(() => () => { void load(target) })
+    }
     finally { setBusy(false) }
   }
-  useEffect(() => { bootstrapSession().then(async () => { setSetup(await api('/setup')); await load() }).catch((err) => setError(err.message)) }, [])
+  const navigate = (target: string, replace = false) => {
+    const nextPath = target === 'dashboard' ? '/' : `/${target}`
+    if (window.location.pathname !== nextPath) window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath)
+    setView(target)
+    setMobileNavOpen(false)
+    void load(target)
+  }
+  useEffect(() => {
+    const onPopState = () => {
+      const next = viewFromPath(window.location.pathname)
+      setView(next)
+      void load(next)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+  useEffect(() => { bootstrapSession().then(async () => { setSetup(await api('/setup')); await load(view) }).catch((err) => { setError(err.message); setRetry(() => () => { window.location.reload() }) }) }, [])
   const run = async (action: () => Promise<unknown>, message: string) => {
     setBusy(true); setError('')
+    setRetry(() => () => { void run(action, message) })
     try { await action(); setNotice(message); await load(view) }
     catch (err) { setError(err instanceof Error ? err.message : 'Action failed') }
     finally { setBusy(false) }
   }
+  const metadata = pageMeta[view] || pageMeta.dashboard
 
   return <div className="shell">
-    <aside className="rail"><div className="brand"><span className="brand-mark">M</span><span>Mailforge</span></div><p className="eyebrow">LOCAL OPERATIONS</p>
-      <nav aria-label="Primary navigation">{nav.map(([id, label, icon]) => <button key={id} className={view === id ? 'nav-item active' : 'nav-item'} onClick={() => { setView(id); void load(id) }}><span aria-hidden="true">{icon}</span>{label}{id === 'activity' && <span className="nav-dot" />}</button>)}</nav>
+    <aside id="mailforge-navigation" className={`rail ${mobileNavOpen ? 'mobile-open' : ''}`} aria-label="Mailforge navigation"><div className="brand"><button className="brand-button" onClick={() => navigate('dashboard')}><span className="brand-mark">M</span><span>Mailforge</span></button></div><p className="eyebrow">LOCAL OPERATIONS</p>
+      {navigationGroups.map(group => <div className="nav-group" key={group.label}><p className="nav-group-label">{group.label}</p><nav aria-label={`${group.label} navigation`}>{group.items.map(id => { const navItem = nav.find(([itemId]) => itemId === id); if (!navItem) return null; const [, label, icon] = navItem; return <button key={id} className={view === id ? 'nav-item active' : 'nav-item'} onClick={() => navigate(id)}><span aria-hidden="true">{icon}</span><span className="nav-label">{label}</span>{id === 'activity' && <span className="nav-dot" />}</button> })}</nav></div>)}
       <div className="rail-foot"><span className="live-dot" /> Loopback only<br /><small>Simulation mode · no external delivery</small></div>
     </aside>
-    <main className="main"><header className="topbar"><div><p className="eyebrow">WORKSPACE / {view.toUpperCase()}</p><h1>{nav.find(([id]) => id === view)?.[1]}</h1></div><div className="top-actions"><span className="status-chip"><span className="live-dot" /> Local</span><button className="icon-button" aria-label="Refresh" onClick={() => load()}>↻</button></div></header>
-      {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}{error && <div className="error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
-      {view === 'dashboard' && <Dashboard data={data} setup={setup} onSetup={async () => { await api('/setup/complete', { method: 'POST', body: JSON.stringify({ timezone: 'UTC', simulation_mode: true, sample_data: false }) }); setSetup({ ...setup, complete: true }); setNotice('Setup saved; Mailforge is ready for local work') }} onNavigate={setView} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-connections' && <DataConnections onRun={run} />}{view === 'integrations' && <IntegrationHub data={data} onRun={run} onNavigate={setView} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'functions' && <Functions data={data} onRun={run} />}{view === 'email-standards' && <EmailStandards data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'reports' && <Reports data={data} onNavigate={setView} />}{view === 'activity' && <Activity data={data} />}{view === 'maintenance' && <Maintenance data={data} onRun={run} />}
+    <main className="main"><header className="topbar"><div className="topbar-heading"><button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="mailforge-navigation" onClick={() => setMobileNavOpen(open => !open)}>☰</button><div><p className="eyebrow">{metadata.group.toUpperCase()} / LOCAL WORKSPACE</p><h1>{metadata.label}</h1><p className="page-description">{metadata.description}</p></div></div><div className="top-actions"><span className="status-chip"><span className="live-dot" /> Local</span><button className="icon-button" aria-label="Refresh" onClick={() => void load()}>↻</button></div></header>
+      {mobileNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
+      {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}{error && <div className="error" role="alert"><span>{error}</span>{retry && <button onClick={retry}>Retry</button>}<button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
+      <RelatedWork view={view} onNavigate={navigate} />
+      {view === 'dashboard' && <Dashboard data={data} setup={setup} onSetup={async () => { await api('/setup/complete', { method: 'POST', body: JSON.stringify({ timezone: 'UTC', simulation_mode: true, sample_data: false }) }); setSetup({ ...setup, complete: true }); setNotice('Setup saved; Mailforge is ready for local work') }} onNavigate={navigate} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-connections' && <DataConnections onRun={run} />}{view === 'integrations' && <IntegrationHub data={data} onRun={run} onNavigate={navigate} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'functions' && <Functions data={data} onRun={run} />}{view === 'email-standards' && <EmailStandards data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} />}{view === 'reports' && <Reports data={data} onNavigate={navigate} />}{view === 'activity' && <Activity data={data} />}{view === 'maintenance' && <Maintenance data={data} onRun={run} />}
     </main>
   </div>
+}
+
+function RelatedWork({ view, onNavigate }: { view: string, onNavigate: (view: string) => void }) {
+  const links = relatedViews[view] || []
+  if (!links.length) return null
+  return <section className="related-work" aria-label="Related work"><span className="related-label">Continue with</span>{links.map(id => <a key={id} href={id === 'dashboard' ? '/' : `/${id}`} onClick={event => { event.preventDefault(); onNavigate(id) }}>{pageMeta[id].label} <span aria-hidden="true">→</span></a>)}</section>
 }
 
 function Dashboard({ data, setup, onSetup, onNavigate }: { data: ApiRecord, setup: ApiRecord, onSetup: () => Promise<void>, onNavigate: (view: string) => void }) { const counts = data.counts || {}; return <div className="content">{!setup.complete && <section className="panel onboarding" aria-labelledby="welcome-heading"><p className="eyebrow teal">FIRST RUN</p><h3 id="welcome-heading">Set up your local workspace</h3><p className="muted">Mailforge keeps campaigns, contacts, assets, and processing history in a local data directory. It starts in simulation mode; no provider is contacted and no message is sent.</p><div className="button-row"><button className="primary" onClick={() => void onSetup()}>Finish local setup</button><button onClick={() => onNavigate('maintenance')}>Review runtime details</button></div></section>}<div className="hero-copy"><div><p className="eyebrow teal">OPERATOR OVERVIEW</p><h2>Make every send<br /><em>accountable.</em></h2><p className="lede">A calm, local control room for contacts, policy-aware campaigns, and inbound signals.</p></div><div className="hero-note"><span className="stamp">LOCAL<br />FIRST</span><p>Durable actions<br />stay in your SQLite<br />authority.</p></div></div><div className="stat-grid"><Stat label="Contacts" value={counts.contacts ?? 0} tone="teal" /><Stat label="Lists" value={counts.lists ?? 0} /><Stat label="Inbound reviews" value={counts.inbound?.pending_reviews ?? 0} tone="amber" /><Stat label="Schema" value={`v${data.schema_version ?? '—'}`} /></div><section className="section-head"><div><p className="eyebrow">RECENT WORK</p><h3>Campaign pulse</h3></div><button className="text-button" onClick={() => onNavigate('campaigns')}>View campaigns ↗</button></section><CampaignTable items={data.campaigns || []} empty="No campaigns yet. Create a list and launch a synthetic campaign to begin." /></div> }
