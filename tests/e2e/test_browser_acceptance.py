@@ -148,11 +148,40 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             menu = page.get_by_role("button", name="Open navigation")
             menu.click()
             page.locator(".nav-scrim").wait_for()
+            maintenance = page.get_by_role("button", name="Maintenance")
+            assert page.locator(".rail").evaluate("e => e.scrollHeight > e.clientHeight")
+            maintenance.scroll_into_view_if_needed()
+            assert maintenance.is_visible()
+            assert page.locator(".rail").evaluate("e => e.scrollTop > 0")
             page.keyboard.press("Escape")
             assert menu.get_attribute("aria-expanded") == "false"
             assert page.evaluate(
                 "document.activeElement === document.querySelector('.mobile-menu-button')"
             )
+            assert page.locator(".rail").get_attribute("aria-hidden") == "true"
+            assert (
+                page.locator(".rail .nav-item", has_text="Maintenance").get_attribute("tabindex")
+                == "-1"
+            )
+            page.get_by_role("button", name="Open navigation").click()
+            page.get_by_role("button", name="Campaigns").click()
+            page.get_by_label("Communication purpose").select_option("marketing")
+            page.get_by_label("Audience list").select_option(label="Browser acceptance audience")
+            page.get_by_label("Campaign name").fill("Browser mobile marketing campaign")
+            page.get_by_role("button", name="Create draft").click()
+            page.get_by_text("Campaign draft created").wait_for()
+            campaign = page.evaluate(
+                """async () => {
+                    const response = await fetch('/api/v1/campaigns');
+                    const campaigns = await response.json();
+                    const item = campaigns.items.find(
+                        entry => entry.name === 'Browser mobile marketing campaign'
+                    );
+                    const workspace = await fetch(`/api/v1/campaigns/${item.id}/workspace`);
+                    return await workspace.json();
+                }"""
+            )
+            assert campaign["campaign"]["configuration"]["communication_purpose"] == "marketing"
             browser.close()
     finally:
         server.terminate()
@@ -546,6 +575,18 @@ def test_browser_unified_workspace_operational_controls(tmp_path: Path) -> None:
             page.get_by_label("Application timezone").fill("America/New_York")
             page.get_by_role("button", name="Save application preferences").click()
             page.get_by_text("Application preferences saved").wait_for()
+            page.get_by_role("button", name="Reports & Insights").click()
+            page.get_by_role("button", name="Maintenance").click()
+            timezone = page.get_by_label("Application timezone")
+            for _ in range(40):
+                if timezone.input_value() == "America/New_York":
+                    break
+                page.wait_for_timeout(50)
+            assert timezone.input_value() == "America/New_York"
+            page.reload(wait_until="networkidle")
+            assert page.get_by_label("Application timezone").input_value() == "America/New_York"
+            assert page.get_by_label("Keep synthetic simulation mode enabled").is_checked()
+            assert not page.get_by_label("Allow sample data during onboarding").is_checked()
             page.get_by_role("button", name="Create backup").click()
             page.get_by_text("Application backup created").wait_for()
             backup = page.locator(".list-row").filter(has_text="verified").first

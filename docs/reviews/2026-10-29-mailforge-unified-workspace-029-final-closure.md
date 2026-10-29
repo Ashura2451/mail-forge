@@ -17,15 +17,15 @@ provider access, public webhooks, or a merge decision.
 | --- | --- | --- |
 | Preserve the existing branch, commits, and PR | PASS | `git status`, ancestry, and PR metadata inspected; commits `00c766e` and `e0ec2ef` remain in history; no merge performed. |
 | Dashboard reports truthful runtime state | PASS | Current captures show Local mode, schema `v22`, durable-state labels, and both the intentional first-run/zero-count state and a populated state with one contact, one list, and a prepared campaign. |
-| Major workbenches have current rendered evidence | PASS | 22 post-closure screenshots cover dashboard, populated dashboard, activity, list tools, contacts, segments, Data Studio, Data Connections, Functions, Message Studio, Campaigns, Providers, Inbound, Automations, Reports, Email Standards, Integration Hub, Maintenance, mobile Message Studio/Campaigns/navigation, and tablet Reports. Capture summary reports no console errors or failed requests. |
-| Mobile navigation is usable and accessible | PASS | Playwright verifies the rail is offscreen at 390px, opens the labelled drawer, closes it with Escape, and restores focus to the menu button. Viewport-only evidence is retained. |
-| Campaigns mobile is usable | PASS | The permanent rail is replaced by the overlay drawer; the redundant legacy top action strip is hidden at the narrow breakpoint while the visible creation workflow remains. |
+| Major workbenches have current rendered evidence | PASS | 26 post-closure screenshots cover dashboard, populated dashboard, activity, list tools, contacts, segments, Data Studio, Data Connections, Functions, Message Studio, Campaigns, Providers, Inbound, Automations, Reports, Email Standards, Integration Hub, Maintenance, mobile Message Studio/Campaigns/navigation, tablet Reports, and four post-operation working states. The baseline capture reported no console errors or failed requests; targeted captures passed their operation assertions. |
+| Mobile navigation is usable and accessible | PASS | Playwright verifies the rail is offscreen at 390px, opens the labelled drawer, scrolls to and reaches Maintenance, closes it with Escape, restores focus to the menu button, and removes the closed drawer from keyboard interaction. Viewport-only evidence is retained. |
+| Campaigns mobile is usable | PASS | The permanent rail is replaced by the overlay drawer; the redundant legacy top action strip is hidden at the narrow breakpoint while the visible creation workflow retains and persists the selected communication purpose. |
 | Integration Hub is operational beyond empty state | PASS | Browser operation issued/revoked a scoped client, rejected unauthorized/revoked events, accepted and deduplicated an authorized event, registered/enabled a loopback webhook, processed a contact-import delivery, and verified the received HMAC signature and durable event ID. |
 | Data Connections and Data Studio are connected | PASS | Browser uploaded a disposable SQLite source, previewed it, created a snapshot, saved a recipe, and handed the snapshot to Data Studio using the current revision. |
 | Email Standards controls have a durable workflow | PASS | Browser saved an identity, recorded domain diagnostics, validated a MIME message, saved an unsubscribe endpoint, and evaluated marketing readiness with the one-click boundary visible. |
-| Maintenance recovery is safe and durable | PASS | Browser saved preferences, created a verified backup, and restored it into a staged destination using a basename-only selection. Integrity remained verified. |
+| Maintenance recovery is safe and durable | PASS | Browser saved preferences, reopened Maintenance after navigation and reload with the saved values intact, created a verified backup, and restored it into a staged destination using a basename-only selection. Integrity remained verified. |
 | Packaged behavior works across restart | PASS | The arm64 bundle was launched, used for Message Studio create/preview/save/publish and Maintenance backup/restore, stopped, relaunched against the same data directory, and verified to retain the published revision and staged restore artifact. |
-| Independent review by a different model/reviewer | NOT VERIFIED | No independent reviewer was available in this execution; this remains a PR-gate obligation. |
+| Independent review by a different model/reviewer | PASS | The initial independent review found four major defects; the correction pass addressed them. Follow-up r2 found one preference race and one drawer-focus issue; r3 independently verified both corrections with targeted Chromium probes and approved with no remaining major or minor findings. |
 | External provider, public callback, signing, and production qualification | SKIPPED | Explicitly outside the approved local synthetic scope. |
 
 ## Validation commands
@@ -40,7 +40,8 @@ Successful commands executed during closure:
 - `scripts/check-secrets.sh` — passed.
 - `git diff --check` — passed.
 - `scripts/package-macos.sh` — arm64 bundle built.
-- `shasum -c Resources/BUILD-METADATA.sha256` before launching the bundle — passed.
+- Stable launcher/metadata entries in `BUILD-METADATA.sha256` — passed; generated Python bytecode entries are mutable after packaging and are not claimed as a clean whole-bundle checksum.
+- Packaged smoke — bundle started on a disposable data directory, served the current frontend asset, and stopped through the bundled runtime.
 
 `uv run ruff format --check src tests` still reports 12 pre-existing files with
 format drift outside this scoped closure; no mass-formatting change was made.

@@ -7,15 +7,27 @@
   schema/integrity reporting, Integration Hub local client/event/webhook
   controls, Data Connections → Data Studio handoff, Email Standards actions,
   and staged Maintenance restore.
-- Captured 22 current rendered-screen views plus console/request results. The
-  local browser workflow completed scoped-client authorization and revocation,
+- Captured 26 current rendered-screen views plus console/request results: the
+  original 22-screen set and four post-operation working-state captures for
+  Integration Hub, Data Connections, Email Standards, and Maintenance. The
+  baseline capture reported no console errors or failed requests; the
+  targeted captures completed their browser assertions. The local browser
+  workflow completed scoped-client authorization and revocation,
   event duplicate handling, signed loopback delivery, source preview and
   snapshot, sender diagnostics, unsubscribe readiness, and backup restore.
 - Exercised the arm64 package across launch, browser operations, stop, restart
   against the same data directory, and durable-state verification. The bundle
-  passed its pre-launch manifest check. No external provider, public callback,
-  mailbox, recipient, live send, signing/notarization, or independent review
-  is claimed; PR #17 remains open and unmerged.
+  served the corrected frontend in a disposable packaged smoke. The final
+  independent r3 review approved the correction pass with no remaining major
+  or minor findings. No external provider, public callback, mailbox,
+  recipient, live send, or signing/notarization is claimed; PR #17 remains
+  open and unmerged pending integration.
+- Correction pass for the initial independent review fixed mobile drawer
+  scrolling and closed-drawer focus, removed unsafe mutation replay from
+  Retry, protected dirty Maintenance edits while hydrating saved preferences,
+  preserved Marketing purpose in the mobile campaign flow, and restored the
+  narrow split-card layout. The final independent re-review approved these
+  corrections.
 - Final local validation: 248 non-browser Python tests and 6 browser/
   accessibility tests passed; frontend build, Ruff check, secret scan, and
   diff hygiene passed. Ruff format check retains the documented baseline drift.
