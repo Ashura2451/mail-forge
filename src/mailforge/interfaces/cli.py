@@ -35,6 +35,7 @@ from mailforge.application.local_application import (
     restore_backup,
     validate_backup,
 )
+from mailforge.application.mailbox_operations import MailboxOperationsService
 from mailforge.application.mailer_compat import (
     load_legacy_configuration,
     migrate_legacy_state,
@@ -462,6 +463,17 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--sender")
     search.add_argument("--subject")
     search.add_argument("--classification")
+    search.add_argument("--source-ref")
+    search.add_argument("--account-ref")
+    search.add_argument("--folder")
+    search.add_argument("--recipient")
+    search.add_argument("--read", choices=["true", "false"])
+    search.add_argument("--flagged", choices=["true", "false"])
+    search.add_argument("--has-attachment", choices=["true", "false"])
+    search.add_argument("--thread-key")
+    search.add_argument("--received-after")
+    search.add_argument("--received-before")
+    search.add_argument("--processed", choices=["true", "false"])
     search.add_argument("--limit", type=int, default=100)
     search.add_argument("--offset", type=int, default=0)
     extract_values = inbound_commands.add_parser("extract", help="extract safe message metadata")
@@ -481,8 +493,44 @@ def build_parser() -> argparse.ArgumentParser:
     draft = inbound_commands.add_parser("draft", help="prepare a reply or forward draft")
     draft.add_argument("--database", type=Path, required=True)
     draft.add_argument("--message-id", required=True)
-    draft.add_argument("--kind", choices=["reply", "forward"], required=True)
+    draft.add_argument("--kind", choices=["reply", "reply_all", "forward"], required=True)
     draft.add_argument("--body", default="")
+    mailbox = inbound_commands.add_parser(
+        "mailbox", help="browse and operate a loopback IMAP fixture"
+    )
+    mailbox_commands = mailbox.add_subparsers(dest="mailbox_command", required=True)
+    mailbox_list = mailbox_commands.add_parser("list")
+    mailbox_list.add_argument("--database", type=Path, required=True)
+    mailbox_list.add_argument("--account", required=True)
+    mailbox_discover = mailbox_commands.add_parser("discover")
+    mailbox_discover.add_argument("--database", type=Path, required=True)
+    mailbox_discover.add_argument("--account", required=True)
+    mailbox_discover.add_argument("--authorization-ref", required=True)
+    mailbox_discover.add_argument("--purpose", required=True)
+    mailbox_discover.add_argument("--expires-at", required=True)
+    mailbox_sync = mailbox_commands.add_parser("sync")
+    mailbox_sync.add_argument("--database", type=Path, required=True)
+    mailbox_sync.add_argument("--account", required=True)
+    mailbox_sync.add_argument("--mailbox", default="INBOX")
+    mailbox_sync.add_argument("--batch-limit", type=int, default=100)
+    mailbox_sync.add_argument("--authorization-ref", required=True)
+    mailbox_sync.add_argument("--purpose", required=True)
+    mailbox_sync.add_argument("--expires-at", required=True)
+    mailbox_action = mailbox_commands.add_parser("action")
+    mailbox_action.add_argument("--database", type=Path, required=True)
+    mailbox_action.add_argument("--message-id", required=True)
+    mailbox_action.add_argument("--action", required=True)
+    mailbox_action.add_argument("--uidvalidity", required=True)
+    mailbox_action.add_argument("--uid", required=True)
+    mailbox_action.add_argument("--idempotency-key", required=True)
+    mailbox_action.add_argument("--authorization-ref", required=True)
+    mailbox_action.add_argument("--purpose", required=True)
+    mailbox_action.add_argument("--expires-at", required=True)
+    mailbox_action.add_argument("--target-folder")
+    mailbox_action.add_argument("--flag", action="append", default=[])
+    mailbox_reconcile = mailbox_commands.add_parser("reconcile")
+    mailbox_reconcile.add_argument("--database", type=Path, required=True)
+    mailbox_reconcile.add_argument("--action-id", required=True)
     reports = subparsers.add_parser(
         "reports", help="inspect local operational intelligence and export bounded reports"
     )
@@ -1715,6 +1763,13 @@ def main(argv: list[str] | None = None) -> int:
             service = InboundService(CampaignStore(args.database))
             operations = InboundOperations(service.store)
             service.set_operations(operations)
+            provider_operations = ProviderOperationsService(service.store)
+            mailbox_operations = MailboxOperationsService(
+                service.store,
+                inbound=service,
+                inbound_operations=operations,
+                provider_operations=provider_operations,
+            )
             if args.inbound_command == "import-eml":
                 report = service.ingest(
                     EmlFileSource(args.source_ref, args.path), retain_raw=args.retain_raw
@@ -1746,8 +1801,25 @@ def main(argv: list[str] | None = None) -> int:
                         operations.search(
                             q=args.query,
                             sender=args.sender,
+                            recipient=args.recipient,
                             subject=args.subject,
                             classification=args.classification,
+                            source_ref=args.source_ref,
+                            account_ref=args.account_ref,
+                            folder=args.folder,
+                            read=None if args.read is None else args.read == "true",
+                            flagged=None if args.flagged is None else args.flagged == "true",
+                            has_attachment=(
+                                None
+                                if args.has_attachment is None
+                                else args.has_attachment == "true"
+                            ),
+                            thread_key=args.thread_key,
+                            received_after=args.received_after,
+                            received_before=args.received_before,
+                            processed=(
+                                None if args.processed is None else args.processed == "true"
+                            ),
                             limit=args.limit,
                             offset=args.offset,
                         ),
@@ -1802,6 +1874,66 @@ def main(argv: list[str] | None = None) -> int:
                         default=str,
                     )
                 )
+            elif args.inbound_command == "mailbox":
+                from mailforge.infrastructure.credentials import EnvironmentCredentialResolver
+
+                if args.mailbox_command == "list":
+                    print(
+                        json.dumps(
+                            service.store.list_inbound_mailboxes(args.account),
+                            indent=2,
+                            default=str,
+                        )
+                    )
+                elif args.mailbox_command in {"discover", "sync"}:
+                    account = provider_operations.account(args.account)
+                    grant = ExternalOperationGrant(
+                        account_ref=args.account,
+                        operation=ProviderOperation.INBOUND_SYNC,
+                        host=account["host"],
+                        port=account["port"],
+                        purpose=args.purpose,
+                        expires_at=args.expires_at,
+                        authorization_ref=args.authorization_ref,
+                    )
+                    if args.mailbox_command == "discover":
+                        result = mailbox_operations.discover(
+                            args.account,
+                            resolver=EnvironmentCredentialResolver(),
+                            grant=grant,
+                        )
+                    else:
+                        report = mailbox_operations.sync(
+                            args.account,
+                            mailbox=args.mailbox,
+                            batch_limit=args.batch_limit,
+                            resolver=EnvironmentCredentialResolver(),
+                            grant=grant,
+                        )
+                        result = {"report": report.__dict__, "stats": service.stats()}
+                    print(json.dumps(result, indent=2, default=str))
+                elif args.mailbox_command == "action":
+                    row = service.store.get_inbound_message(args.message_id)
+                    result = mailbox_operations.execute_action(
+                        row["source_ref"],
+                        action=args.action,
+                        authorization_ref=args.authorization_ref,
+                        purpose=args.purpose,
+                        expires_at=args.expires_at,
+                        idempotency_key=args.idempotency_key,
+                        message_id=args.message_id,
+                        uidvalidity=args.uidvalidity,
+                        uid=args.uid,
+                        target_folder=args.target_folder,
+                        flags=tuple(args.flag),
+                        resolver=EnvironmentCredentialResolver(),
+                    )
+                    print(json.dumps(result, indent=2, default=str))
+                else:
+                    result = mailbox_operations.reconcile_action(
+                        args.action_id, resolver=EnvironmentCredentialResolver()
+                    )
+                    print(json.dumps(result, indent=2, default=str))
     elif args.command == "reports":
         from mailforge.infrastructure.campaign_store import CampaignStore
 
@@ -1909,22 +2041,31 @@ def main(argv: list[str] | None = None) -> int:
         service = IntegrationHubService(CampaignStore(args.database))
         try:
             if args.integration_command == "list":
-                print(json.dumps({
-                    "clients": service.list_clients(),
-                    "subscriptions": service.list_subscriptions(),
-                    "events": service.list_events(),
-                    "deliveries": service.deliveries(),
-                }, indent=2, default=str))
+                print(
+                    json.dumps(
+                        {
+                            "clients": service.list_clients(),
+                            "subscriptions": service.list_subscriptions(),
+                            "events": service.list_events(),
+                            "deliveries": service.deliveries(),
+                        },
+                        indent=2,
+                        default=str,
+                    )
+                )
             elif args.integration_command == "issue-client":
-                print(json.dumps(
-                    service.issue_client(
-                        args.name, args.scope, expires_at=args.expires_at
-                    ), indent=2
-                ))
+                print(
+                    json.dumps(
+                        service.issue_client(args.name, args.scope, expires_at=args.expires_at),
+                        indent=2,
+                    )
+                )
             elif args.integration_command == "rotate-client":
-                print(json.dumps(
-                    service.rotate_client(args.client_ref, expires_at=args.expires_at), indent=2
-                ))
+                print(
+                    json.dumps(
+                        service.rotate_client(args.client_ref, expires_at=args.expires_at), indent=2
+                    )
+                )
             elif args.integration_command == "revoke-client":
                 print(json.dumps(service.revoke_client(args.client_ref), indent=2))
             elif args.integration_command == "event-catalog":
@@ -1936,15 +2077,27 @@ def main(argv: list[str] | None = None) -> int:
             elif args.integration_command == "webhooks":
                 print(json.dumps(service.list_subscriptions(), indent=2, default=str))
             elif args.integration_command == "create-webhook":
-                print(json.dumps(service.create_subscription(
-                    args.name, args.endpoint, args.event_type,
-                    secret_ref=args.secret_ref, enabled=args.enable,
-                ), indent=2, default=str))
+                print(
+                    json.dumps(
+                        service.create_subscription(
+                            args.name,
+                            args.endpoint,
+                            args.event_type,
+                            secret_ref=args.secret_ref,
+                            enabled=args.enable,
+                        ),
+                        indent=2,
+                        default=str,
+                    )
+                )
             elif args.integration_command == "webhook-state":
-                print(json.dumps(
-                    service.set_subscription(args.subscription_ref, enabled=args.enable),
-                    indent=2, default=str,
-                ))
+                print(
+                    json.dumps(
+                        service.set_subscription(args.subscription_ref, enabled=args.enable),
+                        indent=2,
+                        default=str,
+                    )
+                )
             elif args.integration_command == "deliveries":
                 print(json.dumps(service.deliveries(), indent=2, default=str))
             elif args.integration_command == "diagnostics":

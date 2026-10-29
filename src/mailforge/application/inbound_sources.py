@@ -6,6 +6,7 @@ import hashlib
 import imaplib
 import mailbox
 import poplib
+import re
 import ssl
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -170,6 +171,7 @@ class SimulatedImapSource:
                 mailbox=self.mailbox_name,
                 uidvalidity=uidvalidity,
                 uid=uid,
+                flags=tuple(getattr(self.endpoint, "flags", lambda _uid: ())(uid)),
             )
             count += 1
             if limit is not None and count >= limit:
@@ -219,10 +221,12 @@ class ImapSource:
         config: IMAPConnectionConfig,
         *,
         credential_resolver: CredentialResolver | None = None,
+        account_ref: str | None = None,
     ):
         self.source_ref = source_ref
         self.config = config
         self.credential_resolver = credential_resolver or EnvironmentCredentialResolver()
+        self.account_ref = account_ref or source_ref
         self.mailbox_name = config.mailbox
         self.last_capabilities: tuple[str, ...] = ()
 
@@ -269,7 +273,7 @@ class ImapSource:
         value = values[0]
         return value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
 
-    def _connect(self) -> tuple[imaplib.IMAP4, str]:
+    def _authenticate(self) -> imaplib.IMAP4:
         client = imaplib.IMAP4_SSL(
             self.config.host,
             self.config.port,
@@ -290,16 +294,175 @@ class ImapSource:
                 login_status, _ = client.login(self.config.username or "", self._credential())
             if login_status != "OK":
                 raise SourceError("IMAP authentication failed")
-            select_status, _ = client.select(self.config.mailbox, readonly=True)
-            if select_status != "OK":
-                raise SourceError("IMAP read-only mailbox selection failed")
-            return client, self._uidvalidity(client)
+            return client
         except BaseException:
             try:
                 client.logout()
             except Exception:
                 pass
             raise
+
+    def _connect(
+        self, *, mailbox_name: str | None = None, readonly: bool = True
+    ) -> tuple[imaplib.IMAP4, str]:
+        client = self._authenticate()
+        selected = mailbox_name or self.config.mailbox
+        select_status, _ = client.select(selected, readonly=readonly)
+        if select_status != "OK":
+            try:
+                client.logout()
+            except Exception:
+                pass
+            raise SourceError("IMAP mailbox selection failed")
+        return client, self._uidvalidity(client)
+
+    @staticmethod
+    def _parse_list_row(item: object) -> dict[str, object] | None:
+        raw = item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+        match = re.match(r"\((?P<flags>[^)]*)\)\s+\"(?P<delimiter>[^\"]*)\"\s+(?P<name>.*)$", raw)
+        if not match:
+            return None
+        name = match.group("name").strip()
+        if len(name) >= 2 and name[0] == name[-1] == '"':
+            name = name[1:-1].replace('\\"', '"')
+        delimiter = match.group("delimiter") or None
+        parent = name.rsplit(delimiter, 1)[0] if delimiter and delimiter in name else None
+        return {
+            "mailbox": name,
+            "parent_mailbox": parent,
+            "delimiter": delimiter,
+            "flags": tuple(sorted(match.group("flags").split())),
+            "selectable": "\\Noselect" not in match.group("flags"),
+        }
+
+    def discover_mailboxes(self) -> list[dict[str, object]]:
+        client = self._authenticate()
+        try:
+            status, data = client.list('""', '"*"')
+            if status != "OK":
+                raise SourceError("IMAP LIST failed")
+            result = [parsed for item in data if (parsed := self._parse_list_row(item)) is not None]
+            return result
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def mailbox_state(self, mailbox_name: str | None = None) -> dict[str, object]:
+        client, uidvalidity = self._connect(mailbox_name=mailbox_name, readonly=True)
+        try:
+            selected = mailbox_name or self.config.mailbox
+            status, data = client.status(selected, "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")
+            values: dict[str, str] = {}
+            if status == "OK" and data:
+                raw = (
+                    data[0].decode("ascii", "replace")
+                    if isinstance(data[0], bytes)
+                    else str(data[0])
+                )
+                values = {
+                    key: value
+                    for key, value in re.findall(
+                        r"(MESSAGES|UNSEEN|UIDNEXT|UIDVALIDITY)\s+(\d+)", raw
+                    )
+                }
+            return {
+                "mailbox": selected,
+                "uidvalidity": uidvalidity,
+                "uidnext": values.get("UIDNEXT"),
+                "total_count": int(values["MESSAGES"]) if "MESSAGES" in values else None,
+                "unseen_count": int(values["UNSEEN"]) if "UNSEEN" in values else None,
+                "capabilities": self.last_capabilities,
+            }
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fetch_flags(data: object) -> tuple[str, ...]:
+        values: set[str] = set()
+        if isinstance(data, (list, tuple)):
+            for item in data:
+                raw = item.decode("ascii", "replace") if isinstance(item, bytes) else str(item)
+                match = re.search(r"FLAGS \(([^)]*)\)", raw)
+                if match:
+                    values.update(match.group(1).split())
+        return tuple(sorted(values))
+
+    def flags_for(self, mailbox_name: str, uid: str) -> tuple[str, ...]:
+        client, _ = self._connect(mailbox_name=mailbox_name, readonly=True)
+        try:
+            status, data = client.uid("FETCH", uid, "(FLAGS UID)")
+            if status != "OK":
+                raise SourceError(f"IMAP UID FLAG FETCH failed for {uid}")
+            return self._fetch_flags(data)
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def _mutate(
+        self, mailbox_name: str, uid: str, command: str, *arguments: str
+    ) -> dict[str, object]:
+        client, uidvalidity = self._connect(mailbox_name=mailbox_name, readonly=False)
+        try:
+            if command == "STORE":
+                status, data = client.uid("STORE", uid, *arguments)
+            elif command == "COPY":
+                status, data = client.uid("COPY", uid, *arguments)
+            elif command == "MOVE":
+                if "MOVE" not in self.last_capabilities:
+                    raise SourceError("IMAP UID MOVE is not advertised by this server")
+                status, data = client.uid("MOVE", uid, *arguments)
+            else:
+                raise SourceError("unsupported IMAP mutation command")
+            if status != "OK":
+                raise SourceError(f"IMAP UID {command} failed")
+            return {"uidvalidity": uidvalidity, "command": command, "response": str(data)}
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+    def mutate(
+        self,
+        *,
+        mailbox_name: str,
+        uid: str,
+        action: str,
+        flags: tuple[str, ...] = (),
+        target_folder: str | None = None,
+    ) -> dict[str, object]:
+        if action == "mark_read":
+            return self._mutate(mailbox_name, uid, "STORE", "+FLAGS.SILENT", r"(\Seen)")
+        if action == "mark_unread":
+            return self._mutate(mailbox_name, uid, "STORE", "-FLAGS.SILENT", r"(\Seen)")
+        if action == "flag":
+            if not flags or any(
+                flag not in {r"\Seen", r"\Flagged", r"\Answered", r"\Draft"} for flag in flags
+            ):
+                raise SourceError("unsupported IMAP flag")
+            return self._mutate(mailbox_name, uid, "STORE", "+FLAGS.SILENT", f"({' '.join(flags)})")
+        if action == "unflag":
+            if not flags or any(
+                flag not in {r"\Seen", r"\Flagged", r"\Answered", r"\Draft"} for flag in flags
+            ):
+                raise SourceError("unsupported IMAP flag")
+            return self._mutate(mailbox_name, uid, "STORE", "-FLAGS.SILENT", f"({' '.join(flags)})")
+        if action == "copy":
+            if not target_folder:
+                raise SourceError("IMAP COPY requires a target folder")
+            return self._mutate(mailbox_name, uid, "COPY", target_folder)
+        if action in {"move", "archive"}:
+            if not target_folder:
+                raise SourceError("IMAP MOVE requires a target folder")
+            return self._mutate(mailbox_name, uid, "MOVE", target_folder)
+        raise SourceError("permanent deletion and EXPUNGE are not supported")
 
     def messages(
         self, cursor: str | None = None, limit: int | None = None
@@ -327,7 +490,7 @@ class ImapSource:
             for uid in uid_values:
                 if uid <= previous_uid:
                     continue
-                status, fetched = client.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                status, fetched = client.uid("FETCH", str(uid), "(BODY.PEEK[] FLAGS UID)")
                 if status != "OK":
                     raise SourceError(f"IMAP UID FETCH failed for {uid}")
                 raw = next(
@@ -340,6 +503,7 @@ class ImapSource:
                 )
                 if raw is None:
                     raise SourceError(f"IMAP UID FETCH returned no message for {uid}")
+                flags = self._fetch_flags(fetched)
                 if len(raw) > self.config.max_message_bytes:
                     raise SourceError(f"IMAP message {uid} exceeds configured acquisition limit")
                 yield SourceMessage(
@@ -349,6 +513,8 @@ class ImapSource:
                     mailbox=self.config.mailbox,
                     uidvalidity=uidvalidity,
                     uid=str(uid),
+                    flags=flags,
+                    account_ref=self.account_ref,
                 )
                 count += 1
                 if limit is not None and count >= limit:

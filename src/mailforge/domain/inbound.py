@@ -91,6 +91,8 @@ class SourceMessage:
     mailbox: str | None = None
     uidvalidity: str | None = None
     uid: str | None = None
+    flags: tuple[str, ...] = field(default_factory=tuple)
+    account_ref: str | None = None
     received_at: str | None = None
 
 

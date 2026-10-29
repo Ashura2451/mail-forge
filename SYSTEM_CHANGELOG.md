@@ -1,5 +1,19 @@
 # System changelog
 
+## 2026-10-29 — Mailbox operations 030
+
+- Extended the existing inbound/provider authorities with migration 23 folder
+  projections, persisted UID/UIDVALIDITY and remote flags, conversation
+  grouping, reply-all provenance, and sync/action reporting.
+- Added bounded loopback-only IMAP folder discovery, incremental synchronization,
+  UID-scoped flag/copy/move/archive actions, append-only action transitions, and
+  explicit refusal of permanent deletion and EXPUNGE. Read-only and mutation
+  disabled remain the account defaults; no real mailbox or live reply was used.
+- Added browser, API, and CLI mailbox controls plus focused migration/thread/
+  action tests. Validation passed with 250 Python tests, 6 browser/accessibility
+  tests, frontend build, Ruff, arm64 package build, bundled runtime smoke, and
+  bounded synthetic performance evidence.
+
 ## 2026-10-29 — Unified workspace final closure evidence
 
 - Completed the 029 browser acceptance slice across the current workbenches,

@@ -350,8 +350,12 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
             message_row = reopened.locator('tr[tabindex="0"]').first
             message_row.click()
             reopened.get_by_text("Attachments: 0").wait_for()
+            reopened.get_by_role("button", name="Open conversation").click()
+            reopened.get_by_text("header_evidence").wait_for()
             reopened.get_by_role("button", name="Prepare reply draft").click()
             reopened.get_by_text("Reply draft prepared in Message Studio").wait_for()
+            reopened.get_by_role("button", name="Prepare reply-all draft").click()
+            reopened.get_by_text("Reply-all draft prepared in Message Studio").wait_for()
             reopened.get_by_role("button", name="Approve").click()
             reopened.get_by_text("Review approved").wait_for()
             assert reopened.get_by_text("No inbound actions need review.").is_visible()

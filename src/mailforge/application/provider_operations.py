@@ -447,10 +447,20 @@ class ProviderOperationsService:
         return diagnostic.to_dict()
 
     def configure_inbound(
-        self, ref: str, *, mailbox: str, max_fetch: int = 100
+        self,
+        ref: str,
+        *,
+        mailbox: str,
+        max_fetch: int = 100,
+        sync_enabled: bool = True,
+        mutation_enabled: bool = False,
     ) -> dict[str, object]:
         return self.store.upsert_provider_inbound_settings(
-            ref, mailbox=mailbox, max_fetch=max_fetch
+            ref,
+            mailbox=mailbox,
+            max_fetch=max_fetch,
+            sync_enabled=sync_enabled,
+            mutation_enabled=mutation_enabled,
         )
 
     def controlled_test_send(
