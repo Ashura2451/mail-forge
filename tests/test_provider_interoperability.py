@@ -195,8 +195,7 @@ class _IMAPHandler(socketserver.BaseRequestHandler):
                 self._send(
                     connection,
                     (
-                        f"* CAPABILITY IMAP4rev1{move} AUTH=PLAIN\r\n"
-                        f"{tag} OK capability\r\n"
+                        f"* CAPABILITY IMAP4rev1{move} AUTH=PLAIN\r\n{tag} OK capability\r\n"
                     ).encode(),
                 )
             elif command == "LOGIN":

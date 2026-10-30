@@ -910,7 +910,9 @@ class DataStudioService:
                     and revision["content_hash"] != step.get("content_hash")
                 )
             ):
-                raise DataStudioError("function revision is not valid for Data Studio", "function_invalid")
+                raise DataStudioError(
+                    "function revision is not valid for Data Studio", "function_invalid"
+                )
 
     def preview(
         self, source_path: str | Path, definition: dict[str, Any], *, limit: int = 50
@@ -1467,6 +1469,7 @@ class DataStudioService:
                     if key not in existing:
                         summary["function_references"].append(item)
                         existing.add(key)
+
             dedupe_seen: dict[tuple[str, ...], set[tuple[Any, ...]]] = {}
             with (
                 output.open("w", encoding="utf-8") as out,
@@ -1961,9 +1964,11 @@ class DataStudioService:
         return {
             "rows": working[:MAX_PREVIEW_ROWS] if preview else working,
             "errors": errors,
-            "function_references": list({
-                (item["function_id"], item["revision_id"]): item for item in function_references
-            }.values()),
+            "function_references": list(
+                {
+                    (item["function_id"], item["revision_id"]): item for item in function_references
+                }.values()
+            ),
             "removed": removed,
             "counts": {
                 "input": len(rows),

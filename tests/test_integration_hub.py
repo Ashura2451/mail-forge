@@ -52,9 +52,7 @@ def test_schema_22_and_client_event_idempotency(tmp_path: Path) -> None:
     with store.connect() as connection:
         tables = {
             row["name"]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         stored = connection.execute(
             "SELECT token_hash,token_prefix FROM integration_clients"
@@ -78,8 +76,9 @@ def test_schema_22_and_client_event_idempotency(tmp_path: Path) -> None:
     )
     with pytest.raises(IntegrationHubError, match="invalid"):
         service.authenticate(issued["token"], "INGEST_LOCAL_EVENT")
-    assert service.authenticate(rotated["token"], "INGEST_LOCAL_EVENT")["client_ref"] == (
-        issued["client_ref"]
+    assert (
+        service.authenticate(rotated["token"], "INGEST_LOCAL_EVENT")["client_ref"]
+        == (issued["client_ref"])
     )
     service.revoke_client(issued["client_ref"])
     with pytest.raises(IntegrationHubError, match="revoked"):
@@ -190,9 +189,12 @@ def test_webhook_signature_retry_and_terminal_state(tmp_path: Path) -> None:
         b"synthetic-webhook-secret", f"{timestamp}.".encode() + body, hashlib.sha256
     ).hexdigest()
     assert signature == f"v1={expected}"
-    assert IntegrationHubService.verify_signature(
-        "synthetic-webhook-secret", body, timestamp=timestamp, signature=signature, now=NOW
-    ) is True
+    assert (
+        IntegrationHubService.verify_signature(
+            "synthetic-webhook-secret", body, timestamp=timestamp, signature=signature, now=NOW
+        )
+        is True
+    )
     assert service.subscription(subscription["subscription_ref"])["last_success_at"] == (
         NOW.isoformat()
     )
@@ -205,7 +207,10 @@ def test_bearer_event_route_does_not_use_browser_session(tmp_path: Path) -> None
     assert client.get("/api/v1/integrations").status_code == 401
     session = client.get("/api/v1/session")
     assert session.status_code == 200
-    assert client.post(
-        "/api/v1/integrations/events",
-        json=_event(),
-    ).status_code == 401
+    assert (
+        client.post(
+            "/api/v1/integrations/events",
+            json=_event(),
+        ).status_code
+        == 401
+    )

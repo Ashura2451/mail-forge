@@ -432,8 +432,7 @@ class MailboxOperationsService:
             )
             if result.get("target_uid") is not None:
                 expected = json.loads(
-                    self.inbound_operations.mailbox_action(request["id"])["expected_state"]
-                    or "{}"
+                    self.inbound_operations.mailbox_action(request["id"])["expected_state"] or "{}"
                 )
                 expected["target_uid"] = result["target_uid"]
                 with self.store.transaction(immediate=True) as connection:

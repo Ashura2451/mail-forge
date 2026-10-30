@@ -425,11 +425,15 @@ class ImapSource:
             status, data = client.uid("FETCH", uid, "(FLAGS UID)")
             if status != "OK":
                 raise SourceError(f"IMAP UID FLAG FETCH failed for {uid}")
-            raw_items = [
-                item.decode("ascii", "replace") if isinstance(item, bytes) else str(item)
-                for item in data
-                if not isinstance(item, tuple)
-            ] if isinstance(data, (list, tuple)) else []
+            raw_items = (
+                [
+                    item.decode("ascii", "replace") if isinstance(item, bytes) else str(item)
+                    for item in data
+                    if not isinstance(item, tuple)
+                ]
+                if isinstance(data, (list, tuple))
+                else []
+            )
             if not any(re.search(rf"UID\s+{re.escape(uid)}\b", item) for item in raw_items):
                 raise SourceError(f"IMAP UID FLAG FETCH returned no matching UID for {uid}")
             if not any("FLAGS (" in item for item in raw_items):
@@ -467,18 +471,14 @@ class ImapSource:
             matched_uids: list[str] = []
             for candidate in raw_uids.split()[:1000]:
                 candidate_uid = candidate.decode("ascii", "replace")
-                fetch_status, fetched = client.uid(
-                    "FETCH", candidate_uid, "(BODY.PEEK[] UID)"
-                )
+                fetch_status, fetched = client.uid("FETCH", candidate_uid, "(BODY.PEEK[] UID)")
                 if fetch_status != "OK":
                     continue
                 raw = next(
                     (
                         item[1]
                         for item in fetched
-                        if isinstance(item, tuple)
-                        and len(item) > 1
-                        and isinstance(item[1], bytes)
+                        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes)
                     ),
                     None,
                 )
@@ -489,9 +489,11 @@ class ImapSource:
                 content_match = bool(
                     content_hash and hashlib.sha256(raw).hexdigest() == content_hash
                 )
-                if (identity_match or content_match) and (
-                    message_id is None or identity_match
-                ) and (content_hash is None or content_match):
+                if (
+                    (identity_match or content_match)
+                    and (message_id is None or identity_match)
+                    and (content_hash is None or content_match)
+                ):
                     matched_uids.append(candidate_uid)
             if _status_uidvalidity(client, mailbox_name) != uidvalidity:
                 raise CursorInvalidated("IMAP UIDVALIDITY changed while observing message identity")

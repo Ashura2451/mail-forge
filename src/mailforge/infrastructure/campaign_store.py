@@ -2041,8 +2041,12 @@ class CampaignStore:
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_connections'"
         ).fetchone():
-            connection.execute("ALTER TABLE data_connection_events RENAME TO data_connection_events_legacy")
-            connection.execute("ALTER TABLE data_connection_snapshots RENAME TO data_connection_snapshots_legacy")
+            connection.execute(
+                "ALTER TABLE data_connection_events RENAME TO data_connection_events_legacy"
+            )
+            connection.execute(
+                "ALTER TABLE data_connection_snapshots RENAME TO data_connection_snapshots_legacy"
+            )
             connection.execute("ALTER TABLE data_connections RENAME TO data_connections_legacy")
             for index in (
                 "idx_data_connection_snapshots_status",
@@ -2151,11 +2155,11 @@ class CampaignStore:
             ("remote_uid", "TEXT"),
         ):
             if column not in message_columns:
-                connection.execute(
-                    f"ALTER TABLE inbound_messages ADD COLUMN {column} {definition}"
-                )
+                connection.execute(f"ALTER TABLE inbound_messages ADD COLUMN {column} {definition}")
 
-        connection.execute("ALTER TABLE inbound_mailbox_actions RENAME TO inbound_mailbox_actions_legacy")
+        connection.execute(
+            "ALTER TABLE inbound_mailbox_actions RENAME TO inbound_mailbox_actions_legacy"
+        )
         connection.execute(
             """
             CREATE TABLE inbound_mailbox_actions (
@@ -2226,9 +2230,7 @@ class CampaignStore:
             )
             """
         )
-        connection.execute(
-            "INSERT INTO inbound_drafts SELECT * FROM inbound_drafts_legacy"
-        )
+        connection.execute("INSERT INTO inbound_drafts SELECT * FROM inbound_drafts_legacy")
         connection.execute("DROP TABLE inbound_drafts_legacy")
         for statement in MIGRATION_23_SQL.split(";"):
             statement = statement.strip()
@@ -4855,10 +4857,14 @@ class CampaignStore:
         run_id: str | None = None,
     ) -> None:
         with self.transaction(immediate=True) as connection:
-            if run_id is not None and connection.execute(
-                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
-                (run_id, source_ref),
-            ).fetchone() is None:
+            if (
+                run_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                    (run_id, source_ref),
+                ).fetchone()
+                is None
+            ):
                 raise RuntimeError("inbound synchronization run no longer owns its cursor")
             connection.execute(
                 "INSERT INTO inbound_cursors(source_ref, uidvalidity, cursor, generation, updated_at) VALUES (?, ?, ?, 0, ?) "
@@ -4871,10 +4877,14 @@ class CampaignStore:
     ) -> None:
         _assert_no_secrets({"error": error}, "inbound_cursor")
         with self.transaction(immediate=True) as connection:
-            if run_id is not None and connection.execute(
-                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
-                (run_id, source_ref),
-            ).fetchone() is None:
+            if (
+                run_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                    (run_id, source_ref),
+                ).fetchone()
+                is None
+            ):
                 return
             connection.execute(
                 "UPDATE inbound_cursors SET cursor = NULL, generation = generation + 1, last_error = ?, updated_at = ? WHERE source_ref = ?",
@@ -5061,7 +5071,9 @@ class CampaignStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"mailbox action not found: {action_id}")
-        self.record_inbound_action_event(action_id, action_state, {"status": status, "detail": response_detail})
+        self.record_inbound_action_event(
+            action_id, action_state, {"status": status, "detail": response_detail}
+        )
         return dict(row)
 
     def claim_inbound_mailbox_action(self, action_id: str) -> dict[str, Any] | None:
