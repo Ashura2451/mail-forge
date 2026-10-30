@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
+import zipfile
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from mailforge.application.local_application import DataDirectory, list_backups
+from mailforge.application.local_application import DataDirectory, validate_backup
 from mailforge.infrastructure.campaign_store import CampaignStore
 
 
@@ -47,22 +49,47 @@ class OperationalAssuranceService:
             ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
-    def _job_rows(self) -> list[dict[str, Any]]:
+    def _all_counts(self, table: str) -> dict[str, int]:
+        try:
+            with self.store.connect() as connection:
+                rows = connection.execute(
+                    f"SELECT status, COUNT(*) AS count FROM {table} GROUP BY status"
+                ).fetchall()
+            return {str(row["status"]): int(row["count"]) for row in rows}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _safe_error(value: Any) -> str:
+        """Keep diagnostics useful without copying secrets or local paths."""
+
+        text = str(value or "")
+        if re.search(r"(?i)(password|secret|token|api[_ -]?key|credential|bearer)", text):
+            return "[redacted-sensitive-error]"
+        text = re.sub(r"/(?:Users|private|var|tmp|home|Volumes)/[^\s'\"]+", "[local-path]", text)
+        return text[:300]
+
+    def _job_rows(self, *, limit: int | None = 500) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         tables = (
+            ("campaigns", "campaigns", "failure_reason"),
             ("list_processing_jobs", "list_tools", "error_message"),
             ("data_studio_jobs", "data_studio", "error_message"),
             ("data_connection_snapshots", "data_connections", "error_message"),
             ("automation_runs", "automation", "failure_reason"),
             ("integration_webhook_deliveries", "integration", "last_error"),
+            ("provider_test_submissions", "providers", "detail"),
+            ("inbound_runs", "inbound", "error_message"),
+            ("inbound_mailbox_actions", "inbound", "error_message"),
         )
         with self.store.connect() as connection:
             for table, subsystem, error_column in tables:
                 try:
+                    limit_clause = f" LIMIT {limit}" if limit is not None else ""
                     result = connection.execute(
                         f"SELECT id, status, created_at, updated_at, "
                         f"{error_column} AS error "
-                        f"FROM {table} ORDER BY updated_at DESC LIMIT 100"
+                        f"FROM {table} ORDER BY updated_at DESC{limit_clause}"
                     ).fetchall()
                 except Exception:
                     continue
@@ -73,16 +100,38 @@ class OperationalAssuranceService:
                         "status": row["status"],
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
-                        "error": str(row["error"] or "")[:300],
+                        "error": self._safe_error(row["error"]),
+                        "workbench": {
+                            "list_tools": "list-tools",
+                            "data_studio": "data-studio",
+                            "data_connections": "data-connections",
+                            "automation": "automations",
+                            "integration": "integrations",
+                            "campaigns": "campaigns",
+                            "providers": "providers",
+                            "inbound": "inbound",
+                        }[subsystem],
                     }
                     for row in result
                 )
         return rows
 
+    def _backup_observation(self) -> tuple[datetime | None, int]:
+        paths = sorted(self.data_directory.backups.glob("*.zip"), reverse=True)
+        latest: datetime | None = None
+        for path in paths:
+            try:
+                item = validate_backup(path)
+            except OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile:
+                continue
+            if item.get("valid"):
+                latest = _parse(item.get("created_at"))
+                if latest is not None:
+                    break
+        return latest, len(paths)
+
     def _incident(self, subsystem: str, condition: str, operation_id: str | None) -> dict[str, Any]:
-        identity = hashlib.sha256(
-            f"{subsystem}:{condition}:{operation_id or ''}".encode()
-        ).hexdigest()[:24]
+        identity = hashlib.sha256(f"{subsystem}:{operation_id or ''}".encode()).hexdigest()[:24]
         severity = (
             "critical"
             if condition in {"database_unavailable", "database_integrity_failed"}
@@ -129,7 +178,7 @@ class OperationalAssuranceService:
             )
         except OSError as error:
             checks.append({"key": "storage", "state": "unknown", "detail": type(error).__name__})
-        jobs = self._job_rows()
+        jobs = self._job_rows(limit=None)
         now = datetime.now(UTC)
         stale = [
             job
@@ -150,10 +199,65 @@ class OperationalAssuranceService:
                     "active_count": sum(job["status"] in {"running", "delivering"} for job in jobs),
                 }
             )
-        backups = list_backups(self.data_directory)
-        latest = max(
-            (_parse(item.get("created_at")) for item in backups if item.get("valid")), default=None
-        )
+        subsystem_counts = {
+            "campaigns": self._all_counts("campaigns"),
+            "provider_tests": self._all_counts("provider_test_submissions"),
+            "mailbox_sync": self._all_counts("inbound_runs"),
+            "mailbox_actions": self._all_counts("inbound_mailbox_actions"),
+        }
+        provider_resources: list[dict[str, Any]] = []
+        try:
+            with self.store.connect() as connection:
+                provider_resources = [
+                    {
+                        "account_ref": row["ref"],
+                        "status": row["status"],
+                        "configured_rate_per_minute": row["pacing_per_minute"],
+                        "configured_concurrency": row["max_concurrency"],
+                        "quota_evidence": "configured-local-limit",
+                    }
+                    for row in connection.execute(
+                        "SELECT ref,status,pacing_per_minute,max_concurrency "
+                        "FROM provider_accounts ORDER BY ref"
+                    ).fetchall()
+                ]
+        except Exception:
+            provider_resources = []
+        if provider_resources:
+            checks.append(
+                {"key": "provider_capacity", "state": "healthy", "detail": "configured limits only"}
+            )
+        for key, counts in subsystem_counts.items():
+            failed_count = sum(
+                value
+                for status, value in counts.items()
+                if status in {"failed", "ambiguous", "error"}
+            )
+            if failed_count:
+                checks.append({"key": key, "state": "degraded", "failed_count": failed_count})
+            elif counts:
+                checks.append({"key": key, "state": "healthy", "counts": counts})
+        if worker_status:
+            stopped = [
+                key
+                for key in ("scheduler", "automation_scheduler")
+                if worker_status.get(key) != "running"
+            ]
+            if stopped:
+                checks.append(
+                    {"key": "supervisors", "state": "action_required", "stopped": stopped}
+                )
+            credential_store = worker_status.get("credential_store")
+            if isinstance(credential_store, dict):
+                keychain_state = credential_store.get("keychain", "unknown")
+                checks.append(
+                    {
+                        "key": "keychain_backend",
+                        "state": "healthy" if keychain_state == "available" else "unknown",
+                        "detail": f"keychain backend {keychain_state}; references remain opaque",
+                    }
+                )
+        latest, backup_count = self._backup_observation()
         backup_state = (
             "healthy" if latest and latest >= now - timedelta(days=7) else "action_required"
         )
@@ -162,7 +266,7 @@ class OperationalAssuranceService:
                 "key": "backups",
                 "state": backup_state,
                 "latest_at": latest.isoformat() if latest else None,
-                "count": len(backups),
+                "count": backup_count,
             }
         )
         states = {check["state"] for check in checks}
@@ -184,6 +288,8 @@ class OperationalAssuranceService:
                 "failed": len(failed),
                 "stale": len(stale),
             },
+            "subsystems": subsystem_counts,
+            "resources": {"providers": provider_resources},
             "worker_status": worker_status or {},
         }
 
@@ -195,42 +301,86 @@ class OperationalAssuranceService:
             rows = [row for row in rows if row["status"] == status]
         return {"items": rows[:200], "count": len(rows)}
 
-    def incidents(self, *, include_acknowledged: bool = False) -> dict[str, Any]:
-        health = self.health()
-        incidents = [
-            self._incident(check["key"], check["state"], None)
-            for check in health["checks"]
-            if check["state"] not in {"healthy", "unknown"}
-        ]
+    def incidents(
+        self,
+        *,
+        include_acknowledged: bool = False,
+        worker_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._persist_incidents(self.health(worker_status=worker_status))
         with self.store.connect() as connection:
             rows = connection.execute(
-                "SELECT aggregate_id, event_type, payload_json, occurred_at "
+                "SELECT id, aggregate_id, event_type, payload_json, occurred_at "
                 "FROM operational_events "
-                "WHERE aggregate_type='operational_incident' ORDER BY occurred_at DESC LIMIT 200"
+                "WHERE aggregate_type='operational_incident' "
+                "ORDER BY occurred_at DESC, id DESC LIMIT 500"
             ).fetchall()
-        acknowledged = {
-            row["aggregate_id"] for row in rows if row["event_type"] == "incident_acknowledged"
-        }
+        latest: dict[str, dict[str, Any]] = {}
         for row in rows:
             payload = json.loads(row["payload_json"] or "{}")
-            if include_acknowledged or payload.get("disposition") != "acknowledged":
-                incidents.append(
-                    {
-                        "id": row["aggregate_id"],
-                        "event_type": row["event_type"],
-                        **payload,
-                        "occurred_at": row["occurred_at"],
-                    }
-                )
-        unique = {
-            item["id"]: item
-            for item in incidents
-            if include_acknowledged or item["id"] not in acknowledged
-        }
-        return {"items": list(unique.values())[:200], "count": len(unique)}
+            latest.setdefault(
+                row["aggregate_id"],
+                {
+                    "id": row["aggregate_id"],
+                    "event_type": row["event_type"],
+                    **payload,
+                    "occurred_at": row["occurred_at"],
+                },
+            )
+        items = list(latest.values())
+        if not include_acknowledged:
+            items = [item for item in items if item.get("disposition") == "open"]
+        return {"items": items[:200], "count": len(items)}
 
-    def health_check(self) -> dict[str, Any]:
-        result = self.health()
+    def _persist_incidents(self, result: dict[str, Any]) -> None:
+        observed = {
+            check["key"]: check
+            for check in result["checks"]
+            if check["state"] not in {"healthy", "unknown"}
+        }
+        with self.store.transaction(immediate=True) as connection:
+            for check in result["checks"]:
+                incident = self._incident(check["key"], check["state"], None)
+                incident_id = incident["id"]
+                previous = connection.execute(
+                    "SELECT event_type, payload_json FROM operational_events "
+                    "WHERE aggregate_type='operational_incident' AND aggregate_id=? "
+                    "ORDER BY occurred_at DESC, id DESC LIMIT 1",
+                    (incident_id,),
+                ).fetchone()
+                if check["key"] in observed:
+                    signature = json.dumps(check, sort_keys=True, separators=(",", ":"))
+                    previous_payload = (
+                        json.loads(previous["payload_json"] or "{}") if previous else {}
+                    )
+                    if (
+                        previous
+                        and previous["event_type"] in {"incident_observed", "incident_acknowledged"}
+                        and previous_payload.get("signature") == signature
+                    ):
+                        continue
+                    self.store.record_event(
+                        connection,
+                        "operational_incident",
+                        incident_id,
+                        "incident_observed",
+                        {**incident, "disposition": "open", "signature": signature},
+                    )
+                elif previous and previous["event_type"] in {
+                    "incident_observed",
+                    "incident_acknowledged",
+                }:
+                    self.store.record_event(
+                        connection,
+                        "operational_incident",
+                        incident_id,
+                        "incident_resolved",
+                        {**incident, "disposition": "resolved"},
+                    )
+
+    def health_check(self, *, worker_status: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = self.health(worker_status=worker_status)
+        self._persist_incidents(result)
         with self.store.transaction(immediate=True) as connection:
             self.store.record_event(
                 connection,
@@ -240,7 +390,11 @@ class OperationalAssuranceService:
                 {
                     "state": result["state"],
                     "checks": [
-                        {"key": item["key"], "state": item["state"]} for item in result["checks"]
+                        {
+                            "key": item["key"],
+                            "state": item["state"],
+                        }
+                        for item in result["checks"]
                     ],
                 },
             )
@@ -250,18 +404,30 @@ class OperationalAssuranceService:
         if not incident_id or len(incident_id) > 80:
             raise ValueError("incident identity is invalid")
         with self.store.transaction(immediate=True) as connection:
+            latest = connection.execute(
+                "SELECT payload_json FROM operational_events "
+                "WHERE aggregate_type='operational_incident' AND aggregate_id=? "
+                "ORDER BY occurred_at DESC, id DESC LIMIT 1",
+                (incident_id,),
+            ).fetchone()
+            latest_payload = json.loads(latest["payload_json"] or "{}") if latest else {}
             self.store.record_event(
                 connection,
                 "operational_incident",
                 incident_id,
                 "incident_acknowledged",
-                {"disposition": "acknowledged", "actor": "local-operator"},
+                {
+                    "disposition": "acknowledged",
+                    "actor": "local-operator",
+                    "signature": latest_payload.get("signature"),
+                },
             )
         return {"id": incident_id, "disposition": "acknowledged"}
 
-    def diagnostic_export(self) -> dict[str, Any]:
-        health = self.health()
-        incidents = self.incidents()
+    def diagnostic_export(self, *, worker_status: dict[str, Any] | None = None) -> dict[str, Any]:
+        health = self.health(worker_status=worker_status)
+        self._persist_incidents(health)
+        incidents = self.incidents(worker_status=worker_status)
         return {
             "format": "mailforge-operational-diagnostics",
             "generated_at": _now(),

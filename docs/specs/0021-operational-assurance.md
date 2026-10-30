@@ -32,10 +32,11 @@ boundary over `CampaignStore`, `DataDirectory`, and existing supervisors. It
 does not own scheduling, worker execution, campaign delivery, mailbox cursor
 truth, workflow semantics, credential authorization, or policy decisions.
 Expose the service through the existing FastAPI local session/CSRF boundary
-and extend Runtime & Maintenance with progressive-disclosure health evidence.
-Use the existing `operational_events` table instead of adding a second event
-store. Implement `KeychainCredentialResolver` over Apple's `/usr/bin/security`
-utility with opaque references and runtime-only material.
+and extend Runtime & Maintenance with progressive-disclosure health evidence
+and canonical safe job controls. Use the existing `operational_events` table
+instead of adding a second event store. Implement `KeychainCredentialResolver`
+over Apple's Security.framework with opaque references and runtime-only
+material; injected command runners are test-only.
 
 ## Build plan
 

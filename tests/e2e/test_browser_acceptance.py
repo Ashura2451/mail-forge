@@ -784,6 +784,11 @@ def test_browser_unified_workspace_operational_controls(tmp_path: Path) -> None:
             page.get_by_text("one_click_not_fully_verified").wait_for()
 
             page.get_by_role("button", name="Maintenance").click()
+            page.get_by_role("heading", name="Operational assurance").wait_for()
+            assert page.locator(".operational-panel .status-chip").is_visible()
+            page.get_by_role("button", name="Run health check").click()
+            page.get_by_text("Operational health check recorded").wait_for()
+            page.get_by_role("button", name="Open diagnostic export").wait_for()
             page.get_by_label("Application timezone").fill("America/New_York")
             page.get_by_role("button", name="Save application preferences").click()
             page.get_by_text("Application preferences saved").wait_for()

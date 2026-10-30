@@ -8,6 +8,7 @@ not printable or serializable.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -189,12 +190,58 @@ class EnvironmentCredentialResolver:
         return oauth_token_from_material(self.resolve(reference))
 
 
+class LocalCredentialResolver:
+    """Dispatch symbolic local references to the appropriate runtime adapter."""
+
+    def __init__(
+        self,
+        *,
+        environment: EnvironmentCredentialResolver | None = None,
+        keychain: KeychainCredentialResolver | None = None,
+    ) -> None:
+        self.environment = environment or EnvironmentCredentialResolver()
+        self.keychain = keychain or KeychainCredentialResolver()
+
+    def _delegate(self, reference: str) -> CredentialResolver:
+        kind, _, _name = reference.partition(":")
+        if kind == "env":
+            return self.environment
+        if kind == "keychain":
+            return self.keychain
+        raise CredentialError("only env: and keychain: references are available here")
+
+    def resolve(self, reference: str) -> CredentialMaterial:
+        return self._delegate(reference).resolve(reference)
+
+    def available(self, reference: str) -> bool:
+        try:
+            return self._delegate(reference).available(reference)
+        except CredentialError:
+            return False
+
+    def oauth(self, reference: str) -> OAuthTokenMaterial:
+        delegate = self._delegate(reference)
+        oauth = getattr(delegate, "oauth", None)
+        return (
+            oauth(reference)
+            if callable(oauth)
+            else oauth_token_from_material(delegate.resolve(reference))
+        )
+
+    def readiness(self) -> dict[str, object]:
+        return {
+            "environment": "available",
+            "keychain": "available" if self.keychain.backend_available() else "unavailable",
+            "references": "opaque-runtime-only",
+        }
+
+
 class KeychainCredentialResolver:
     """Resolve ``keychain:`` references through macOS Keychain Services.
 
-    The adapter shells out to Apple's `/usr/bin/security` utility so the
-    packaged Python runtime needs no third-party native extension. Secret
-    values remain in memory only and are never included in exception text.
+    The packaged macOS runtime uses Security.framework directly so secrets
+    never enter a child-process argument vector. An injected runner remains
+    available for deterministic tests on non-macOS hosts.
     """
 
     service = "com.mailforge.credential"
@@ -202,6 +249,71 @@ class KeychainCredentialResolver:
     def __init__(self, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None):
         self._runner = runner or subprocess.run
         self._injected_runner = runner is not None
+
+    def backend_available(self) -> bool:
+        return self._injected_runner or os.uname().sysname == "Darwin"
+
+    @staticmethod
+    def _native() -> ctypes.CDLL:
+        try:
+            library = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+        except OSError as error:
+            raise CredentialError("macOS Keychain is unavailable") from error
+        library.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+        library.SecKeychainFindGenericPassword.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        library.SecKeychainAddGenericPassword.restype = ctypes.c_int32
+        library.SecKeychainAddGenericPassword.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        library.SecKeychainItemModifyAttributesAndData.restype = ctypes.c_int32
+        library.SecKeychainItemModifyAttributesAndData.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        library.SecKeychainItemDelete.restype = ctypes.c_int32
+        library.SecKeychainItemDelete.argtypes = [ctypes.c_void_p]
+        library.SecKeychainItemFreeContent.restype = ctypes.c_int32
+        library.SecKeychainItemFreeContent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        return library
+
+    def _native_find(
+        self, account: str
+    ) -> tuple[ctypes.CDLL, ctypes.c_void_p, ctypes.c_void_p, int]:
+        library = self._native()
+        service = self.service.encode()
+        account_bytes = account.encode()
+        length = ctypes.c_uint32()
+        data = ctypes.c_void_p()
+        item = ctypes.c_void_p()
+        status = library.SecKeychainFindGenericPassword(
+            None,
+            len(service),
+            service,
+            len(account_bytes),
+            account_bytes,
+            ctypes.byref(length),
+            ctypes.byref(data),
+            ctypes.byref(item),
+        )
+        return library, item, data, status if status else int(length.value)
 
     @staticmethod
     def _account(reference: str) -> str:
@@ -211,9 +323,7 @@ class KeychainCredentialResolver:
         return match["name"]
 
     def _run(self, args: list[str], *, input_value: str | None = None) -> str:
-        if not self._injected_runner and (
-            os.name != "posix" or not os.path.exists("/usr/bin/security")
-        ):
+        if not self._injected_runner:
             raise CredentialError("macOS Keychain is unavailable")
         try:
             result = self._runner(
@@ -226,10 +336,22 @@ class KeychainCredentialResolver:
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise CredentialError("macOS Keychain operation failed") from error
-        return result.stdout.strip()
+        # Preserve credential bytes other than the command's trailing line ending.
+        return result.stdout.rstrip("\r\n")
 
     def resolve(self, reference: str) -> CredentialMaterial:
         account = self._account(reference)
+        if not self._injected_runner:
+            library, item, data, result = self._native_find(account)
+            if result <= 0 or not data:
+                raise CredentialError("macOS Keychain item is unavailable")
+            try:
+                value = ctypes.string_at(data, result).decode()
+            except (UnicodeDecodeError, ValueError) as error:
+                raise CredentialError("macOS Keychain item is invalid") from error
+            finally:
+                library.SecKeychainItemFreeContent(None, data)
+            return CredentialMaterial(value)
         value = self._run(
             ["/usr/bin/security", "find-generic-password", "-s", self.service, "-a", account, "-w"]
         )
@@ -247,7 +369,34 @@ class KeychainCredentialResolver:
 
     def store(self, reference: str, secret: str) -> None:
         account = self._account(reference)
-        CredentialMaterial(secret)
+        material = CredentialMaterial(secret)
+        if not self._injected_runner:
+            library = self._native()
+            service = self.service.encode()
+            account_bytes = account.encode()
+            item = ctypes.c_void_p()
+            status = library.SecKeychainAddGenericPassword(
+                None,
+                len(service),
+                service,
+                len(account_bytes),
+                account_bytes,
+                len(material.secret.encode()),
+                material.secret.encode(),
+                ctypes.byref(item),
+            )
+            if status == -25299:
+                _library, existing, data, found = self._native_find(account)
+                if found <= 0 or not existing:
+                    raise CredentialError("macOS Keychain item cannot be replaced")
+                status = library.SecKeychainItemModifyAttributesAndData(
+                    existing, None, len(material.secret.encode()), material.secret.encode()
+                )
+                if data:
+                    library.SecKeychainItemFreeContent(None, data)
+            if status:
+                raise CredentialError("macOS Keychain item could not be stored")
+            return
         self._run(
             [
                 "/usr/bin/security",
@@ -258,12 +407,21 @@ class KeychainCredentialResolver:
                 "-a",
                 account,
                 "-w",
-                secret,
-            ]
+            ],
+            input_value=secret,
         )
 
     def revoke(self, reference: str) -> None:
         account = self._account(reference)
+        if not self._injected_runner:
+            library, item, data, result = self._native_find(account)
+            if data:
+                library.SecKeychainItemFreeContent(None, data)
+            if result <= 0 or not item:
+                return
+            if library.SecKeychainItemDelete(item):
+                raise CredentialError("macOS Keychain item could not be revoked")
+            return
         self._run(
             ["/usr/bin/security", "delete-generic-password", "-s", self.service, "-a", account]
         )

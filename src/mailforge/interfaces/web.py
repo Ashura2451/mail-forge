@@ -54,6 +54,7 @@ from mailforge.application.local_application import (
     list_backups,
     restore_backup,
     utc_now,
+    validate_backup,
 )
 from mailforge.application.mailbox_operations import (
     MailboxOperationsError,
@@ -85,7 +86,7 @@ from mailforge.domain.provider import (
     TLSMode,
 )
 from mailforge.infrastructure.campaign_store import SCHEMA_VERSION, CampaignStore
-from mailforge.infrastructure.credentials import EnvironmentCredentialResolver
+from mailforge.infrastructure.credentials import LocalCredentialResolver
 
 API_PREFIX = "/api/v1"
 SESSION_COOKIE = "mailforge_session"
@@ -785,6 +786,7 @@ class WebRuntime:
         if database_path.exists():
             database_path.chmod(0o600)
         self.campaigns = CampaignService(self.store)
+        self.credential_resolver = LocalCredentialResolver()
         self.segmentation = SegmentationService(self.store)
         self.outbound = OutboundService(self.store)
         self.programmable = ProgrammableOperationsService(
@@ -795,6 +797,7 @@ class WebRuntime:
             self.store,
             root=self.data_directory.artifacts / "data-connections",
             data_studio=self.data_studio,
+            credential_resolver=self.credential_resolver,
         )
         self.message_studio = MessageStudioService(
             self.store,
@@ -834,6 +837,7 @@ class WebRuntime:
         )
         self.integrations = IntegrationHubService(
             self.store,
+            resolver=self.credential_resolver,
             automation=self.automation,
             allow_local_fixtures=os.environ.get("MAILFORGE_ENABLE_LOCAL_FIXTURES") == "1",
         )
@@ -901,6 +905,7 @@ class WebRuntime:
                     "automation_scheduler": (
                         "running" if self.automation_runtime.thread.is_alive() else "stopped"
                     ),
+                    "credential_store": self.credential_resolver.readiness(),
                 },
                 "loopback_only": True,
                 "simulation_mode": True,
@@ -914,6 +919,7 @@ class WebRuntime:
                         "automation_scheduler": "running"
                         if self.automation_runtime.thread.is_alive()
                         else "stopped",
+                        "credential_store": self.credential_resolver.readiness(),
                     }
                 ),
             }
@@ -1197,13 +1203,38 @@ def create_app(
     async def operations_jobs(subsystem: str | None = None, status: str | None = None):
         return runtime.operational_assurance.jobs(subsystem=subsystem, status=status)
 
+    @app.post(f"{API_PREFIX}/operations/jobs/{{subsystem}}/{{job_id}}/action")
+    async def operational_job_action(subsystem: str, job_id: str, payload: dict[str, str]):
+        action = payload.get("action", "")
+        try:
+            if subsystem == "list_tools" and action in {"pause", "resume", "cancel"}:
+                if action == "pause":
+                    return runtime.list_processing.pause(job_id)
+                if action == "resume":
+                    return runtime.list_processing.start(job_id, resume=True)
+                return runtime.list_processing.cancel(job_id)
+            if subsystem == "data_studio" and action == "cancel":
+                return runtime.data_studio.cancel(job_id)
+            if subsystem == "data_connections" and action == "cancel":
+                return runtime.data_connections.cancel_snapshot(job_id)
+            if subsystem == "campaigns" and action in {"pause", "resume", "cancel"}:
+                return runtime.campaign_operations.control(job_id, action)
+            raise ValueError("action is not supported for this subsystem")
+        except (KeyError, ValueError, RuntimeError, PermissionError) as error:
+            return _error(400, "operational_action_failed", str(error))
+
     @app.get(f"{API_PREFIX}/operations/incidents")
     async def operations_incidents(include_acknowledged: bool = False):
-        return runtime.operational_assurance.incidents(include_acknowledged=include_acknowledged)
+        return runtime.operational_assurance.incidents(
+            include_acknowledged=include_acknowledged,
+            worker_status=runtime.status()["worker_status"],
+        )
 
     @app.post(f"{API_PREFIX}/operations/health-check")
     async def operations_health_check():
-        return runtime.operational_assurance.health_check()
+        return runtime.operational_assurance.health_check(
+            worker_status=runtime.status()["worker_status"]
+        )
 
     @app.post(f"{API_PREFIX}/operations/incidents/{{incident_id}}/acknowledge")
     async def acknowledge_operational_incident(incident_id: str):
@@ -1214,7 +1245,9 @@ def create_app(
 
     @app.get(f"{API_PREFIX}/operations/diagnostic-export")
     async def operational_diagnostic_export():
-        return runtime.operational_assurance.diagnostic_export()
+        return runtime.operational_assurance.diagnostic_export(
+            worker_status=runtime.status()["worker_status"]
+        )
 
     @app.get(f"{API_PREFIX}/runtime/backups")
     async def runtime_backups():
@@ -1224,6 +1257,20 @@ def create_app(
     async def runtime_backup():
         backup = create_backup(runtime.data_directory)
         return {"backup": backup.name, "metadata": list_backups(runtime.data_directory)[0]}
+
+    @app.post(f"{API_PREFIX}/runtime/backups/{{backup_name}}/verify")
+    async def verify_runtime_backup(backup_name: str):
+        if Path(backup_name).name != backup_name:
+            return _error(400, "backup_path_invalid", "choose a backup from the local backup list")
+        try:
+            metadata = validate_backup(runtime.data_directory.backups / backup_name)
+            return {
+                "backup": backup_name,
+                "verified": bool(metadata.get("valid")),
+                "metadata": metadata,
+            }
+        except (FileNotFoundError, OSError, ValueError, KeyError, TypeError) as error:
+            return _error(400, "backup_verification_failed", type(error).__name__)
 
     @app.post(f"{API_PREFIX}/runtime/restore")
     async def runtime_restore(payload: RestoreInput):
@@ -3427,7 +3474,7 @@ def create_app(
     async def reconcile_inbound_mailbox_action(action_id: str):
         try:
             return runtime.mailbox_operations.reconcile_action(
-                action_id, resolver=EnvironmentCredentialResolver()
+                action_id, resolver=runtime.credential_resolver
             )
         except (
             KeyError,
@@ -3472,7 +3519,7 @@ def create_app(
                 authorization_ref=payload.authorization_ref,
             )
             return runtime.mailbox_operations.discover(
-                provider_ref, resolver=EnvironmentCredentialResolver(), grant=grant
+                provider_ref, resolver=runtime.credential_resolver, grant=grant
             )
         except (KeyError, ValueError, PermissionError, MailboxOperationsError) as error:
             return _error(400, getattr(error, "code", "mailbox_discovery_failed"), str(error))
@@ -3502,7 +3549,7 @@ def create_app(
                 mailbox=mailbox,
                 batch_limit=payload.batch_limit,
                 retain_raw=payload.retain_raw,
-                resolver=EnvironmentCredentialResolver(),
+                resolver=runtime.credential_resolver,
                 grant=grant,
             )
             return {"report": asdict(report), "stats": runtime.inbound.stats()}
@@ -3551,7 +3598,7 @@ def create_app(
                 uid=payload.uid,
                 target_folder=payload.target_folder,
                 flags=tuple(payload.flags),
-                resolver=EnvironmentCredentialResolver(),
+                resolver=runtime.credential_resolver,
             )
             return result
         except (
@@ -3587,7 +3634,7 @@ def create_app(
                 mailbox=payload.mailbox or account["inbound"]["mailbox"],
                 batch_limit=payload.batch_limit,
                 retain_raw=payload.retain_raw,
-                resolver=EnvironmentCredentialResolver(),
+                resolver=runtime.credential_resolver,
                 grant=grant,
             )
             return {"report": asdict(report), "stats": runtime.inbound.stats()}
@@ -3660,9 +3707,7 @@ def create_app(
     @app.get(f"{API_PREFIX}/providers/{{provider_ref}}/credentials")
     async def provider_credentials(provider_ref: str):
         try:
-            return runtime.providers.credential_status(
-                provider_ref, EnvironmentCredentialResolver()
-            )
+            return runtime.providers.credential_status(provider_ref, runtime.credential_resolver)
         except (KeyError, ValueError) as error:
             return _error(400, "provider_credentials_failed", str(error))
 
@@ -3737,7 +3782,7 @@ def create_app(
                     authorization_ref=payload.authorization_ref,
                 )
             return runtime.provider_operations.diagnostic(
-                provider_ref, payload.operation, grant=grant
+                provider_ref, payload.operation, resolver=runtime.credential_resolver, grant=grant
             )
         except (KeyError, ValueError, PermissionError) as error:
             return _error(400, "provider_diagnostic_failed", str(error))
@@ -3822,6 +3867,7 @@ def create_app(
                 message=payload.message,
                 idempotency_key=payload.idempotency_key,
                 grant=grant,
+                resolver=runtime.credential_resolver,
                 message_revision_id=payload.message_revision_id,
             )
         except (KeyError, ValueError, PermissionError) as error:
