@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import os
 from pathlib import Path
 
 
@@ -15,7 +17,14 @@ class DatabaseProcessLock:
 
     def __init__(self, database: str | Path):
         self.database = Path(database).expanduser().resolve()
-        self.path = self.database.with_name(f".{self.database.name}.mailforge.lock")
+        try:
+            identity = os.stat(self.database)
+        except FileNotFoundError:
+            lock_name = f".{self.database.name}.mailforge.lock"
+        else:
+            inode_key = f"{identity.st_dev}:{identity.st_ino}".encode("ascii")
+            lock_name = f".mailforge-{hashlib.sha256(inode_key).hexdigest()[:24]}.lock"
+        self.path = self.database.parent / lock_name
         self._handle = None
 
     def acquire(self) -> None:

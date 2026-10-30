@@ -686,6 +686,18 @@ def test_database_process_lock_resolves_database_aliases(tmp_path: Path) -> None
         first.release()
         second.release()
 
+    hardlink = tmp_path / "hardlink.sqlite3"
+    os.link(database, hardlink)
+    first = DatabaseProcessLock(database)
+    second = DatabaseProcessLock(hardlink)
+    first.acquire()
+    try:
+        with pytest.raises(ProcessLockError):
+            second.acquire()
+    finally:
+        first.release()
+        second.release()
+
 
 def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
     database = tmp_path / "cross-process.sqlite3"
