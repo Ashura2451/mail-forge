@@ -108,8 +108,6 @@ class DataDirectory:
         for path in (self.root / "config", self.backups, self.logs, self.runtime, self.artifacts):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.chmod(0o700)
-        for temporary_backup in self.backups.glob(".mailforge-backup-publish-*.tmp"):
-            temporary_backup.unlink(missing_ok=True)
         if not self.config.exists():
             _write_json(
                 self.config,
@@ -122,6 +120,15 @@ class DataDirectory:
                 },
             )
         return self
+
+    def cleanup_backup_temporary_files(self) -> int:
+        """Remove publish files left by an interrupted backup after owner lock."""
+
+        removed = 0
+        for temporary_backup in self.backups.glob(".mailforge-backup-publish-*.tmp"):
+            temporary_backup.unlink(missing_ok=True)
+            removed += 1
+        return removed
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -330,7 +337,14 @@ def create_backup(data: DataDirectory, destination: str | Path | None = None) ->
                     "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n"
                 )
         os.chmod(temporary_destination, 0o600)
-        os.replace(temporary_destination, destination_path)
+        try:
+            os.link(temporary_destination, destination_path)
+        except FileExistsError as error:
+            raise FileExistsError(
+                f"backup destination already exists: {destination_path.name}"
+            ) from error
+        finally:
+            temporary_destination.unlink(missing_ok=True)
     finally:
         temporary_destination.unlink(missing_ok=True)
     return destination_path

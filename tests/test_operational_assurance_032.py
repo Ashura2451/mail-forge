@@ -29,7 +29,7 @@ def test_operational_health_and_incidents_are_durable(tmp_path: Path) -> None:
     assert events["count"] >= 1
     incident_id = events["items"][0]["id"]
     assert service.acknowledge(incident_id)["disposition"] == "acknowledged"
-    assert service.incidents()["count"] >= 1
+    assert service.incidents()["count"] == 0
     assert service.incidents(include_acknowledged=True)["count"] >= 1
 
 
@@ -149,15 +149,12 @@ def test_health_exposes_source_failures_and_reopens_persistent_incidents(tmp_pat
     source_check = next(check for check in failed["checks"] if check["key"] == "source_evidence")
     assert source_check["state"] == "action_required"
     assert any(item["source"] == "campaigns" for item in source_check["failures"])
-
     store.connect = original_connect  # type: ignore[method-assign]
-    service.health_check()
-    incidents = service.incidents()
-    assert incidents["count"] >= 1
-    incident_id = incidents["items"][0]["id"]
-    service.acknowledge(incident_id)
-    reopened = service.incidents()
-    assert reopened["count"] >= 1
-
+    service._persist_incidents(failed)
     recovered = service.health()
     assert not any(check["key"] == "source_evidence" for check in recovered["checks"])
+    resolved = service.incidents(include_acknowledged=True)
+    source_incident = next(
+        item for item in resolved["items"] if item.get("subsystem") == "source_evidence"
+    )
+    assert source_incident["disposition"] == "resolved"

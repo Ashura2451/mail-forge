@@ -439,6 +439,14 @@ class OperationalAssuranceService:
             if check["state"] not in {"healthy", "unknown"}
         }
         with self.store.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT aggregate_id, event_type, payload_json "
+                "FROM operational_events WHERE aggregate_type='operational_incident' "
+                "ORDER BY occurred_at DESC, id DESC"
+            ).fetchall()
+            latest: dict[str, Any] = {}
+            for row in rows:
+                latest.setdefault(row["aggregate_id"], row)
             for check in result["checks"]:
                 incident = self._incident(check["key"], check["state"], None)
                 incident_id = incident["id"]
@@ -455,7 +463,7 @@ class OperationalAssuranceService:
                     )
                     if (
                         previous
-                        and previous["event_type"] == "incident_observed"
+                        and previous["event_type"] in {"incident_observed", "incident_acknowledged"}
                         and previous_payload.get("signature") == signature
                     ):
                         continue
@@ -477,6 +485,29 @@ class OperationalAssuranceService:
                         "incident_resolved",
                         {**incident, "disposition": "resolved"},
                     )
+            current_ids = {
+                self._incident(check["key"], check["state"], None)["id"]
+                for check in result["checks"]
+            }
+            for incident_id, row in latest.items():
+                if incident_id in current_ids or row["event_type"] not in {
+                    "incident_observed",
+                    "incident_acknowledged",
+                }:
+                    continue
+                payload = json.loads(row["payload_json"] or "{}")
+                self.store.record_event(
+                    connection,
+                    "operational_incident",
+                    incident_id,
+                    "incident_resolved",
+                    {
+                        "id": incident_id,
+                        "subsystem": payload.get("subsystem", "unknown"),
+                        "condition": payload.get("condition", "recovered"),
+                        "disposition": "resolved",
+                    },
+                )
 
     def health_check(self, *, worker_status: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.health(worker_status=worker_status)

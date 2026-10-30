@@ -1,5 +1,19 @@
 # System changelog
 
+## 2026-10-30 — Operational assurance 032 qualification closure work
+
+- Added explicit operational source-failure observations so failed job/count,
+  provider, and backup evidence cannot collapse into empty healthy results.
+- Made backup publication atomic through a same-directory temporary archive and
+  restart cleanup of orphaned publish files.
+- Preserved ambiguous provider outcomes separately from explicit refusal counts.
+- Added bounded local qualification evidence for process recovery, staged restore,
+  packaged Keychain lifecycle, Maintenance screenshots, quota truthfulness, and
+  representative performance measurements.
+- Final cumulative independent review remains required before PR #20 integration;
+  real providers, production credentials, signing, notarization, and milestone
+  033 remain out of scope.
+
 ## 2026-10-29 — Mailbox operations 030
 
 - Extended the existing inbound/provider authorities with migration 23 folder
