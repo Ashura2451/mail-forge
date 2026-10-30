@@ -671,6 +671,22 @@ def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> No
         second.release()
 
 
+def test_database_process_lock_resolves_database_aliases(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    alias = tmp_path / "alias.sqlite3"
+    database.touch()
+    alias.symlink_to(database)
+    first = DatabaseProcessLock(database)
+    second = DatabaseProcessLock(alias)
+    first.acquire()
+    try:
+        with pytest.raises(ProcessLockError):
+            second.acquire()
+    finally:
+        first.release()
+        second.release()
+
+
 def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
     database = tmp_path / "cross-process.sqlite3"
     marker = tmp_path / "holder.ready"

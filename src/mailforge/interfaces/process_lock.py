@@ -14,7 +14,7 @@ class DatabaseProcessLock:
     """Hold an advisory lock for the lifetime of one local web process."""
 
     def __init__(self, database: str | Path):
-        self.database = Path(database)
+        self.database = Path(database).expanduser().resolve()
         self.path = self.database.with_name(f".{self.database.name}.mailforge.lock")
         self._handle = None
 
