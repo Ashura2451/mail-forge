@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -463,6 +464,77 @@ def test_compiled_frontend_is_served(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Mailforge" in response.text
     assert response.headers["content-security-policy"].startswith("default-src 'self'")
+
+
+def test_provider_grant_http_boundary_rejects_changed_request_before_transport(
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client(tmp_path, request)
+    account = client.post(
+        "/api/v1/providers",
+        headers=headers,
+        json={
+            "ref": "http-provider",
+            "kind": "smtp",
+            "host": "127.0.0.1",
+            "port": 465,
+            "username": "sender@example.com",
+            "credential_ref": "test:provider",
+            "tls_mode": "implicit_tls",
+            "auth_method": "password",
+            "sender_email": "sender@example.com",
+        },
+    )
+    assert account.status_code == 200
+    runtime = client.app.state.runtime
+    transport_calls: list[object] = []
+    monkeypatch.setattr(
+        runtime.provider_operations.providers,
+        "smtp_pool",
+        lambda *args, **kwargs: transport_calls.append((args, kwargs)),
+    )
+    expiry = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    grant = client.post(
+        "/api/v1/providers/http-provider/grants",
+        headers=headers,
+        json={
+            "purpose": "http boundary fixture",
+            "sender": "sender@example.com",
+            "recipient": "owned@example.com",
+            "expires_at": expiry,
+        },
+    )
+    assert grant.status_code == 200
+    authorization_ref = grant.json()["authorization_ref"]
+    changed = client.post(
+        "/api/v1/providers/http-provider/test-send",
+        headers=headers,
+        json={
+            "sender": "sender@example.com",
+            "recipient": "other@example.com",
+            "message": "Subject: fixture\r\n\r\nbody",
+            "idempotency_key": "http-boundary-key",
+            "authorization_ref": authorization_ref,
+            "purpose": "http boundary fixture",
+            "expires_at": expiry,
+        },
+    )
+    invented = client.post(
+        "/api/v1/providers/http-provider/test-send",
+        headers=headers,
+        json={
+            "sender": "sender@example.com",
+            "recipient": "owned@example.com",
+            "message": "Subject: fixture\r\n\r\nbody",
+            "idempotency_key": "http-invented-key",
+            "authorization_ref": "invented-authorization",
+            "purpose": "http boundary fixture",
+            "expires_at": expiry,
+        },
+    )
+    assert changed.status_code == 400
+    assert invented.status_code == 400
+    assert transport_calls == []
 
 
 def test_campaign_preview_outcomes_and_resume_are_versioned(

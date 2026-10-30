@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 
 import pytest
 
@@ -308,6 +309,77 @@ def test_idempotency_reservation_blocks_concurrent_duplicate_smtp_calls(tmp_path
         results = list(executor.map(lambda _: send_once(), range(2)))
     assert results[0]["id"] == results[1]["id"]
     assert len(pool.calls) == 1
+
+
+def test_idempotency_reservation_ownership_is_proven_while_first_send_is_blocked(
+    tmp_path, monkeypatch
+):
+    store = CampaignStore(tmp_path / "overlap-send.sqlite3")
+    service = ProviderOperationsService(store)
+    service.register(_profile(), sender_email="sender@example.com")
+    entered = Event()
+    release = Event()
+
+    class _BlockingPool(_FakePool):
+        def sendmail(self, sender, recipient, message):
+            entered.set()
+            assert release.wait(timeout=5)
+            return super().sendmail(sender, recipient, message)
+
+    pool = _BlockingPool()
+    monkeypatch.setattr(service.providers, "smtp_pool", lambda *args, **kwargs: pool)
+    grant = _grant(service, "local")
+    resolver = MappingCredentialResolver({"test:provider": "synthetic-password"})
+
+    def send_once():
+        return service.controlled_test_send(
+            ref="local",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            message="Subject: fixture\r\n\r\nbody",
+            idempotency_key="overlap-key",
+            grant=grant,
+            resolver=resolver,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(send_once)
+        assert entered.wait(timeout=5)
+        duplicate = executor.submit(send_once)
+        repeated = duplicate.result(timeout=5)
+        assert repeated["status"] == "reserved"
+        release.set()
+        result = first.result(timeout=5)
+    assert result["status"] == "provider_accepted"
+    assert len(pool.calls) == 1
+
+
+def test_failed_provider_test_is_ambiguous_and_survives_reopen(tmp_path, monkeypatch):
+    database = tmp_path / "failed-send.sqlite3"
+    store = CampaignStore(database)
+    service = ProviderOperationsService(store)
+    service.register(_profile(), sender_email="sender@example.com")
+    grant = _grant(service, "local")
+
+    def fail_pool(*args, **kwargs):
+        raise RuntimeError("synthetic connection failure")
+
+    monkeypatch.setattr(service.providers, "smtp_pool", fail_pool)
+    with pytest.raises(RuntimeError, match="synthetic connection failure"):
+        service.controlled_test_send(
+            ref="local",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            message="Subject: fixture\r\n\r\nbody",
+            idempotency_key="failed-send-key",
+            grant=grant,
+            resolver=MappingCredentialResolver({"test:provider": "synthetic-password"}),
+        )
+    row = store.list_provider_tests("local")[0]
+    assert row["status"] == "ambiguous"
+    assert store.list_provider_operation_grants("local")[0]["consumed_submissions"] == 1
+    reopened = CampaignStore(database)
+    assert reopened.list_provider_tests("local")[0]["status"] == "ambiguous"
 
 
 def test_idempotency_key_cannot_cross_accounts(tmp_path, monkeypatch):
