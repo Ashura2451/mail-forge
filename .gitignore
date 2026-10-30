@@ -3,6 +3,45 @@
 # Consumer-local generated Executor context; never commit.
 .orchestra/
 
+# BEGIN ORCHESTRA LOCAL-ONLY AI ARTIFACTS
+# Consumer project truth and installed ORCHESTRA execution context.
+# Root-level AI agent instructions, including personal Claude instructions.
+/AGENTS.md
+/CLAUDE.md
+/CLAUDE.local.md
+/GEMINI.md
+/QWEN.md
+# Agent clients, local context, rules, skills, prompts, and configuration.
+/.agent/
+/.agents/
+/.claude/
+/.cursor/
+/.codex/
+/.windsurf/
+/.roo/
+/.clinerules/
+/.cline/rules/
+/.continue/
+/.opencode/
+/.gemini/
+# Qwen's explicit per-project local instruction file; shared settings stay visible.
+/.qwen/QWEN.local.md
+# Kiro project steering instructions; other .kiro/ project data is preserved.
+/.kiro/steering/
+# AI-specific root configuration files.
+/.cursorrules
+/.windsurfrules
+/.aider.conf.yml
+/.aiderignore
+/.roomodes
+# GitHub Copilot instructions, prompts, agents, and skills.
+/.github/copilot-instructions.md
+/.github/instructions/
+/.github/prompts/
+/.github/agents/
+/.github/skills/
+# END ORCHESTRA LOCAL-ONLY AI ARTIFACTS
+
 # Local credentials and runtime environment files. Keep safe examples tracked.
 .env
 .env.*

@@ -23,9 +23,7 @@ def test_declarative_function_is_revisioned_bounded_and_durable(tmp_path: Path) 
             "output_schema": {"type": "object"},
         },
     )
-    result = service.execute(
-        "clean_company", [{"company": "  Acme   Co  "}], context="data_studio"
-    )
+    result = service.execute("clean_company", [{"company": "  Acme   Co  "}], context="data_studio")
     assert result["records"] == [{"company": "  Acme   Co  ", "company_clean": "Acme Co"}]
     assert result["content_hash"] == created["content_hash"]
     assert service.list_executions("clean_company")[0]["status"] == "completed"

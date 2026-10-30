@@ -643,7 +643,9 @@ class HttpResponse:
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
-        raise DataConnectionError("HTTP redirects are not allowed for data sources", "redirect_refused")
+        raise DataConnectionError(
+            "HTTP redirects are not allowed for data sources", "redirect_refused"
+        )
 
 
 def _is_private_address(value: str) -> bool:
@@ -694,9 +696,13 @@ class _HttpDataSourceAdapter(_Adapter):
         result: dict[str, str] = {}
         for key, item in value.items():
             if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.~-]{1,80}", key):
-                raise DataConnectionError("HTTP query parameter name is invalid", "http_config_invalid")
+                raise DataConnectionError(
+                    "HTTP query parameter name is invalid", "http_config_invalid"
+                )
             if isinstance(item, (dict, list)) or len(str(item)) > 500:
-                raise DataConnectionError("HTTP query parameter values are bounded scalars", "http_config_invalid")
+                raise DataConnectionError(
+                    "HTTP query parameter values are bounded scalars", "http_config_invalid"
+                )
             result[key] = str(item)
         return result
 
@@ -719,7 +725,9 @@ class _HttpDataSourceAdapter(_Adapter):
             result["cursor_param"] = str(value.get("cursor_param", "cursor"))
             result["cursor_field"] = str(value.get("cursor_field", "next_cursor"))
             if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", result["cursor_param"]):
-                raise DataConnectionError("cursor query parameter is invalid", "http_config_invalid")
+                raise DataConnectionError(
+                    "cursor query parameter is invalid", "http_config_invalid"
+                )
         if mode == "next_link":
             result["next_field"] = str(value.get("next_field", "next"))
         return result
@@ -727,18 +735,31 @@ class _HttpDataSourceAdapter(_Adapter):
     def _validate_url(self, url: str) -> None:
         parsed = urlsplit(url)
         if parsed.username or parsed.password or parsed.fragment or not parsed.hostname:
-            raise DataConnectionError("HTTP destination must not contain credentials or fragments", "destination_invalid")
+            raise DataConnectionError(
+                "HTTP destination must not contain credentials or fragments", "destination_invalid"
+            )
         local = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
         if parsed.scheme != "https" and not (local and self.allow_local_fixture):
             raise DataConnectionError("external HTTP sources require HTTPS", "tls_required")
         if parsed.netloc.lower() != urlsplit(self.origin).netloc.lower():
             raise DataConnectionError("HTTP destination changed origin", "destination_invalid")
         try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)}
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(
+                    parsed.hostname, parsed.port, type=socket.SOCK_STREAM
+                )
+            }
         except OSError as error:
-            raise DataConnectionError("HTTP destination DNS resolution failed", "dns_failed") from error
-        if not self.allow_local_fixture and any(_is_private_address(address) for address in addresses):
-            raise DataConnectionError("HTTP destination resolves to a private address", "private_destination")
+            raise DataConnectionError(
+                "HTTP destination DNS resolution failed", "dns_failed"
+            ) from error
+        if not self.allow_local_fixture and any(
+            _is_private_address(address) for address in addresses
+        ):
+            raise DataConnectionError(
+                "HTTP destination resolves to a private address", "private_destination"
+            )
 
     def _url(self, params: Mapping[str, str]) -> str:
         parsed = urlsplit(self.origin + self.path)
@@ -746,13 +767,20 @@ class _HttpDataSourceAdapter(_Adapter):
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", urlencode(query), ""))
 
     def _headers(self) -> dict[str, str]:
-        headers = {"accept": "application/json, application/x-ndjson, text/csv", "user-agent": "Mailforge-DataConnections/1"}
+        headers = {
+            "accept": "application/json, application/x-ndjson, text/csv",
+            "user-agent": "Mailforge-DataConnections/1",
+        }
         if self.auth_mode == "public":
             if self.credential_ref:
-                raise DataConnectionError("public HTTP sources cannot use credentials", "http_config_invalid")
+                raise DataConnectionError(
+                    "public HTTP sources cannot use credentials", "http_config_invalid"
+                )
             return headers
         if self.auth_mode not in {"api_key", "bearer"} or not self.credential_ref:
-            raise DataConnectionError("HTTP authentication requires a supported credential_ref", "credential_required")
+            raise DataConnectionError(
+                "HTTP authentication requires a supported credential_ref", "credential_required"
+            )
         secret = self.resolver.resolve(self.credential_ref).secret
         headers["x-api-key" if self.auth_mode == "api_key" else "authorization"] = (
             secret if self.auth_mode == "api_key" else f"Bearer {secret}"
@@ -763,27 +791,44 @@ class _HttpDataSourceAdapter(_Adapter):
         self._validate_url(url)
         headers = self._headers()
         if self.transport is not None:
-            response = self.transport(url, headers, min(int(self.config.get("timeout_seconds", 10)), HTTP_MAX_TIMEOUT_SECONDS))
+            response = self.transport(
+                url,
+                headers,
+                min(int(self.config.get("timeout_seconds", 10)), HTTP_MAX_TIMEOUT_SECONDS),
+            )
             if not isinstance(response, HttpResponse):
-                raise DataConnectionError("HTTP transport returned an invalid response", "http_transport_invalid")
+                raise DataConnectionError(
+                    "HTTP transport returned an invalid response", "http_transport_invalid"
+                )
             if len(response.body) > HTTP_MAX_RESPONSE_BYTES:
-                raise DataConnectionError("HTTP response exceeds the 16 MiB limit", "response_limit")
+                raise DataConnectionError(
+                    "HTTP response exceeds the 16 MiB limit", "response_limit"
+                )
             return response
         request = Request(url, method="GET", headers=headers)
         try:
             with build_opener(_NoRedirect()).open(
-                request, timeout=min(int(self.config.get("timeout_seconds", 10)), HTTP_MAX_TIMEOUT_SECONDS)
+                request,
+                timeout=min(int(self.config.get("timeout_seconds", 10)), HTTP_MAX_TIMEOUT_SECONDS),
             ) as response:
                 body = response.read(HTTP_MAX_RESPONSE_BYTES + 1)
                 if len(body) > HTTP_MAX_RESPONSE_BYTES:
-                    raise DataConnectionError("HTTP response exceeds the 16 MiB limit", "response_limit")
-                return HttpResponse(response.status, dict(response.headers.items()), body, response.geturl())
+                    raise DataConnectionError(
+                        "HTTP response exceeds the 16 MiB limit", "response_limit"
+                    )
+                return HttpResponse(
+                    response.status, dict(response.headers.items()), body, response.geturl()
+                )
         except DataConnectionError:
             raise
         except HTTPError as error:
             if 300 <= error.code < 400:
-                raise DataConnectionError("HTTP redirects are not allowed", "redirect_refused") from error
-            raise DataConnectionError("HTTP source returned an error response", "http_status") from error
+                raise DataConnectionError(
+                    "HTTP redirects are not allowed", "redirect_refused"
+                ) from error
+            raise DataConnectionError(
+                "HTTP source returned an error response", "http_status"
+            ) from error
         except (URLError, TimeoutError, OSError) as error:
             raise DataConnectionError("HTTP source request failed", "http_unavailable") from error
 
@@ -792,10 +837,17 @@ class _HttpDataSourceAdapter(_Adapter):
             raise DataConnectionError("HTTP source returned a non-success response", "http_status")
         try:
             if self.format == "csv":
-                rows = [dict(row) for row in csv.DictReader(io.StringIO(response.body.decode("utf-8-sig")))]
+                rows = [
+                    dict(row)
+                    for row in csv.DictReader(io.StringIO(response.body.decode("utf-8-sig")))
+                ]
                 metadata = {}
             elif self.format == "jsonl":
-                rows = [json.loads(line) for line in response.body.decode("utf-8").splitlines() if line.strip()]
+                rows = [
+                    json.loads(line)
+                    for line in response.body.decode("utf-8").splitlines()
+                    if line.strip()
+                ]
                 metadata = {}
             else:
                 decoded = json.loads(response.body.decode("utf-8"))
@@ -803,11 +855,18 @@ class _HttpDataSourceAdapter(_Adapter):
                     rows, metadata = decoded, {}
                 elif isinstance(decoded, dict):
                     candidate = decoded.get("records", decoded.get("items", decoded.get("data")))
-                    rows, metadata = (candidate if isinstance(candidate, list) else [decoded]), decoded
+                    rows, metadata = (
+                        (candidate if isinstance(candidate, list) else [decoded]),
+                        decoded,
+                    )
                 else:
-                    raise DataConnectionError("JSON source must return an object or array", "response_invalid")
+                    raise DataConnectionError(
+                        "JSON source must return an object or array", "response_invalid"
+                    )
         except (UnicodeDecodeError, json.JSONDecodeError, csv.Error, TypeError) as error:
-            raise DataConnectionError("HTTP source response could not be parsed", "response_invalid") from error
+            raise DataConnectionError(
+                "HTTP source response could not be parsed", "response_invalid"
+            ) from error
         if len(rows) > self.pagination["page_size"]:
             raise DataConnectionError("HTTP page exceeds its configured record bound", "page_limit")
         checked: list[dict[str, Any]] = []
@@ -816,8 +875,14 @@ class _HttpDataSourceAdapter(_Adapter):
             raise DataConnectionError("field mapping is invalid", "http_config_invalid")
         for row in rows:
             if not isinstance(row, Mapping):
-                raise DataConnectionError("HTTP records must be JSON objects or CSV rows", "response_invalid")
-            checked.append({str(mapping.get(key, key)): value for key, value in row.items()} if mapping else dict(row))
+                raise DataConnectionError(
+                    "HTTP records must be JSON objects or CSV rows", "response_invalid"
+                )
+            checked.append(
+                {str(mapping.get(key, key)): value for key, value in row.items()}
+                if mapping
+                else dict(row)
+            )
         return checked, metadata
 
     def _pages(self) -> Iterator[tuple[int, str, list[dict[str, Any]], dict[str, Any], str]]:
@@ -827,7 +892,9 @@ class _HttpDataSourceAdapter(_Adapter):
         cursor: str | None = None
         for page in range(1, self.pagination["max_pages"] + 1):
             if self.pagination["mode"] == "offset":
-                params[self.pagination["page_param"]] = str(self.pagination["start"] + (page - 1) * self.pagination["step"])
+                params[self.pagination["page_param"]] = str(
+                    self.pagination["start"] + (page - 1) * self.pagination["step"]
+                )
                 params.setdefault("limit", str(self.pagination["page_size"]))
             elif self.pagination["mode"] == "cursor" and cursor is not None:
                 params[self.pagination["cursor_param"]] = cursor
@@ -854,8 +921,14 @@ class _HttpDataSourceAdapter(_Adapter):
                     return
                 parsed = urlsplit(str(next_url))
                 approved = urlsplit(self.origin + self.path)
-                if parsed.scheme != approved.scheme or parsed.netloc.lower() != approved.netloc.lower() or not parsed.path.startswith(approved.path.rstrip("/") or "/"):
-                    raise DataConnectionError("HTTP next-page link changed destination scope", "destination_invalid")
+                if (
+                    parsed.scheme != approved.scheme
+                    or parsed.netloc.lower() != approved.netloc.lower()
+                    or not parsed.path.startswith(approved.path.rstrip("/") or "/")
+                ):
+                    raise DataConnectionError(
+                        "HTTP next-page link changed destination scope", "destination_invalid"
+                    )
                 params = dict(parse_qsl(parsed.query, keep_blank_values=True))
             elif mode == "offset":
                 continue
@@ -870,14 +943,34 @@ class _HttpDataSourceAdapter(_Adapter):
         fields: dict[str, dict[str, Any]] = {}
         for row in rows:
             for key, value in row.items():
-                fields.setdefault(key, {"name": key, "source_type": "inferred", "normalized_type": _normalized_type(value), "nullable": value is None, "primary_key": False})
+                fields.setdefault(
+                    key,
+                    {
+                        "name": key,
+                        "source_type": "inferred",
+                        "normalized_type": _normalized_type(value),
+                        "nullable": value is None,
+                        "primary_key": False,
+                    },
+                )
                 if value is not None:
                     fields[key]["normalized_type"] = _normalized_type(value)
-        return {"source_type": "http", "format": self.format, "fields": list(fields.values()), "retrieved_at": retrieved_at, "page_count": page}
+        return {
+            "source_type": "http",
+            "format": self.format,
+            "fields": list(fields.values()),
+            "retrieved_at": retrieved_at,
+            "page_count": page,
+        }
 
     def test(self) -> dict[str, Any]:
         schema = self.schema()
-        return {"reachable": True, "read_only": True, "format": self.format, "fields": len(schema["fields"])}
+        return {
+            "reachable": True,
+            "read_only": True,
+            "format": self.format,
+            "fields": len(schema["fields"]),
+        }
 
     def preview(self, selection: Mapping[str, Any], limit: int) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
@@ -895,7 +988,9 @@ class _HttpDataSourceAdapter(_Adapter):
                     return
                 count += 1
                 row["__source_row"] = row_number
-                row["__source_id"] = f"http:{hashlib.sha256(url.encode()).hexdigest()[:16]}:{row_number}"
+                row["__source_id"] = (
+                    f"http:{hashlib.sha256(url.encode()).hexdigest()[:16]}:{row_number}"
+                )
                 row["__provenance"] = {
                     "source_type": "http",
                     "source_origin": self.origin,
@@ -1299,38 +1394,71 @@ class DataConnectionsService:
                 )
             origin = checked_config.get("origin")
             path = checked_config.get("path", "/")
-            if not isinstance(origin, str) or not origin or not isinstance(path, str) or not path.startswith("/"):
-                raise DataConnectionError("HTTP origin and absolute path are required", "connection_invalid")
+            if (
+                not isinstance(origin, str)
+                or not origin
+                or not isinstance(path, str)
+                or not path.startswith("/")
+            ):
+                raise DataConnectionError(
+                    "HTTP origin and absolute path are required", "connection_invalid"
+                )
             parsed_origin = urlsplit(origin.rstrip("/"))
-            if parsed_origin.username or parsed_origin.password or parsed_origin.query or parsed_origin.fragment or not parsed_origin.hostname:
-                raise DataConnectionError("HTTP origin must not contain credentials, query, or fragment", "connection_invalid")
+            if (
+                parsed_origin.username
+                or parsed_origin.password
+                or parsed_origin.query
+                or parsed_origin.fragment
+                or not parsed_origin.hostname
+            ):
+                raise DataConnectionError(
+                    "HTTP origin must not contain credentials, query, or fragment",
+                    "connection_invalid",
+                )
             local_fixture = bool(checked_config.get("allow_local_fixture", False))
             local_host = parsed_origin.hostname in {"127.0.0.1", "localhost", "::1"}
             if local_fixture and not self.allow_local_fixtures:
-                raise DataConnectionError("local HTTP fixtures are disabled for this runtime", "fixture_disabled")
+                raise DataConnectionError(
+                    "local HTTP fixtures are disabled for this runtime", "fixture_disabled"
+                )
             if parsed_origin.scheme != "https" and not (local_fixture and local_host):
                 raise DataConnectionError("external HTTP sources require HTTPS", "tls_required")
             if local_fixture and not local_host:
-                raise DataConnectionError("local fixture mode is restricted to loopback", "destination_invalid")
+                raise DataConnectionError(
+                    "local fixture mode is restricted to loopback", "destination_invalid"
+                )
             checked_config["origin"] = origin.rstrip("/")
             checked_config["path"] = path
             checked_config.setdefault("format", "json")
             if checked_config["format"] not in HTTP_FORMATS:
-                raise DataConnectionError("HTTP format must be json, jsonl, or csv", "connection_invalid")
+                raise DataConnectionError(
+                    "HTTP format must be json, jsonl, or csv", "connection_invalid"
+                )
             auth_mode = checked_config.get("auth_mode", "public")
             if auth_mode not in {"public", "api_key", "bearer"}:
-                raise DataConnectionError("unsupported HTTP authentication mode", "connection_invalid")
+                raise DataConnectionError(
+                    "unsupported HTTP authentication mode", "connection_invalid"
+                )
             if auth_mode == "public":
                 if credential_ref:
-                    raise DataConnectionError("public HTTP sources cannot use credentials", "credential_invalid")
+                    raise DataConnectionError(
+                        "public HTTP sources cannot use credentials", "credential_invalid"
+                    )
                 credential_ref = None
             else:
                 if not credential_ref:
-                    raise DataConnectionError("authenticated HTTP sources require credential_ref", "credential_required")
+                    raise DataConnectionError(
+                        "authenticated HTTP sources require credential_ref", "credential_required"
+                    )
                 validate_credential_reference(credential_ref)
             # Instantiate the validator without performing a request. It also
             # normalizes pagination/query bounds before durable persistence.
-            _HttpDataSourceAdapter(checked_config, credential_ref, self.credential_resolver, allow_local_fixture=local_fixture)
+            _HttpDataSourceAdapter(
+                checked_config,
+                credential_ref,
+                self.credential_resolver,
+                allow_local_fixture=local_fixture,
+            )
         else:
             unknown = set(checked_config) - ALLOWED_FILE_CONFIG
             if unknown:

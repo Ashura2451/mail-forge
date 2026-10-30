@@ -57,7 +57,14 @@ NODE_KINDS = {
     "FUNCTION",
     "END",
 }
-ACTION_KINDS = {"ADD_TO_LIST", "REMOVE_FROM_LIST", "PREPARE_CAMPAIGN", "NOTE", "RUN_DATA_STUDIO", "FUNCTION"}
+ACTION_KINDS = {
+    "ADD_TO_LIST",
+    "REMOVE_FROM_LIST",
+    "PREPARE_CAMPAIGN",
+    "NOTE",
+    "RUN_DATA_STUDIO",
+    "FUNCTION",
+}
 AUTOMATION_LEASE_SECONDS = 60
 MAX_GRAPH_BYTES = 64 * 1024
 MAX_NODES = 100
@@ -128,7 +135,11 @@ class AutomationService:
         self.campaigns = campaigns or CampaignService(store)
         self.message_studio = message_studio
         self.data_studio = data_studio
-        self.programmable = programmable or getattr(data_studio, "programmable", None) or ProgrammableOperationsService(store)
+        self.programmable = (
+            programmable
+            or getattr(data_studio, "programmable", None)
+            or ProgrammableOperationsService(store)
+        )
         self.segmentation = SegmentationService(store)
         self._event_lock = threading.Lock()
 
@@ -739,9 +750,15 @@ class AutomationService:
                         if config.get("revision_id"):
                             revision = self.programmable.get_revision(config["revision_id"])
                             if revision["function_id"] != function["id"]:
-                                raise AutomationError("function revision does not belong to function", "reference_not_found")
+                                raise AutomationError(
+                                    "function revision does not belong to function",
+                                    "reference_not_found",
+                                )
                             if revision["content_hash"] != config.get("content_hash"):
-                                raise AutomationError("function revision content hash does not match", "reference_not_found")
+                                raise AutomationError(
+                                    "function revision content hash does not match",
+                                    "reference_not_found",
+                                )
                     except ProgrammableOperationsError as error:
                         raise AutomationError(str(error), "reference_not_found") from error
                 if node["kind"] == "CONDITION" and config.get("segment_id"):
@@ -1508,7 +1525,9 @@ class AutomationService:
                 )
             output = {"note_recorded": True}
         elif node["kind"] == "FUNCTION":
-            contact = self.store.get_contact(enrollment["contact_id"]) if enrollment["contact_id"] else {}
+            contact = (
+                self.store.get_contact(enrollment["contact_id"]) if enrollment["contact_id"] else {}
+            )
             metadata = json.loads(contact.get("metadata_json") or "{}") if contact else {}
             context = {
                 "email": contact.get("normalized_email", "") if contact else "",

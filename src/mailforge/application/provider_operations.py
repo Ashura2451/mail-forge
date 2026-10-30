@@ -80,8 +80,8 @@ def provider_capabilities() -> tuple[ProviderCapability, ...]:
             (ProviderKind.IMAP,),
             (AuthenticationMethod.PASSWORD, AuthenticationMethod.OAUTH2),
             (TLSMode.IMPLICIT,),
-            (("port", 993),),
-            (("mailbox", "INBOX"),),
+            (),
+            (("port", 993), ("mailbox", "INBOX")),
             docs=("https://docs.python.org/3/library/imaplib.html",),
         ),
         ProviderCapability(
@@ -292,17 +292,32 @@ class ProviderOperationsService:
         result["external_access"] = False
         return result
 
-    def _require_grant(
-        self, ref: str, operation: ProviderOperation, grant: ExternalOperationGrant | None
-    ) -> ExternalOperationGrant:
-        if grant is None:
-            raise PermissionError("explicit external operation authorization is required")
-        grant.validate()
-        if grant.account_ref != ref or grant.operation is not operation:
-            raise PermissionError("operation authorization does not match the selected account")
+    def issue_grant(
+        self,
+        ref: str,
+        operation: ProviderOperation,
+        *,
+        purpose: str,
+        sender: str | None = None,
+        recipient: str | None = None,
+        expires_at: str,
+    ) -> dict[str, object]:
+        """Issue a server-owned, persisted grant for one bounded operation."""
         profile = self.providers.profile(ref)
-        if grant.host != profile.host or grant.port != profile.port:
-            raise PermissionError("operation authorization endpoint does not match the account")
+        authorization_ref = f"grant-{secrets.token_urlsafe(24)}"
+        grant = ExternalOperationGrant(
+            account_ref=ref,
+            operation=operation,
+            host=profile.host,
+            port=profile.port,
+            purpose=purpose,
+            sender=sender,
+            recipient=recipient,
+            max_submissions=1 if operation is ProviderOperation.CONTROLLED_TEST_SEND else 0,
+            expires_at=expires_at,
+            authorization_ref=authorization_ref,
+        )
+        grant.validate()
         self.store.record_provider_operation_grant(
             account_ref=grant.account_ref,
             operation=grant.operation.value,
@@ -315,6 +330,86 @@ class ProviderOperationsService:
             expires_at=grant.expires_at,
             authorization_ref=grant.authorization_ref,
         )
+        return {
+            "authorization_ref": authorization_ref,
+            "account_ref": ref,
+            "operation": operation.value,
+            "purpose": purpose,
+            "sender": sender,
+            "recipient": recipient,
+            "expires_at": expires_at,
+            "external_access": False,
+        }
+
+    def grant_for_authorization(
+        self,
+        ref: str,
+        operation: ProviderOperation,
+        *,
+        authorization_ref: str,
+        purpose: str,
+        sender: str | None = None,
+        recipient: str | None = None,
+        expires_at: str,
+    ) -> ExternalOperationGrant:
+        """Resolve and match a grant issued by the server-side authority."""
+        row = self.store.get_provider_operation_grant(authorization_ref, account_ref=ref)
+        if row is None:
+            raise PermissionError("operation authorization was not issued by Mailforge")
+        try:
+            granted_operation = ProviderOperation(row["operation"])
+        except ValueError as error:
+            raise PermissionError("operation authorization is invalid") from error
+        grant = ExternalOperationGrant(
+            account_ref=row["account_ref"],
+            operation=granted_operation,
+            host=row["host"],
+            port=int(row["port"]),
+            purpose=row["purpose"],
+            sender=row["sender"],
+            recipient=row["recipient"],
+            max_submissions=int(row["max_submissions"]),
+            expires_at=row["expires_at"],
+            authorization_ref=row["authorization_ref"],
+        )
+        grant.validate()
+        if (
+            grant.operation is not operation
+            or grant.purpose != purpose
+            or grant.sender != sender
+            or grant.recipient != recipient
+            or grant.expires_at != expires_at
+        ):
+            raise PermissionError("operation request does not match its issued authorization")
+        return grant
+
+    def _require_grant(
+        self, ref: str, operation: ProviderOperation, grant: ExternalOperationGrant | None
+    ) -> ExternalOperationGrant:
+        if grant is None:
+            raise PermissionError("explicit external operation authorization is required")
+        grant.validate()
+        if grant.account_ref != ref or grant.operation is not operation:
+            raise PermissionError("operation authorization does not match the selected account")
+        profile = self.providers.profile(ref)
+        if grant.host != profile.host or grant.port != profile.port:
+            raise PermissionError("operation authorization endpoint does not match the account")
+        if (
+            self.store.get_provider_operation_grant(grant.authorization_ref, account_ref=ref)
+            is None
+        ):
+            self.store.record_provider_operation_grant(
+                account_ref=grant.account_ref,
+                operation=grant.operation.value,
+                host=grant.host,
+                port=grant.port,
+                purpose=grant.purpose,
+                sender=grant.sender,
+                recipient=grant.recipient,
+                max_submissions=grant.max_submissions,
+                expires_at=grant.expires_at,
+                authorization_ref=grant.authorization_ref,
+            )
         return grant
 
     def diagnostic(
@@ -476,16 +571,6 @@ class ProviderOperationsService:
         message_revision_id: str | None = None,
     ) -> dict[str, Any]:
         self._require_grant(ref, ProviderOperation.CONTROLLED_TEST_SEND, grant)
-        existing = next(
-            (
-                item
-                for item in self.store.list_provider_tests(ref)
-                if item["idempotency_key"] == idempotency_key
-            ),
-            None,
-        )
-        if existing is not None:
-            return existing
         account = self.account(ref)
         if not account["profile_enabled"] or not account["outbound_enabled"]:
             raise PermissionError("provider account is disabled for outbound operations")
@@ -497,19 +582,29 @@ class ProviderOperationsService:
             raise PermissionError("recipient does not match the operation authorization")
         if not message or len(message.encode()) > 10 * 1024 * 1024:
             raise ValueError("controlled test message is empty or exceeds the bounded limit")
-        pool = self.providers.smtp_pool(
-            ref, resolver or EnvironmentCredentialResolver(), gate=LiveSendGate(enabled=True)
+        reservation, owns_reservation = self.store.reserve_provider_test_submission(
+            account_ref=ref,
+            authorization_ref=grant.authorization_ref,
+            idempotency_key=idempotency_key,
+            sender=sender,
+            recipient=recipient,
+            message_digest=hashlib.sha256(message.encode()).hexdigest(),
+            message_revision_id=message_revision_id,
         )
+        if not owns_reservation:
+            return reservation
+        pool = None
         try:
+            pool = self.providers.smtp_pool(
+                ref, resolver or EnvironmentCredentialResolver(), gate=LiveSendGate(enabled=True)
+            )
             result = deliver(pool, sender, recipient, message, gate=LiveSendGate(enabled=True))
             transaction = pool.last_transaction
             detail = _sanitize_detail(result.detail)
-            row = self.store.create_provider_test_submission(
+            row = self.store.finalize_provider_test_submission(
                 account_ref=ref,
+                authorization_ref=grant.authorization_ref,
                 idempotency_key=idempotency_key,
-                sender=sender,
-                recipient=recipient,
-                message_revision_id=message_revision_id,
                 status=(
                     "provider_accepted"
                     if result.status is DeliveryStatus.ACCEPTED
@@ -518,7 +613,6 @@ class ProviderOperationsService:
                 phase=transaction.phase.value if transaction.phase else result.phase.value,
                 detail=detail,
                 response_code=result.response_code or transaction.response_code,
-                external_access=True,
             )
             self.store.record_provider_diagnostic(
                 ProviderDiagnostic(
@@ -534,8 +628,21 @@ class ProviderOperationsService:
                 )
             )
             return row
+        except Exception as error:
+            transaction = getattr(pool, "last_transaction", None)
+            self.store.finalize_provider_test_submission(
+                account_ref=ref,
+                authorization_ref=grant.authorization_ref,
+                idempotency_key=idempotency_key,
+                status="ambiguous",
+                phase=getattr(getattr(transaction, "phase", None), "value", "connection_error"),
+                detail=_sanitize_detail(error),
+                response_code=getattr(transaction, "response_code", None),
+            )
+            raise
         finally:
-            pool.close()
+            if pool is not None:
+                pool.close()
 
     def diagnostics(self, ref: str | None = None) -> list[dict[str, object]]:
         return [

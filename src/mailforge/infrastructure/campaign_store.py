@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -969,6 +969,7 @@ CREATE TABLE IF NOT EXISTS provider_operation_grants (
     sender TEXT,
     recipient TEXT,
     max_submissions INTEGER NOT NULL DEFAULT 0,
+    consumed_submissions INTEGER NOT NULL DEFAULT 0 CHECK(consumed_submissions >= 0),
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     authorization_ref TEXT NOT NULL
@@ -982,6 +983,8 @@ CREATE TABLE IF NOT EXISTS provider_test_submissions (
     sender TEXT NOT NULL,
     recipient TEXT NOT NULL,
     message_revision_id TEXT,
+    authorization_ref TEXT,
+    message_digest TEXT,
     status TEXT NOT NULL,
     phase TEXT NOT NULL,
     detail TEXT NOT NULL,
@@ -1885,6 +1888,13 @@ class CampaignStore:
                     (23, utc_now()),
                 )
                 current = 23
+            if current < 24:
+                self._apply_migration_24(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (24, utc_now()),
+                )
+                current = 24
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2041,8 +2051,12 @@ class CampaignStore:
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_connections'"
         ).fetchone():
-            connection.execute("ALTER TABLE data_connection_events RENAME TO data_connection_events_legacy")
-            connection.execute("ALTER TABLE data_connection_snapshots RENAME TO data_connection_snapshots_legacy")
+            connection.execute(
+                "ALTER TABLE data_connection_events RENAME TO data_connection_events_legacy"
+            )
+            connection.execute(
+                "ALTER TABLE data_connection_snapshots RENAME TO data_connection_snapshots_legacy"
+            )
             connection.execute("ALTER TABLE data_connections RENAME TO data_connections_legacy")
             for index in (
                 "idx_data_connection_snapshots_status",
@@ -2151,11 +2165,11 @@ class CampaignStore:
             ("remote_uid", "TEXT"),
         ):
             if column not in message_columns:
-                connection.execute(
-                    f"ALTER TABLE inbound_messages ADD COLUMN {column} {definition}"
-                )
+                connection.execute(f"ALTER TABLE inbound_messages ADD COLUMN {column} {definition}")
 
-        connection.execute("ALTER TABLE inbound_mailbox_actions RENAME TO inbound_mailbox_actions_legacy")
+        connection.execute(
+            "ALTER TABLE inbound_mailbox_actions RENAME TO inbound_mailbox_actions_legacy"
+        )
         connection.execute(
             """
             CREATE TABLE inbound_mailbox_actions (
@@ -2226,14 +2240,40 @@ class CampaignStore:
             )
             """
         )
-        connection.execute(
-            "INSERT INTO inbound_drafts SELECT * FROM inbound_drafts_legacy"
-        )
+        connection.execute("INSERT INTO inbound_drafts SELECT * FROM inbound_drafts_legacy")
         connection.execute("DROP TABLE inbound_drafts_legacy")
         for statement in MIGRATION_23_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_24(connection: sqlite3.Connection) -> None:
+        grant_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_operation_grants)")
+        }
+        if "consumed_submissions" not in grant_columns:
+            connection.execute(
+                "ALTER TABLE provider_operation_grants ADD COLUMN "
+                "consumed_submissions INTEGER NOT NULL DEFAULT 0"
+            )
+        submission_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_test_submissions)")
+        }
+        for column, definition in (
+            ("authorization_ref", "TEXT"),
+            ("message_digest", "TEXT"),
+        ):
+            if column not in submission_columns:
+                connection.execute(
+                    f"ALTER TABLE provider_test_submissions ADD COLUMN {column} {definition}"
+                )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_provider_grants_authorization "
+            "ON provider_operation_grants(authorization_ref, account_ref)"
+        )
 
     def schema_version(self) -> int:
         with self.connect() as connection:
@@ -2416,7 +2456,7 @@ class CampaignStore:
         max_concurrency: int = 1,
         outbound_enabled: bool = True,
         inbound_enabled: bool = False,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         _assert_safe_reference(ref, "provider_account.ref")
         if not display_name or not display_name.strip():
             display_name = ref
@@ -2673,6 +2713,152 @@ class CampaignStore:
         with self.connect() as connection:
             return [dict(row) for row in connection.execute(query, parameters)]
 
+    def get_provider_operation_grant(
+        self, authorization_ref: str, *, account_ref: str | None = None
+    ) -> dict[str, Any] | None:
+        _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
+        query = "SELECT * FROM provider_operation_grants WHERE authorization_ref = ?"
+        parameters: tuple[Any, ...] = (authorization_ref,)
+        if account_ref is not None:
+            _assert_safe_reference(account_ref, "provider_grant.account_ref")
+            query += " AND account_ref = ?"
+            parameters += (account_ref,)
+        query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+        with self.connect() as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return dict(row) if row is not None else None
+
+    def reserve_provider_test_submission(
+        self,
+        *,
+        account_ref: str,
+        authorization_ref: str,
+        idempotency_key: str,
+        sender: str,
+        recipient: str,
+        message_digest: str,
+        message_revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Reserve one test submission and consume its grant atomically."""
+
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_test.authorization_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        with self.transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["account_ref"] != account_ref
+                    or existing["authorization_ref"] != authorization_ref
+                    or existing["sender"] != sender
+                    or existing["recipient"] != recipient
+                    or existing["message_digest"] != message_digest
+                ):
+                    raise PermissionError("idempotency key is bound to another operation")
+                return dict(existing), False
+
+            grant = connection.execute(
+                "SELECT id FROM provider_operation_grants "
+                "WHERE authorization_ref = ? AND account_ref = ? "
+                "AND consumed_submissions < max_submissions "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (authorization_ref, account_ref),
+            ).fetchone()
+            if grant is None:
+                raise PermissionError("operation authorization has no remaining submission")
+            consumed = connection.execute(
+                "UPDATE provider_operation_grants "
+                "SET consumed_submissions = consumed_submissions + 1 "
+                "WHERE id = ? AND consumed_submissions < max_submissions",
+                (grant["id"],),
+            )
+            if consumed.rowcount != 1:
+                raise PermissionError("operation authorization has no remaining submission")
+
+            now = utc_now()
+            submission_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO provider_test_submissions("
+                "id, account_ref, idempotency_key, sender, recipient, message_revision_id, authorization_ref, "
+                "message_digest, status, phase, detail, external_access, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'reserved', ?, 1, ?, ?)",
+                (
+                    submission_id,
+                    account_ref,
+                    idempotency_key,
+                    sender,
+                    recipient,
+                    message_revision_id,
+                    authorization_ref,
+                    message_digest,
+                    "Submission reserved before provider contact",
+                    now,
+                    now,
+                ),
+            )
+            return (
+                dict(
+                    connection.execute(
+                        "SELECT * FROM provider_test_submissions WHERE id = ?",
+                        (submission_id,),
+                    ).fetchone()
+                ),
+                True,
+            )
+
+    def finalize_provider_test_submission(
+        self,
+        *,
+        account_ref: str,
+        authorization_ref: str,
+        idempotency_key: str,
+        status: str,
+        phase: str,
+        detail: str,
+        response_code: int | None,
+    ) -> dict[str, Any]:
+        """Persist the provider outcome for an existing reservation."""
+
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_test.authorization_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        _assert_no_secrets({"detail": detail}, "provider_test")
+        with self.transaction(immediate=True) as connection:
+            result = connection.execute(
+                "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
+                "response_code = ?, updated_at = ? "
+                "WHERE account_ref = ? AND authorization_ref = ? AND idempotency_key = ? "
+                "AND status = 'reserved'",
+                (
+                    status,
+                    phase,
+                    detail,
+                    response_code,
+                    utc_now(),
+                    account_ref,
+                    authorization_ref,
+                    idempotency_key,
+                ),
+            )
+            if result.rowcount == 0:
+                row = connection.execute(
+                    "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"provider test submission not found: {idempotency_key}")
+                return dict(row)
+            row = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"provider test submission not found: {idempotency_key}")
+        return dict(row)
+
     def get_provider_profile(self, ref: str) -> sqlite3.Row:
         _assert_safe_reference(ref, "provider_profile.ref")
         with self.connect() as connection:
@@ -2793,6 +2979,8 @@ class CampaignStore:
         detail: str,
         response_code: int | None = None,
         external_access: bool = False,
+        authorization_ref: str | None = None,
+        message_digest: str | None = None,
     ) -> dict[str, Any]:
         _assert_safe_reference(account_ref, "provider_test.account_ref")
         _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
@@ -2808,8 +2996,8 @@ class CampaignStore:
                 return dict(existing)
             connection.execute(
                 "INSERT INTO provider_test_submissions(id, account_ref, idempotency_key, sender, recipient, "
-                "message_revision_id, status, phase, detail, response_code, external_access, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "message_revision_id, authorization_ref, message_digest, status, phase, detail, response_code, "
+                "external_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     submission_id,
                     account_ref,
@@ -2817,6 +3005,8 @@ class CampaignStore:
                     sender,
                     recipient,
                     message_revision_id,
+                    authorization_ref,
+                    message_digest,
                     status,
                     phase,
                     detail,
@@ -4840,10 +5030,14 @@ class CampaignStore:
         run_id: str | None = None,
     ) -> None:
         with self.transaction(immediate=True) as connection:
-            if run_id is not None and connection.execute(
-                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
-                (run_id, source_ref),
-            ).fetchone() is None:
+            if (
+                run_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                    (run_id, source_ref),
+                ).fetchone()
+                is None
+            ):
                 raise RuntimeError("inbound synchronization run no longer owns its cursor")
             connection.execute(
                 "INSERT INTO inbound_cursors(source_ref, uidvalidity, cursor, generation, updated_at) VALUES (?, ?, ?, 0, ?) "
@@ -4856,10 +5050,14 @@ class CampaignStore:
     ) -> None:
         _assert_no_secrets({"error": error}, "inbound_cursor")
         with self.transaction(immediate=True) as connection:
-            if run_id is not None and connection.execute(
-                "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
-                (run_id, source_ref),
-            ).fetchone() is None:
+            if (
+                run_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM inbound_runs WHERE id = ? AND source_ref = ? AND status = 'running'",
+                    (run_id, source_ref),
+                ).fetchone()
+                is None
+            ):
                 return
             connection.execute(
                 "UPDATE inbound_cursors SET cursor = NULL, generation = generation + 1, last_error = ?, updated_at = ? WHERE source_ref = ?",
@@ -5046,7 +5244,9 @@ class CampaignStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"mailbox action not found: {action_id}")
-        self.record_inbound_action_event(action_id, action_state, {"status": status, "detail": response_detail})
+        self.record_inbound_action_event(
+            action_id, action_state, {"status": status, "detail": response_detail}
+        )
         return dict(row)
 
     def claim_inbound_mailbox_action(self, action_id: str) -> dict[str, Any] | None:

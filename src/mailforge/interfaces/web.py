@@ -412,6 +412,13 @@ class ProviderTestSendInput(BaseModel):
     message_revision_id: str | None = None
 
 
+class ProviderGrantInput(BaseModel):
+    purpose: str = Field(min_length=1, max_length=500)
+    sender: str
+    recipient: str
+    expires_at: str
+
+
 class ProviderOAuthStartInput(BaseModel):
     provider_key: str = Field(min_length=1, max_length=80)
     client_id: str = Field(min_length=1, max_length=300)
@@ -3740,21 +3747,32 @@ def create_app(
         except ValueError as error:
             return _error(400, "provider_oauth_callback_failed", str(error))
 
-    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/test-send")
-    async def provider_test_send(provider_ref: str, payload: ProviderTestSendInput):
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/grants")
+    async def issue_provider_grant(provider_ref: str, payload: ProviderGrantInput):
         try:
-            account = runtime.provider_operations.account(provider_ref)
-            grant = ExternalOperationGrant(
-                account_ref=provider_ref,
-                operation=ProviderOperation.CONTROLLED_TEST_SEND,
-                host=account["host"],
-                port=account["port"],
+            runtime.provider_operations.account(provider_ref)
+            return runtime.provider_operations.issue_grant(
+                provider_ref,
+                ProviderOperation.CONTROLLED_TEST_SEND,
                 purpose=payload.purpose,
                 sender=payload.sender,
                 recipient=payload.recipient,
-                max_submissions=1,
                 expires_at=payload.expires_at,
+            )
+        except (KeyError, ValueError, PermissionError) as error:
+            return _error(400, "provider_grant_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/test-send")
+    async def provider_test_send(provider_ref: str, payload: ProviderTestSendInput):
+        try:
+            grant = runtime.provider_operations.grant_for_authorization(
+                provider_ref,
+                ProviderOperation.CONTROLLED_TEST_SEND,
                 authorization_ref=payload.authorization_ref,
+                purpose=payload.purpose,
+                sender=payload.sender,
+                recipient=payload.recipient,
+                expires_at=payload.expires_at,
             )
             return runtime.provider_operations.controlled_test_send(
                 ref=provider_ref,

@@ -22,7 +22,7 @@ from mailforge.infrastructure.credentials import (
     CredentialResolver,
     EnvironmentCredentialResolver,
     UnsupportedAuthenticationMechanism,
-    oauth_token_from_material,
+    resolve_oauth_token,
 )
 
 
@@ -365,8 +365,8 @@ class SmtpTransport:
                     authenticated=False,
                 )
                 if self.config.auth_method is AuthenticationMethod.OAUTH2:
-                    token = oauth_token_from_material(
-                        self.credential_resolver.resolve(self.config.credential_ref or "")
+                    token = resolve_oauth_token(
+                        self.credential_resolver, self.config.credential_ref or ""
                     )
                     if token.expired:
                         raise CredentialError("OAuth access token is expired")
@@ -538,9 +538,7 @@ class SMTPConnectionPool:
                 if config.auth_method is AuthenticationMethod.OAUTH2:
                     if not config.credential_ref:
                         raise CredentialError("OAuth credential is unavailable")
-                    token = oauth_token_from_material(
-                        self.credential_resolver.resolve(config.credential_ref)
-                    )
+                    token = resolve_oauth_token(self.credential_resolver, config.credential_ref)
                     if token.expired:
                         raise CredentialError("OAuth access token is expired")
                     auth = getattr(client, "auth", None)
