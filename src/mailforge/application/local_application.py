@@ -108,6 +108,8 @@ class DataDirectory:
         for path in (self.root / "config", self.backups, self.logs, self.runtime, self.artifacts):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.chmod(0o700)
+        for temporary_backup in self.backups.glob(".mailforge-backup-publish-*.tmp"):
+            temporary_backup.unlink(missing_ok=True)
         if not self.config.exists():
             _write_json(
                 self.config,
@@ -267,55 +269,70 @@ def create_backup(data: DataDirectory, destination: str | Path | None = None) ->
     if destination is not None and destination_path.parent != data.backups.resolve():
         raise ValueError("application backups must be stored in the configured backup directory")
     destination_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.TemporaryDirectory(prefix="mailforge-backup-", dir=data.runtime) as temporary:
-        database_copy = Path(temporary) / "mailforge.sqlite3"
-        CampaignStore(data.database).backup_to(database_copy)
-        files: list[dict[str, Any]] = []
-        with zipfile.ZipFile(destination_path, "x", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(database_copy, "database/mailforge.sqlite3")
-            files.append(
-                {
-                    "path": "database/mailforge.sqlite3",
-                    "size": database_copy.stat().st_size,
-                    "sha256": _sha256(database_copy),
-                }
-            )
-            if data.config.is_file():
-                archive.write(data.config, "config/settings.json")
+    temporary_destination = destination_path.parent / (
+        f".mailforge-backup-publish-{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="mailforge-backup-", dir=data.runtime) as temporary:
+            database_copy = Path(temporary) / "mailforge.sqlite3"
+            CampaignStore(data.database).backup_to(database_copy)
+            files: list[dict[str, Any]] = []
+            with zipfile.ZipFile(
+                temporary_destination, "x", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                archive.write(database_copy, "database/mailforge.sqlite3")
                 files.append(
                     {
-                        "path": "config/settings.json",
-                        "size": data.config.stat().st_size,
-                        "sha256": _sha256(data.config),
+                        "path": "database/mailforge.sqlite3",
+                        "size": database_copy.stat().st_size,
+                        "sha256": _sha256(database_copy),
                     }
                 )
-            for source_root in (data.artifacts, data.root / "extensions", data.root / "list-tools"):
-                if not source_root.is_dir():
-                    continue
-                for source in sorted(source_root.rglob("*")):
-                    if not source.is_file() or source.is_symlink():
-                        continue
-                    relative = source.relative_to(data.root).as_posix()
-                    archive_name = f"data/{relative}"
-                    archive.write(source, archive_name)
+                if data.config.is_file():
+                    archive.write(data.config, "config/settings.json")
                     files.append(
                         {
-                            "path": archive_name,
-                            "size": source.stat().st_size,
-                            "sha256": _sha256(source),
+                            "path": "config/settings.json",
+                            "size": data.config.stat().st_size,
+                            "sha256": _sha256(data.config),
                         }
                     )
-            manifest = {
-                "format": BACKUP_FORMAT,
-                "format_version": BACKUP_VERSION,
-                "application_version": application_version(),
-                "schema_version": current_schema_version(data.database),
-                "created_at": utc_now(),
-                "data_directory_id": data.identity,
-                "files": files,
-            }
-            archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    os.chmod(destination_path, 0o600)
+                for source_root in (
+                    data.artifacts,
+                    data.root / "extensions",
+                    data.root / "list-tools",
+                ):
+                    if not source_root.is_dir():
+                        continue
+                    for source in sorted(source_root.rglob("*")):
+                        if not source.is_file() or source.is_symlink():
+                            continue
+                        relative = source.relative_to(data.root).as_posix()
+                        archive_name = f"data/{relative}"
+                        archive.write(source, archive_name)
+                        files.append(
+                            {
+                                "path": archive_name,
+                                "size": source.stat().st_size,
+                                "sha256": _sha256(source),
+                            }
+                        )
+                manifest = {
+                    "format": BACKUP_FORMAT,
+                    "format_version": BACKUP_VERSION,
+                    "application_version": application_version(),
+                    "schema_version": current_schema_version(data.database),
+                    "created_at": utc_now(),
+                    "data_directory_id": data.identity,
+                    "files": files,
+                }
+                archive.writestr(
+                    "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+                )
+        os.chmod(temporary_destination, 0o600)
+        os.replace(temporary_destination, destination_path)
+    finally:
+        temporary_destination.unlink(missing_ok=True)
     return destination_path
 
 

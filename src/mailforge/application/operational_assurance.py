@@ -49,14 +49,30 @@ class OperationalAssuranceService:
             ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
-    def _all_counts(self, table: str) -> dict[str, int]:
+    @staticmethod
+    def _record_source_failure(
+        failures: list[dict[str, str]] | None, source: str, error: Exception
+    ) -> None:
+        if failures is not None:
+            failures.append(
+                {
+                    "source": source,
+                    "reason": type(error).__name__,
+                    "detail": OperationalAssuranceService._safe_error(error),
+                }
+            )
+
+    def _all_counts(
+        self, table: str, *, failures: list[dict[str, str]] | None = None
+    ) -> dict[str, int]:
         try:
             with self.store.connect() as connection:
                 rows = connection.execute(
                     f"SELECT status, COUNT(*) AS count FROM {table} GROUP BY status"
                 ).fetchall()
             return {str(row["status"]): int(row["count"]) for row in rows}
-        except Exception:
+        except Exception as error:
+            self._record_source_failure(failures, table, error)
             return {}
 
     @staticmethod
@@ -81,7 +97,12 @@ class OperationalAssuranceService:
                 return f"operation-error:{label}"
         return "operation-error"
 
-    def _job_rows(self, *, limit: int | None = 500) -> list[dict[str, Any]]:
+    def _job_rows(
+        self,
+        *,
+        limit: int | None = 500,
+        failures: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         tables = (
             ("campaigns", "campaigns", "failure_reason", "created_at", "updated_at"),
@@ -112,7 +133,12 @@ class OperationalAssuranceService:
             ),
             ("inbound_mailbox_actions", "inbound", "error_message", "created_at", "updated_at"),
         )
-        with self.store.connect() as connection:
+        try:
+            connection = self.store.connect()
+        except Exception as error:
+            self._record_source_failure(failures, "job_store", error)
+            return rows
+        with connection:
             for table, subsystem, error_column, created_column, updated_column in tables:
                 try:
                     limit_clause = f" LIMIT {limit}" if limit is not None else ""
@@ -122,7 +148,8 @@ class OperationalAssuranceService:
                         f"{error_column} AS error "
                         f"FROM {table} ORDER BY updated_at DESC{limit_clause}"
                     ).fetchall()
-                except Exception:
+                except Exception as error:
+                    self._record_source_failure(failures, table, error)
                     continue
                 rows.extend(
                     {
@@ -147,13 +174,16 @@ class OperationalAssuranceService:
                 )
         return rows
 
-    def _backup_observation(self) -> tuple[datetime | None, int]:
+    def _backup_observation(
+        self, *, failures: list[dict[str, str]] | None = None
+    ) -> tuple[datetime | None, int]:
         paths = sorted(self.data_directory.backups.glob("*.zip"), reverse=True)
         latest: datetime | None = None
         for path in paths:
             try:
                 item = validate_backup(path)
-            except OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile:
+            except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
+                self._record_source_failure(failures, str(path.name), error)
                 continue
             if item.get("valid"):
                 latest = _parse(item.get("created_at"))
@@ -180,6 +210,7 @@ class OperationalAssuranceService:
 
     def health(self, *, worker_status: dict[str, Any] | None = None) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
+        source_failures: list[dict[str, str]] = []
         try:
             integrity = self.store.integrity_check()
             checks.append(
@@ -209,7 +240,7 @@ class OperationalAssuranceService:
             )
         except OSError as error:
             checks.append({"key": "storage", "state": "unknown", "detail": type(error).__name__})
-        jobs = self._job_rows(limit=None)
+        jobs = self._job_rows(limit=None, failures=source_failures)
         now = datetime.now(UTC)
         stale = [
             job
@@ -231,10 +262,14 @@ class OperationalAssuranceService:
                 }
             )
         subsystem_counts = {
-            "campaigns": self._all_counts("campaigns"),
-            "provider_tests": self._all_counts("provider_test_submissions"),
-            "mailbox_sync": self._all_counts("inbound_runs"),
-            "mailbox_actions": self._all_counts("inbound_mailbox_actions"),
+            "campaigns": self._all_counts("campaigns", failures=source_failures),
+            "provider_tests": self._all_counts(
+                "provider_test_submissions", failures=source_failures
+            ),
+            "mailbox_sync": self._all_counts("inbound_runs", failures=source_failures),
+            "mailbox_actions": self._all_counts(
+                "inbound_mailbox_actions", failures=source_failures
+            ),
         }
         provider_resources: list[dict[str, Any]] = []
         try:
@@ -271,7 +306,8 @@ class OperationalAssuranceService:
                         "ON t.account_ref=a.ref GROUP BY a.ref ORDER BY a.ref"
                     ).fetchall()
                 ]
-        except Exception:
+        except Exception as error:
+            self._record_source_failure(source_failures, "provider_accounts", error)
             provider_resources = []
         if provider_resources:
             checks.append(
@@ -307,7 +343,11 @@ class OperationalAssuranceService:
                         "detail": f"keychain backend {keychain_state}; references remain opaque",
                     }
                 )
-        latest, backup_count = self._backup_observation()
+        try:
+            latest, backup_count = self._backup_observation(failures=source_failures)
+        except Exception as error:
+            self._record_source_failure(source_failures, "backups", error)
+            latest, backup_count = None, 0
         backup_state = (
             "healthy" if latest and latest >= now - timedelta(days=7) else "action_required"
         )
@@ -319,6 +359,15 @@ class OperationalAssuranceService:
                 "count": backup_count,
             }
         )
+        if source_failures:
+            checks.append(
+                {
+                    "key": "source_evidence",
+                    "state": "action_required",
+                    "failures": source_failures,
+                    "detail": "one or more operational evidence sources were unavailable",
+                }
+            )
         states = {check["state"] for check in checks}
         overall = (
             "unavailable"
@@ -344,12 +393,13 @@ class OperationalAssuranceService:
         }
 
     def jobs(self, *, subsystem: str | None = None, status: str | None = None) -> dict[str, Any]:
-        rows = self._job_rows()
+        failures: list[dict[str, str]] = []
+        rows = self._job_rows(failures=failures)
         if subsystem:
             rows = [row for row in rows if row["subsystem"] == subsystem]
         if status:
             rows = [row for row in rows if row["status"] == status]
-        return {"items": rows[:200], "count": len(rows)}
+        return {"items": rows[:200], "count": len(rows), "source_failures": failures}
 
     def incidents(
         self,
@@ -405,7 +455,7 @@ class OperationalAssuranceService:
                     )
                     if (
                         previous
-                        and previous["event_type"] in {"incident_observed", "incident_acknowledged"}
+                        and previous["event_type"] == "incident_observed"
                         and previous_payload.get("signature") == signature
                     ):
                         continue

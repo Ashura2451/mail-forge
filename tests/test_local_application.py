@@ -68,6 +68,25 @@ def test_tampered_backup_is_refused(tmp_path: Path) -> None:
     assert list_backups(data)[0]["valid"] is False
 
 
+def test_interrupted_backup_does_not_publish_partial_archive(tmp_path: Path, monkeypatch) -> None:
+    data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
+    CampaignStore(data.database)
+    import mailforge.application.local_application as local_application
+
+    original_write = local_application.zipfile.ZipFile.writestr
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(local_application.zipfile.ZipFile, "writestr", interrupt)
+    destination = data.backups / "interrupted.zip"
+    with pytest.raises(KeyboardInterrupt):
+        create_backup(data, destination)
+    assert not destination.exists()
+    assert not list(data.backups.glob(".mailforge-backup-publish-*.tmp"))
+    monkeypatch.setattr(local_application.zipfile.ZipFile, "writestr", original_write)
+
+
 def test_newer_schema_fails_closed(tmp_path: Path) -> None:
     database = tmp_path / "newer.sqlite3"
     with sqlite3.connect(database) as connection:
