@@ -3,10 +3,12 @@
 Date: 2026-10-30
 Scope: local synthetic qualification on branch `feat/mailforge-operational-assurance-032`.
 
+Latest source qualification revision: `33c7529`.
+
 ## Commands and results
 
-- `PYTHONPATH=src .venv/bin/pytest -q --ignore=tests/e2e`: full non-browser suite, 270 passed before the final incident/backup regression additions; the focused final suite below includes those additions.
-- `PYTHONPATH=src .venv/bin/pytest -q tests/test_local_application.py tests/test_operational_assurance_032.py tests/test_web.py`: 28 passed, one existing Starlette/httpx deprecation warning.
+- `PYTHONPATH=src .venv/bin/pytest -q --ignore=tests/e2e`: 273 passed, one existing Starlette/httpx deprecation warning.
+- `PYTHONPATH=src .venv/bin/pytest -q tests/test_local_application.py tests/test_operational_assurance_032.py tests/test_web.py`: 30 passed, one existing Starlette/httpx deprecation warning.
 - `PYTHONPATH=src .venv/bin/pytest -q tests/e2e`: 8 passed.
 - `.venv/bin/ruff check src tests`: passed.
 - `npm run build` and the configured frontend lint/oxlint command: passed; existing React warnings only.
