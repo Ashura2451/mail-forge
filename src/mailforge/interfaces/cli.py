@@ -906,7 +906,9 @@ def main(argv: list[str] | None = None) -> int:
             data.initialize()
             print(json.dumps({"initialized": True, "data_directory_id": data.identity}))
         elif args.app_command == "backup":
-            print(json.dumps({"backup": str(create_backup(data, args.destination))}))
+            with DatabaseProcessLock(data.database):
+                data.initialize().cleanup_backup_temporary_files()
+                print(json.dumps({"backup": str(create_backup(data, args.destination))}))
         elif args.app_command == "validate-backup":
             print(json.dumps(validate_backup(args.backup), indent=2))
         elif args.app_command == "restore":
