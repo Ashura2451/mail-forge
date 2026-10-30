@@ -80,8 +80,8 @@ def provider_capabilities() -> tuple[ProviderCapability, ...]:
             (ProviderKind.IMAP,),
             (AuthenticationMethod.PASSWORD, AuthenticationMethod.OAUTH2),
             (TLSMode.IMPLICIT,),
-            (("port", 993),),
-            (("mailbox", "INBOX"),),
+            (),
+            (("port", 993), ("mailbox", "INBOX")),
             docs=("https://docs.python.org/3/library/imaplib.html",),
         ),
         ProviderCapability(
@@ -592,19 +592,29 @@ class ProviderOperationsService:
             raise PermissionError("recipient does not match the operation authorization")
         if not message or len(message.encode()) > 10 * 1024 * 1024:
             raise ValueError("controlled test message is empty or exceeds the bounded limit")
-        pool = self.providers.smtp_pool(
-            ref, resolver or EnvironmentCredentialResolver(), gate=LiveSendGate(enabled=True)
+        reservation = self.store.reserve_provider_test_submission(
+            account_ref=ref,
+            authorization_ref=grant.authorization_ref,
+            idempotency_key=idempotency_key,
+            sender=sender,
+            recipient=recipient,
+            message_digest=hashlib.sha256(message.encode()).hexdigest(),
+            message_revision_id=message_revision_id,
         )
+        if reservation["status"] != "reserved":
+            return reservation
+        pool = None
         try:
+            pool = self.providers.smtp_pool(
+                ref, resolver or EnvironmentCredentialResolver(), gate=LiveSendGate(enabled=True)
+            )
             result = deliver(pool, sender, recipient, message, gate=LiveSendGate(enabled=True))
             transaction = pool.last_transaction
             detail = _sanitize_detail(result.detail)
-            row = self.store.create_provider_test_submission(
+            row = self.store.finalize_provider_test_submission(
                 account_ref=ref,
+                authorization_ref=grant.authorization_ref,
                 idempotency_key=idempotency_key,
-                sender=sender,
-                recipient=recipient,
-                message_revision_id=message_revision_id,
                 status=(
                     "provider_accepted"
                     if result.status is DeliveryStatus.ACCEPTED
@@ -613,7 +623,6 @@ class ProviderOperationsService:
                 phase=transaction.phase.value if transaction.phase else result.phase.value,
                 detail=detail,
                 response_code=result.response_code or transaction.response_code,
-                external_access=True,
             )
             self.store.record_provider_diagnostic(
                 ProviderDiagnostic(
@@ -629,8 +638,21 @@ class ProviderOperationsService:
                 )
             )
             return row
+        except Exception as error:
+            transaction = getattr(pool, "last_transaction", None)
+            self.store.finalize_provider_test_submission(
+                account_ref=ref,
+                authorization_ref=grant.authorization_ref,
+                idempotency_key=idempotency_key,
+                status="ambiguous",
+                phase=getattr(getattr(transaction, "phase", None), "value", "connection_error"),
+                detail=_sanitize_detail(error),
+                response_code=getattr(transaction, "response_code", None),
+            )
+            raise
         finally:
-            pool.close()
+            if pool is not None:
+                pool.close()
 
     def diagnostics(self, ref: str | None = None) -> list[dict[str, object]]:
         return [

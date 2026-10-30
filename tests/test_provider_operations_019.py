@@ -104,10 +104,13 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
         max_concurrency=2,
     )
 
-    assert store.schema_version() == 23
+    assert store.schema_version() == 24
     assert account["display_name"] == "Local fixture"
     assert account["inbound_enabled"] is True
     assert any(item["key"] == "google_workspace" for item in service.capabilities())
+    imap = next(item for item in service.capabilities() if item["key"] == "generic_imap")
+    assert imap["outbound_defaults"] == {}
+    assert imap["inbound_defaults"]["port"] == 993
     assert (
         service.configure_inbound("local", mailbox="Qualification", max_fetch=4)["mailbox"]
         == "Qualification"
@@ -248,6 +251,119 @@ def test_controlled_test_send_is_once_only_and_preserves_provider_acceptance(tmp
     assert repeated["id"] == result["id"]
     assert len(pool.calls) == 1
     assert store.list_provider_tests("local")[0]["external_access"] == 1
+
+
+def test_issued_test_grant_is_consumed_before_a_second_key_can_send(tmp_path, monkeypatch):
+    store = CampaignStore(tmp_path / "grant-consumption.sqlite3")
+    service = ProviderOperationsService(store)
+    service.register(_profile(), sender_email="sender@example.com")
+    pool = _FakePool()
+    monkeypatch.setattr(service.providers, "smtp_pool", lambda *args, **kwargs: pool)
+    grant = _grant(service, "local")
+    resolver = MappingCredentialResolver({"test:provider": "synthetic-password"})
+    service.controlled_test_send(
+        ref="local",
+        sender="sender@example.com",
+        recipient="owned@example.com",
+        message="Subject: fixture\r\n\r\nbody",
+        idempotency_key="grant-first-key",
+        grant=grant,
+        resolver=resolver,
+    )
+    with pytest.raises(PermissionError, match="no remaining submission"):
+        service.controlled_test_send(
+            ref="local",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            message="Subject: fixture\r\n\r\nbody",
+            idempotency_key="grant-second-key",
+            grant=grant,
+            resolver=resolver,
+        )
+    assert len(pool.calls) == 1
+    assert store.list_provider_operation_grants("local")[0]["consumed_submissions"] == 1
+
+
+def test_idempotency_reservation_blocks_concurrent_duplicate_smtp_calls(tmp_path, monkeypatch):
+    store = CampaignStore(tmp_path / "concurrent-send.sqlite3")
+    service = ProviderOperationsService(store)
+    service.register(_profile(), sender_email="sender@example.com")
+    pool = _FakePool()
+    monkeypatch.setattr(service.providers, "smtp_pool", lambda *args, **kwargs: pool)
+    grant = _grant(service, "local")
+    resolver = MappingCredentialResolver({"test:provider": "synthetic-password"})
+
+    def send_once():
+        return service.controlled_test_send(
+            ref="local",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            message="Subject: fixture\r\n\r\nbody",
+            idempotency_key="concurrent-key",
+            grant=grant,
+            resolver=resolver,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: send_once(), range(2)))
+    assert results[0]["id"] == results[1]["id"]
+    assert len(pool.calls) == 1
+
+
+def test_idempotency_key_cannot_cross_accounts(tmp_path, monkeypatch):
+    store = CampaignStore(tmp_path / "cross-account.sqlite3")
+    service = ProviderOperationsService(store)
+    service.register(_profile("first"), sender_email="sender@example.com")
+    service.register(_profile("second"), sender_email="sender@example.com")
+    pool = _FakePool()
+    monkeypatch.setattr(service.providers, "smtp_pool", lambda *args, **kwargs: pool)
+    resolver = MappingCredentialResolver({"test:provider": "synthetic-password"})
+    service.controlled_test_send(
+        ref="first",
+        sender="sender@example.com",
+        recipient="owned@example.com",
+        message="Subject: fixture\r\n\r\nbody",
+        idempotency_key="cross-account-key",
+        grant=_grant(service, "first"),
+        resolver=resolver,
+    )
+    with pytest.raises(PermissionError, match="idempotency key"):
+        service.controlled_test_send(
+            ref="second",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            message="Subject: fixture\r\n\r\nbody",
+            idempotency_key="cross-account-key",
+            grant=_grant(service, "second"),
+            resolver=resolver,
+        )
+    assert len(pool.calls) == 1
+
+
+def test_refresh_without_rotation_retains_prior_refresh_token():
+    resolver = MappingCredentialResolver(
+        {
+            "test:oauth": (
+                '{"access_token":"expired","refresh_token":"fixture-refresh",'
+                '"expires_at":"2000-01-01T00:00:00+00:00"}'
+            )
+        }
+    )
+    calls: list[str] = []
+
+    def refresh(value: str) -> OAuthTokenMaterial:
+        calls.append(value)
+        return OAuthTokenMaterial(
+            access_token=f"refreshed-{len(calls)}",
+            expires_at="2000-01-01T00:00:00+00:00",
+        )
+
+    refreshing = RefreshingOAuthCredentialResolver(resolver, refresh)
+    first = refreshing.oauth("test:oauth")
+    second = refreshing.oauth("test:oauth")
+    assert first.refresh_token == "fixture-refresh"
+    assert second.refresh_token == "fixture-refresh"
+    assert calls == ["fixture-refresh", "fixture-refresh"]
 
 
 def test_diagnostics_reject_secret_bearing_detail(tmp_path):

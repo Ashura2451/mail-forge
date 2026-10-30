@@ -358,6 +358,44 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
         server.wait(timeout=5)
 
 
+def test_direct_providers_route_bootstraps_capabilities(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "direct-providers.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        f"from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    page_errors: list[str] = []
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
+            page.get_by_label("Provider profile").locator("option[value='generic_smtp']").wait_for(
+                state="attached"
+            )
+            assert page.get_by_label("Provider profile").locator("option").count() >= 4
+            assert not page_errors
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_data_studio_browser_recipe_preview(tmp_path: Path) -> None:
     executable = _chromium_executable()
     if executable is None:

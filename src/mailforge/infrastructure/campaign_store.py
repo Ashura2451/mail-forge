@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -969,6 +969,7 @@ CREATE TABLE IF NOT EXISTS provider_operation_grants (
     sender TEXT,
     recipient TEXT,
     max_submissions INTEGER NOT NULL DEFAULT 0,
+    consumed_submissions INTEGER NOT NULL DEFAULT 0 CHECK(consumed_submissions >= 0),
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     authorization_ref TEXT NOT NULL
@@ -982,6 +983,8 @@ CREATE TABLE IF NOT EXISTS provider_test_submissions (
     sender TEXT NOT NULL,
     recipient TEXT NOT NULL,
     message_revision_id TEXT,
+    authorization_ref TEXT,
+    message_digest TEXT,
     status TEXT NOT NULL,
     phase TEXT NOT NULL,
     detail TEXT NOT NULL,
@@ -1885,6 +1888,13 @@ class CampaignStore:
                     (23, utc_now()),
                 )
                 current = 23
+            if current < 24:
+                self._apply_migration_24(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (24, utc_now()),
+                )
+                current = 24
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2236,6 +2246,34 @@ class CampaignStore:
             statement = statement.strip()
             if statement:
                 connection.execute(statement)
+
+    @staticmethod
+    def _apply_migration_24(connection: sqlite3.Connection) -> None:
+        grant_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_operation_grants)")
+        }
+        if "consumed_submissions" not in grant_columns:
+            connection.execute(
+                "ALTER TABLE provider_operation_grants ADD COLUMN "
+                "consumed_submissions INTEGER NOT NULL DEFAULT 0"
+            )
+        submission_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_test_submissions)")
+        }
+        for column, definition in (
+            ("authorization_ref", "TEXT"),
+            ("message_digest", "TEXT"),
+        ):
+            if column not in submission_columns:
+                connection.execute(
+                    f"ALTER TABLE provider_test_submissions ADD COLUMN {column} {definition}"
+                )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_provider_grants_authorization "
+            "ON provider_operation_grants(authorization_ref, account_ref)"
+        )
 
     def schema_version(self) -> int:
         with self.connect() as connection:
@@ -2690,6 +2728,134 @@ class CampaignStore:
             row = connection.execute(query, parameters).fetchone()
         return dict(row) if row is not None else None
 
+    def reserve_provider_test_submission(
+        self,
+        *,
+        account_ref: str,
+        authorization_ref: str,
+        idempotency_key: str,
+        sender: str,
+        recipient: str,
+        message_digest: str,
+        message_revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Reserve one test submission and consume its grant atomically."""
+
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_test.authorization_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        with self.transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["account_ref"] != account_ref
+                    or existing["authorization_ref"] != authorization_ref
+                    or existing["sender"] != sender
+                    or existing["recipient"] != recipient
+                    or existing["message_digest"] != message_digest
+                ):
+                    raise PermissionError("idempotency key is bound to another operation")
+                return dict(existing)
+
+            grant = connection.execute(
+                "SELECT id FROM provider_operation_grants "
+                "WHERE authorization_ref = ? AND account_ref = ? "
+                "AND consumed_submissions < max_submissions "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (authorization_ref, account_ref),
+            ).fetchone()
+            if grant is None:
+                raise PermissionError("operation authorization has no remaining submission")
+            consumed = connection.execute(
+                "UPDATE provider_operation_grants "
+                "SET consumed_submissions = consumed_submissions + 1 "
+                "WHERE id = ? AND consumed_submissions < max_submissions",
+                (grant["id"],),
+            )
+            if consumed.rowcount != 1:
+                raise PermissionError("operation authorization has no remaining submission")
+
+            now = utc_now()
+            submission_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO provider_test_submissions("
+                "id, account_ref, idempotency_key, sender, recipient, message_revision_id, authorization_ref, "
+                "message_digest, status, phase, detail, external_access, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'reserved', ?, 1, ?, ?)",
+                (
+                    submission_id,
+                    account_ref,
+                    idempotency_key,
+                    sender,
+                    recipient,
+                    message_revision_id,
+                    authorization_ref,
+                    message_digest,
+                    "Submission reserved before provider contact",
+                    now,
+                    now,
+                ),
+            )
+            return dict(
+                connection.execute(
+                    "SELECT * FROM provider_test_submissions WHERE id = ?",
+                    (submission_id,),
+                ).fetchone()
+            )
+
+    def finalize_provider_test_submission(
+        self,
+        *,
+        account_ref: str,
+        authorization_ref: str,
+        idempotency_key: str,
+        status: str,
+        phase: str,
+        detail: str,
+        response_code: int | None,
+    ) -> dict[str, Any]:
+        """Persist the provider outcome for an existing reservation."""
+
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_test.authorization_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        _assert_no_secrets({"detail": detail}, "provider_test")
+        with self.transaction(immediate=True) as connection:
+            result = connection.execute(
+                "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
+                "response_code = ?, updated_at = ? "
+                "WHERE account_ref = ? AND authorization_ref = ? AND idempotency_key = ? "
+                "AND status = 'reserved'",
+                (
+                    status,
+                    phase,
+                    detail,
+                    response_code,
+                    utc_now(),
+                    account_ref,
+                    authorization_ref,
+                    idempotency_key,
+                ),
+            )
+            if result.rowcount == 0:
+                row = connection.execute(
+                    "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"provider test submission not found: {idempotency_key}")
+                return dict(row)
+            row = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"provider test submission not found: {idempotency_key}")
+        return dict(row)
+
     def get_provider_profile(self, ref: str) -> sqlite3.Row:
         _assert_safe_reference(ref, "provider_profile.ref")
         with self.connect() as connection:
@@ -2810,6 +2976,8 @@ class CampaignStore:
         detail: str,
         response_code: int | None = None,
         external_access: bool = False,
+        authorization_ref: str | None = None,
+        message_digest: str | None = None,
     ) -> dict[str, Any]:
         _assert_safe_reference(account_ref, "provider_test.account_ref")
         _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
@@ -2825,8 +2993,8 @@ class CampaignStore:
                 return dict(existing)
             connection.execute(
                 "INSERT INTO provider_test_submissions(id, account_ref, idempotency_key, sender, recipient, "
-                "message_revision_id, status, phase, detail, response_code, external_access, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "message_revision_id, authorization_ref, message_digest, status, phase, detail, response_code, "
+                "external_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     submission_id,
                     account_ref,
@@ -2834,6 +3002,8 @@ class CampaignStore:
                     sender,
                     recipient,
                     message_revision_id,
+                    authorization_ref,
+                    message_digest,
                     status,
                     phase,
                     detail,

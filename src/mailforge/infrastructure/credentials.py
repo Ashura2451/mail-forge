@@ -12,7 +12,7 @@ import json
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from threading import RLock
 from typing import Protocol
@@ -151,6 +151,8 @@ class RefreshingOAuthCredentialResolver:
                 and refreshed.identity != self.expected_identity
             ):
                 raise CredentialError("OAuth refresh returned a different account identity")
+            if refreshed.refresh_token is None:
+                refreshed = replace(refreshed, refresh_token=token.refresh_token)
             self._tokens[reference] = refreshed
             return refreshed
 
