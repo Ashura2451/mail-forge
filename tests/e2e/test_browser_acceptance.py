@@ -216,6 +216,148 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
+def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "shell-scroll.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        f"from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.set_default_timeout(5000)
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+            page.get_by_role("heading", name="Dashboard").wait_for()
+            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
+            page.get_by_label("Provider profile").wait_for()
+            page.get_by_label("Provider profile").locator("option[value='generic_smtp']").wait_for(
+                state="attached"
+            )
+            page.get_by_label("Provider profile").select_option("generic_smtp")
+            page.get_by_label("Authentication method").select_option("password")
+            page.get_by_label("Account reference").fill("scroll-account")
+            page.get_by_label("Username or sender identity").fill("operator@example.com")
+            page.get_by_label("Credential reference").fill("test:provider")
+            page.get_by_role("button", name="Save account configuration").click()
+            page.get_by_text("Provider account saved without a network connection").wait_for()
+
+            rail = page.locator(".rail")
+            main = page.locator(".main")
+            evidence = repo / ".orchestra" / "evidence" / "031" / "sidebar"
+            evidence.mkdir(parents=True, exist_ok=True)
+            main.evaluate("e => e.scrollTo(0, 0)")
+            page.screenshot(path=str(evidence / "providers-top.png"))
+            assert rail.evaluate("e => e.getBoundingClientRect().top") == 0
+            assert rail.evaluate("e => e.getBoundingClientRect().bottom <= innerHeight + 1")
+            rail_top = rail.evaluate("e => e.getBoundingClientRect().top")
+            main.evaluate("e => e.scrollTo(0, e.scrollHeight / 2)")
+            page.screenshot(path=str(evidence / "providers-middle.png"))
+            main.evaluate("e => e.scrollTop = e.scrollHeight")
+            page.screenshot(path=str(evidence / "providers-bottom.png"))
+            assert main.evaluate("e => e.scrollTop > 0")
+            assert rail.evaluate("e => e.getBoundingClientRect().top") == rail_top
+            assert rail.evaluate("e => e.scrollTop") == 0
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+            for route in (
+                "campaigns",
+                "message-studio",
+                "data-studio",
+                "integrations",
+                "reports",
+                "inbound",
+            ):
+                page.goto(f"http://127.0.0.1:{port}/{route}", wait_until="domcontentloaded")
+                page.locator("h1").wait_for()
+                if route == "message-studio":
+                    page.get_by_role("button", name="+ New message").click()
+                    page.get_by_role("heading", name="Compose message").wait_for()
+                    for _ in range(8):
+                        page.get_by_label("Add message block").select_option("text")
+                main.evaluate("e => e.scrollTop = e.scrollHeight")
+                if route == "campaigns":
+                    page.screenshot(path=str(evidence / "campaigns-scrolled.png"))
+                if route == "message-studio":
+                    page.screenshot(path=str(evidence / "message-studio-scrolled.png"))
+                assert rail.evaluate("e => e.getBoundingClientRect().top") == 0
+                assert page.locator("body").evaluate("e => e.scrollHeight <= innerHeight + 1")
+
+            page.set_viewport_size({"width": 1280, "height": 600})
+            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
+            page.get_by_label("Provider profile").wait_for()
+            assert rail.evaluate("e => e.scrollHeight > e.clientHeight")
+            main.evaluate("e => e.scrollTop = e.scrollHeight")
+            main_scroll = main.evaluate("e => e.scrollTop")
+            rail.get_by_role("button", name="Maintenance").focus()
+            page.keyboard.press("PageDown")
+            assert rail.get_by_role("button", name="Maintenance").is_visible()
+            rail_scroll = rail.evaluate("e => e.scrollTop")
+            assert rail_scroll > 0
+            page.screenshot(path=str(evidence / "sidebar-overflow-short-viewport.png"))
+            rail.evaluate("e => e.scrollTop = e.scrollHeight")
+            assert main.evaluate("e => e.scrollTop") == main_scroll
+
+            page.set_viewport_size({"width": 1024, "height": 768})
+            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
+            page.get_by_label("Provider profile").wait_for()
+            page.screenshot(path=str(evidence / "providers-tablet.png"))
+
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
+            page.get_by_label("Provider profile").wait_for()
+            preserved = page.get_by_label("Account reference")
+            preserved.fill("preserved-mobile-value")
+            main_before_drawer = main.evaluate("e => e.scrollTop")
+            menu = page.get_by_role("button", name="Open navigation")
+            menu.click()
+            page.locator(".nav-scrim").wait_for()
+            assert page.locator(".rail").evaluate("e => e.scrollHeight > e.clientHeight")
+            page.locator(".rail").get_by_role(
+                "button", name="Maintenance"
+            ).scroll_into_view_if_needed()
+            assert page.locator(".rail").evaluate("e => e.scrollTop > 0")
+            assert page.evaluate("getComputedStyle(document.body).overflow") == "hidden"
+            page.locator(".brand-button").focus()
+            page.keyboard.press("Shift+Tab")
+            assert "Maintenance" in page.evaluate("document.activeElement?.textContent || ''")
+            page.screenshot(path=str(evidence / "mobile-drawer-open.png"))
+            page.keyboard.press("Escape")
+            assert (
+                page.get_by_role("button", name="Open navigation").get_attribute("aria-expanded")
+                == "false"
+            )
+            assert page.evaluate(
+                "document.activeElement === document.querySelector('.mobile-menu-button')"
+            )
+            assert main.evaluate("e => e.scrollTop") == main_before_drawer
+            assert preserved.input_value() == "preserved-mobile-value"
+            page.screenshot(path=str(evidence / "mobile-drawer-closed.png"))
+
+            page.evaluate("document.body.style.zoom = '2'")
+            page.get_by_role("button", name="Open navigation").click()
+            assert page.get_by_role("button", name="Maintenance").is_visible()
+            page.keyboard.press("Escape")
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_data_studio_browser_recipe_preview(tmp_path: Path) -> None:
     executable = _chromium_executable()
     if executable is None:

@@ -121,15 +121,36 @@ function App() {
   }, [])
   useEffect(() => {
     if (!mobileNavOpen) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setMobileNavOpen(false)
         mobileMenuRef.current?.focus()
+        return
+      }
+      if (event.key === 'Tab') {
+        const focusable = Array.from(mobileNavRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
+        ) || [])
+        if (!focusable.length) return
+        const first = focusable[0]
+        const last = focusable[focusable.length - 1]
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault()
+          first.focus()
+        }
       }
     }
     document.addEventListener('keydown', onKeyDown)
     requestAnimationFrame(() => mobileNavRef.current?.querySelector<HTMLButtonElement>('.nav-item')?.focus())
-    return () => document.removeEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
   }, [mobileNavOpen])
   useEffect(() => { bootstrapSession().then(async () => { setSetup(await api('/setup')); await load(view) }).catch((err) => { setError(err.message); setRetry(() => () => { window.location.reload() }) }) }, [])
   const run = async (action: () => Promise<unknown>, message: string) => {
