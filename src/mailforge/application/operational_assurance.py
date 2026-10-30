@@ -249,6 +249,8 @@ class OperationalAssuranceService:
                             "attempts": int(row["attempts"] or 0),
                             "accepted": int(row["accepted"] or 0),
                             "refused": int(row["refused"] or 0),
+                            "ambiguous": int(row["ambiguous"] or 0),
+                            "other_failures": int(row["other_failures"] or 0),
                         },
                         "provider_reported_limit": None,
                         "quota_evidence": "configured-local-limit-and-local-attempts",
@@ -258,8 +260,13 @@ class OperationalAssuranceService:
                         "COUNT(t.id) AS attempts, "
                         "SUM(CASE WHEN t.status='provider_accepted' "
                         "THEN 1 ELSE 0 END) AS accepted, "
-                        "SUM(CASE WHEN t.status NOT IN ('provider_accepted','pending') "
-                        "THEN 1 ELSE 0 END) AS refused "
+                        "SUM(CASE WHEN t.status IN ('refused','provider_refused',"
+                        "'rejected','permanent_rejection') THEN 1 ELSE 0 END) AS refused, "
+                        "SUM(CASE WHEN t.status='ambiguous' THEN 1 ELSE 0 END) AS ambiguous, "
+                        "SUM(CASE WHEN t.status NOT IN ("
+                        "'provider_accepted','pending','reserved','ambiguous','refused',"
+                        "'provider_refused','rejected','permanent_rejection') "
+                        "THEN 1 ELSE 0 END) AS other_failures "
                         "FROM provider_accounts a LEFT JOIN provider_test_submissions t "
                         "ON t.account_ref=a.ref GROUP BY a.ref ORDER BY a.ref"
                     ).fetchall()

@@ -46,12 +46,13 @@ from mailforge.application.integration_hub import IntegrationHubError, Integrati
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.local_application import (
     DataDirectory,
-    application_status,
+    application_version,
     backup_database_snapshot,
     complete_onboarding,
     create_backup,
     current_schema_version,
     list_backups,
+    read_settings,
     restore_backup,
     utc_now,
     validate_backup,
@@ -903,7 +904,21 @@ class WebRuntime:
     def liveness(self) -> dict[str, Any]:
         """Cheap launcher probe; detailed assurance remains an explicit operation."""
 
-        status = application_status(self.data_directory)
+        settings = read_settings(self.data_directory)
+        status = {
+            "application": "Mailforge",
+            "version": application_version(),
+            "data_directory_id": self.data_directory.identity,
+            "database_present": self.data_directory.database.is_file(),
+            "schema_version": current_schema_version(self.data_directory.database),
+            "supported_schema_version": SCHEMA_VERSION,
+            "database_integrity": None,
+            "onboarding_complete": bool(settings.get("onboarding_complete")),
+            "preferences": settings.get("preferences", {}),
+            "backup_count": len(list(self.data_directory.backups.glob("*.zip")))
+            if self.data_directory.backups.is_dir()
+            else 0,
+        }
         status.update(
             {
                 "runtime_id": self.runtime_id,
@@ -921,6 +936,12 @@ class WebRuntime:
         status["operational"] = self.operational_assurance.health(
             worker_status=status["worker_status"]
         )
+        database_check = next(
+            (check for check in status["operational"]["checks"] if check["key"] == "database"),
+            None,
+        )
+        if database_check is not None:
+            status["database_integrity"] = database_check["state"] == "healthy"
         return status
 
 
