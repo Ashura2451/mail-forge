@@ -2456,7 +2456,7 @@ class CampaignStore:
         max_concurrency: int = 1,
         outbound_enabled: bool = True,
         inbound_enabled: bool = False,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         _assert_safe_reference(ref, "provider_account.ref")
         if not display_name or not display_name.strip():
             display_name = ref
@@ -2758,7 +2758,7 @@ class CampaignStore:
                     or existing["message_digest"] != message_digest
                 ):
                     raise PermissionError("idempotency key is bound to another operation")
-                return dict(existing)
+                return dict(existing), False
 
             grant = connection.execute(
                 "SELECT id FROM provider_operation_grants "
@@ -2799,11 +2799,14 @@ class CampaignStore:
                     now,
                 ),
             )
-            return dict(
-                connection.execute(
-                    "SELECT * FROM provider_test_submissions WHERE id = ?",
-                    (submission_id,),
-                ).fetchone()
+            return (
+                dict(
+                    connection.execute(
+                        "SELECT * FROM provider_test_submissions WHERE id = ?",
+                        (submission_id,),
+                    ).fetchone()
+                ),
+                True,
             )
 
     def finalize_provider_test_submission(

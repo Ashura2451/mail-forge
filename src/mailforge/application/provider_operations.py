@@ -592,7 +592,7 @@ class ProviderOperationsService:
             raise PermissionError("recipient does not match the operation authorization")
         if not message or len(message.encode()) > 10 * 1024 * 1024:
             raise ValueError("controlled test message is empty or exceeds the bounded limit")
-        reservation = self.store.reserve_provider_test_submission(
+        reservation, owns_reservation = self.store.reserve_provider_test_submission(
             account_ref=ref,
             authorization_ref=grant.authorization_ref,
             idempotency_key=idempotency_key,
@@ -601,7 +601,7 @@ class ProviderOperationsService:
             message_digest=hashlib.sha256(message.encode()).hexdigest(),
             message_revision_id=message_revision_id,
         )
-        if reservation["status"] != "reserved":
+        if not owns_reservation:
             return reservation
         pool = None
         try:
