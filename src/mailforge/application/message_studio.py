@@ -15,7 +15,12 @@ from datetime import UTC, datetime
 from pathlib import PurePath
 from typing import Any
 
-from mailforge.application.composition import ResolvedAttachment
+from mailforge.application.composition import MessageComposer, ResolvedAttachment
+from mailforge.application.outbound_proof import (
+    build_payload,
+    digest_json,
+    make_proof,
+)
 from mailforge.application.programmable_operations import (
     ProgrammableOperationsError,
     ProgrammableOperationsService,
@@ -122,6 +127,7 @@ class MessageStudioService:
         self.data_studio = data_studio
         self.programmable = programmable or ProgrammableOperationsService(store)
         self.renderer = SafeTemplateRenderer()
+        self.composer = MessageComposer()
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
 
     @staticmethod
@@ -934,6 +940,130 @@ class MessageStudioService:
         result.pop("_rendered", None)
         result.pop("_attachments", None)
         return result
+
+    def prepare_controlled_test(
+        self,
+        *,
+        revision_id: str,
+        sender: SenderPolicy,
+        recipient: str,
+    ) -> dict[str, Any]:
+        """Freeze one published revision for a bounded provider test grant."""
+
+        normalized_recipient = normalize_email(recipient)
+        if not validate_email(normalized_recipient).valid:
+            raise MessageStudioError("controlled-test recipient is invalid", "recipient_invalid")
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM message_revisions WHERE id = ? AND status = 'published'",
+                (revision_id,),
+            ).fetchone()
+        if row is None:
+            raise MessageStudioError(
+                "controlled tests require a published message revision",
+                "revision_not_published",
+            )
+        document = json.loads(row["document_json"])
+        contact = self.store.contact_by_email(normalized_recipient)
+        if contact is None:
+            contact = {
+                "id": None,
+                "normalized_email": normalized_recipient,
+                "display_name": "",
+                "metadata": {},
+            }
+        else:
+            contact = {
+                "id": contact["id"],
+                "normalized_email": contact["normalized_email"],
+                "display_name": contact["display_name"],
+                "metadata": json.loads(contact["metadata_json"] or "{}"),
+                "lifecycle_status": contact["lifecycle_status"],
+            }
+        if contact.get("lifecycle_status", "active") != "active":
+            raise MessageStudioError(
+                "controlled tests require an active recipient", "recipient_ineligible"
+            )
+        active_suppressions = self.store.matching_suppressions(
+            normalized_email=normalized_recipient,
+            contact_id=contact.get("id") or "",
+            list_id="",
+            campaign_id="",
+            sender_config_ref=sender.ref,
+            communication_purpose="transactional",
+        )
+        if active_suppressions:
+            raise MessageStudioError(
+                "controlled-test recipient is suppressed", "recipient_ineligible"
+            )
+        rendered = self.render_document(document, contact=contact)
+        composed = self.composer.compose(
+            sender=sender,
+            recipient=normalized_recipient,
+            rendered=rendered["_rendered"],
+            attachments=rendered["_attachments"],
+        )
+        prepared_at = self.now_fn().isoformat()
+        context_hash = digest_json(
+            {
+                "email": normalized_recipient,
+                "name": contact.get("display_name", ""),
+                "metadata": contact.get("metadata", {}),
+            }
+        )
+        proof_id = str(uuid.uuid4())
+        payload = build_payload(
+            operation_kind="controlled_test",
+            sender=composed.from_email,
+            recipient=normalized_recipient,
+            content_hash=composed.content_hash,
+            prepared_at=prepared_at,
+            artifact_kind="controlled_test",
+            artifact_ref=proof_id,
+            message_revision_id=revision_id,
+            eligibility={
+                "status": "controlled_test_scope",
+                "reason": "recipient is authorized by the bounded provider grant",
+                "contact_id": contact.get("id"),
+            },
+            personalization_hash=context_hash,
+            policy_revision=self.store.policy_revision(),
+        )
+        proof = make_proof(proof_id, payload)
+        self.store.record_outbound_proof(
+            proof_id=proof.proof_id,
+            proof_version=proof.proof_version,
+            proof_hash=proof.proof_hash,
+            operation_kind="controlled_test",
+            message_revision_id=revision_id,
+            campaign_id=None,
+            intent_id=None,
+            sender=proof.sender,
+            recipient=proof.recipient,
+            content_hash=proof.content_hash,
+            artifact_kind="controlled_test",
+            artifact_ref=proof_id,
+            proof_json=json.dumps(proof.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            mime_bytes=composed.serialized,
+            created_at=prepared_at,
+        )
+        return {
+            "proof_id": proof.proof_id,
+            "proof_hash": proof.proof_hash,
+            "proof_version": proof.proof_version,
+            "message_revision_id": revision_id,
+            "sender": proof.sender,
+            "recipient": proof.recipient,
+            "content_hash": proof.content_hash,
+            "prepared_at": prepared_at,
+            "eligibility": proof.payload["eligibility"],
+            "preview": {
+                "subject": rendered["subject"],
+                "text": rendered["text"],
+                "html": rendered["html"],
+                "attachments": rendered["attachments"],
+            },
+        }
 
     def validate_revision(self, revision_id: str) -> dict[str, Any]:
         with self.store.connect() as connection:

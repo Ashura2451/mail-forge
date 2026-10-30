@@ -172,7 +172,7 @@ function App() {
       {mobileNavOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={closeMobileNav} />}
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}{error && <div className="error" role="alert"><span>{error}</span>{retry && <button onClick={retry}>Retry</button>}<button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}{busy && <div className="loading" aria-live="polite">Updating local state…</div>}
       <RelatedWork view={view} onNavigate={navigate} />
-      {view === 'dashboard' && <Dashboard data={data} setup={setup} onSetup={async () => { await api('/setup/complete', { method: 'POST', body: JSON.stringify({ timezone: 'UTC', simulation_mode: true, sample_data: false }) }); setSetup({ ...setup, complete: true }); setNotice('Setup saved; Mailforge is ready for local work') }} onNavigate={navigate} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-connections' && <DataConnections onRun={run} />}{view === 'integrations' && <IntegrationHub data={data} onRun={run} onNavigate={navigate} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'functions' && <Functions data={data} onRun={run} />}{view === 'email-standards' && <EmailStandards data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} sessionReady={sessionReady} />}{view === 'reports' && <Reports data={data} onNavigate={navigate} />}{view === 'activity' && <Activity data={data} />}{view === 'maintenance' && <Maintenance data={data} onRun={run} />}
+      {view === 'dashboard' && <Dashboard data={data} setup={setup} onSetup={async () => { await api('/setup/complete', { method: 'POST', body: JSON.stringify({ timezone: 'UTC', simulation_mode: true, sample_data: false }) }); setSetup({ ...setup, complete: true }); setNotice('Setup saved; Mailforge is ready for local work') }} onNavigate={navigate} />}{view === 'contacts' && <Contacts data={data} onRun={run} />}{view === 'segments' && <Segments data={data} onRun={run} />}{view === 'data-connections' && <DataConnections onRun={run} />}{view === 'integrations' && <IntegrationHub data={data} onRun={run} onNavigate={navigate} />}{view === 'data-studio' && <DataStudio data={data} onRun={run} />}{view === 'functions' && <Functions data={data} onRun={run} />}{view === 'email-standards' && <EmailStandards data={data} onRun={run} />}{view === 'message-studio' && <MessageStudio data={data} onRun={run} />}{view === 'campaigns' && <Campaigns data={data} onRun={run} />}{view === 'automations' && <Automations data={data} onRun={run} />}{view === 'list-tools' && <ListTools data={data} onRun={run} />}{view === 'inbound' && <Inbound data={data} onRun={run} />}{view === 'providers' && <Providers data={data} onRun={run} sessionReady={sessionReady} view={view} />}{view === 'reports' && <Reports data={data} onNavigate={navigate} />}{view === 'activity' && <Activity data={data} />}{view === 'maintenance' && <Maintenance data={data} onRun={run} />}
     </main>
   </div>
 }
@@ -868,7 +868,7 @@ function Inbound({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promi
     {selected && <section className="panel"><div className="panel-head"><div><h3>{selected.subject || 'Inbound message'}</h3><p className="muted">{selected.sender || 'Unknown sender'} · {selected.folder || 'local evidence'} · raw content is not rendered here</p></div><button onClick={() => { setSelected(null); setConversation(null) }}>Close</button></div><p>{selected.text_preview || selected.html_preview || 'No safe text preview available.'}</p><p className="muted">Attachments: {selected.attachments?.length || 0} · Correlations: {selected.correlations?.length || 0} · Remote UID: {selected.remote_uid || 'not available'}</p><div className="button-row"><button onClick={() => onRun(() => api(`/inbound/messages/${selected.id}/extract`, { method: 'POST', body: JSON.stringify({ fields: ['sender', 'recipients', 'subject', 'date'] }) }), 'Message fields extracted')}>Extract fields</button><button onClick={() => inspectConversation(selected.id)}>Open conversation</button><button onClick={() => remoteAction('mark_read')} disabled={!selected.remote_uid}>Mark read</button><button onClick={() => remoteAction('mark_unread')} disabled={!selected.remote_uid}>Mark unread</button><button onClick={() => remoteAction('flag')} disabled={!selected.remote_uid}>Flag</button><button onClick={() => remoteAction('unflag')} disabled={!selected.remote_uid}>Unflag</button><button onClick={() => onRun(() => api(`/inbound/messages/${selected.id}/draft`, { method: 'POST', body: JSON.stringify({ kind: 'reply', body: '' }) }), 'Reply draft prepared in Message Studio')}>Prepare reply draft</button><button onClick={() => onRun(() => api(`/inbound/messages/${selected.id}/draft`, { method: 'POST', body: JSON.stringify({ kind: 'reply_all', body: '' }) }), 'Reply-all draft prepared in Message Studio')}>Prepare reply-all draft</button><button onClick={() => onRun(() => api(`/inbound/messages/${selected.id}/draft`, { method: 'POST', body: JSON.stringify({ kind: 'forward', body: '' }) }), 'Forward draft prepared in Message Studio')}>Prepare forward draft</button></div><div className="inline-fields"><label>Target folder<input aria-label="Mailbox target folder" value={targetFolder} onChange={e => setTargetFolder(e.target.value)} /></label><button onClick={() => remoteAction('copy', targetFolder)} disabled={!selected.remote_uid || !targetFolder}>Copy to folder</button><button onClick={() => remoteAction('move', targetFolder)} disabled={!selected.remote_uid || !targetFolder}>Move to folder</button><button onClick={() => remoteAction('archive', targetFolder)} disabled={!selected.remote_uid || !targetFolder}>Archive</button></div>{conversation && <div className="workspace-card"><div className="panel-head"><div><h4>Conversation</h4><p className="muted">{conversation.confidence} · {conversation.items?.length || 0} messages</p></div></div>{conversation.items?.map((item: ApiRecord) => <p key={item.id}><strong>{item.subject || 'No subject'}</strong> · {item.sender || 'Unknown sender'} · {item.received_at || item.acquired_at}</p>)}</div>}</section>}
   </div>
 }
-function Providers({ data, onRun, sessionReady }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void, sessionReady: boolean }) {
+function Providers({ data, onRun, sessionReady, view }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void, sessionReady: boolean, view: string }) {
   const profiles = data.items || []
   const [capabilities, setCapabilities] = useState<ApiRecord[]>([])
   const [capabilityError, setCapabilityError] = useState('')
@@ -885,7 +885,9 @@ function Providers({ data, onRun, sessionReady }: { data: ApiRecord, onRun: (act
   const [testRef, setTestRef] = useState('')
   const [testSender, setTestSender] = useState('')
   const [testRecipient, setTestRecipient] = useState('')
-  const [testMessage, setTestMessage] = useState('Subject: Mailforge qualification test\n\nLocal controlled test message.')
+  const [testMessage, setTestMessage] = useState('Canonical MIME is prepared from the published revision; stored proof bytes are authoritative.')
+  const [testRevisionId, setTestRevisionId] = useState('')
+  const [testProof, setTestProof] = useState<ApiRecord>({})
   const newTestKey = () => `test-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   const [testKey, setTestKey] = useState(newTestKey)
   const [testAuthorization, setTestAuthorization] = useState('')
@@ -911,6 +913,22 @@ function Providers({ data, onRun, sessionReady }: { data: ApiRecord, onRun: (act
   useEffect(() => {
     if (sessionReady) loadCapabilities()
   }, [sessionReady])
+  useEffect(() => {
+    if (!sessionReady) return
+    void api<ApiRecord>('/message-studio/documents?kind=message').then(async result => {
+      for (const item of result.items || []) {
+        const detail = await api<ApiRecord>(`/message-studio/documents/${item.id}`)
+        const published = (detail.revisions || []).find((revision: ApiRecord) => revision.status === 'published')
+        if (published) { setTestRevisionId(String(published.id)); break }
+      }
+    }).catch(() => setTestRevisionId(''))
+  }, [sessionReady])
+  useEffect(() => {
+    if (view !== 'providers') return
+    document.querySelectorAll<HTMLTextAreaElement>('textarea').forEach(area => {
+      if (area.value === testMessage) area.readOnly = true
+    })
+  }, [view, testMessage, testProof.proof_id])
   const capability = capabilities.find(item => item.key === preset)
   const applyPreset = (nextPreset: string, nextKind = kind) => {
     const next = capabilities.find(item => item.key === nextPreset)
@@ -931,12 +949,12 @@ function Providers({ data, onRun, sessionReady }: { data: ApiRecord, onRun: (act
   }
   const changeKind = (nextKind: string) => { setKind(nextKind); applyPreset(preset, nextKind) }
   const create = () => onRun(() => api('/providers', { method: 'POST', body: JSON.stringify({ ref, kind, host, port: Number(port), username, credential_ref: credentialRef, tls_mode: tlsMode, auth_method: authMethod, mailbox, display_name: ref, sender_email: username, inbound_enabled: kind === 'imap' }) }), 'Provider account saved without a network connection')
-  const testRequestFingerprint = () => JSON.stringify({ testRef, testSender, testRecipient, testMessage, testPurpose, testExpiry })
+  const testRequestFingerprint = () => JSON.stringify({ testRef, testSender, testRecipient, testPurpose, testExpiry, proof: testProof.proof_hash || null })
   const selectTestAccount = (profile: ApiRecord) => { setTestRef(profile.ref); setTestSender(profile.sender_email || profile.username || ''); setTestAuthorization(''); setAuthorizedRequest(''); setTestKey(newTestKey()); setGrantIssued(false) }
-  const issueGrant = () => onRun(async () => { const result = await api<ApiRecord>(`/providers/${testRef}/grants`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, purpose: testPurpose, expires_at: testExpiry }) }); setTestAuthorization(String(result.authorization_ref || '')); setAuthorizedRequest(testRequestFingerprint()); setTestKey(newTestKey()); setGrantIssued(true); return result }, 'Server-issued one-submission authorization prepared')
+  const issueGrant = () => onRun(async () => { const proof = await api<ApiRecord>(`/providers/${testRef}/test-proof`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, message_revision_id: testRevisionId }) }); setTestProof(proof); setSelected({ status: 'Canonical proof prepared', detail: `Published revision ${proof.message_revision_id}; proof ${String(proof.proof_hash).slice(0, 12)}… binds the stored MIME and preview.` }); setTestMessage(`Subject: ${proof.preview?.subject || 'Canonical proof'}\n\n${proof.preview?.text || 'No text preview available.'}`); const result = await api<ApiRecord>(`/providers/${testRef}/grants`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, purpose: testPurpose, expires_at: testExpiry, proof_hash: proof.proof_hash }) }); setTestAuthorization(String(result.authorization_ref || '')); setAuthorizedRequest(JSON.stringify({ testRef, testSender, testRecipient, testPurpose, testExpiry, proof: proof.proof_hash })); setTestKey(newTestKey()); setGrantIssued(true); return result }, 'Server-issued one-submission authorization prepared')
   const runTest = () => {
     if (!testReady) return
-    return onRun(() => api(`/providers/${testRef}/test-send`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, message: testMessage, idempotency_key: testKey, authorization_ref: testAuthorization, purpose: testPurpose, expires_at: testExpiry }) }), 'Controlled test result recorded')
+    return onRun(() => api(`/providers/${testRef}/test-send`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, idempotency_key: testKey, authorization_ref: testAuthorization, purpose: testPurpose, expires_at: testExpiry, proof_id: testProof.proof_id, proof_hash: testProof.proof_hash }) }), 'Controlled test result recorded')
   }
   const testReady = grantIssued && Boolean(testAuthorization) && Boolean(testKey) && testConfirmed && authorizedRequest === testRequestFingerprint()
   const configureInbound = () => onRun(() => api(`/providers/${inboundRef}/inbound`, { method: 'POST', body: JSON.stringify({ mailbox, max_fetch: Number(maxFetch), sync_enabled: syncEnabled, mutation_enabled: mutationEnabled }) }), 'Inbound configuration saved')

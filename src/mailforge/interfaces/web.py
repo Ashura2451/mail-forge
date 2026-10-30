@@ -407,12 +407,14 @@ class ProviderInboundInput(BaseModel):
 class ProviderTestSendInput(BaseModel):
     sender: str
     recipient: str
-    message: str = Field(min_length=1, max_length=10_000_000)
+    message: str | None = Field(default=None, max_length=10_000_000)
     idempotency_key: str = Field(min_length=8, max_length=200)
     authorization_ref: str = Field(min_length=1, max_length=200)
     purpose: str = Field(min_length=1, max_length=500)
     expires_at: str
     message_revision_id: str | None = None
+    proof_id: str | None = None
+    proof_hash: str | None = None
 
 
 class ProviderGrantInput(BaseModel):
@@ -420,6 +422,13 @@ class ProviderGrantInput(BaseModel):
     sender: str
     recipient: str
     expires_at: str
+    proof_hash: str
+
+
+class ProviderProofInput(BaseModel):
+    sender: str
+    recipient: str
+    message_revision_id: str
 
 
 class ProviderOAuthStartInput(BaseModel):
@@ -3860,9 +3869,32 @@ def create_app(
                 sender=payload.sender,
                 recipient=payload.recipient,
                 expires_at=payload.expires_at,
+                proof_hash=payload.proof_hash,
             )
         except (KeyError, ValueError, PermissionError) as error:
             return _error(400, "provider_grant_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/test-proof")
+    async def prepare_provider_test_proof(provider_ref: str, payload: ProviderProofInput):
+        try:
+            account = runtime.provider_operations.account(provider_ref)
+            sender_email = account.get("sender_email") or payload.sender
+            proof = runtime.message_studio.prepare_controlled_test(
+                revision_id=payload.message_revision_id,
+                sender=SenderPolicy(
+                    ref=f"provider:{provider_ref}",
+                    provider="synthetic",
+                    email=sender_email,
+                ),
+                recipient=payload.recipient,
+            )
+            if proof["sender"].lower() != payload.sender.lower():
+                return _error(
+                    400, "provider_proof_sender_mismatch", "sender does not match account"
+                )
+            return proof
+        except (KeyError, ValueError, PermissionError, MessageStudioError) as error:
+            return _error(400, "provider_proof_failed", str(error))
 
     @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/test-send")
     async def provider_test_send(provider_ref: str, payload: ProviderTestSendInput):
@@ -3875,6 +3907,7 @@ def create_app(
                 sender=payload.sender,
                 recipient=payload.recipient,
                 expires_at=payload.expires_at,
+                proof_hash=payload.proof_hash,
             )
             return runtime.provider_operations.controlled_test_send(
                 ref=provider_ref,
@@ -3885,6 +3918,8 @@ def create_app(
                 grant=grant,
                 resolver=runtime.credential_resolver,
                 message_revision_id=payload.message_revision_id,
+                proof_id=payload.proof_id,
+                proof_hash=payload.proof_hash,
             )
         except (KeyError, ValueError, PermissionError) as error:
             return _error(400, "provider_test_send_failed", str(error))

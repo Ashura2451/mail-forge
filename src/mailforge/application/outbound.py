@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -21,6 +22,13 @@ from mailforge.application.composition import (
     MessageComposer,
     MessagePreparationError,
     ResolvedAttachment,
+)
+from mailforge.application.outbound_proof import (
+    OutboundMessageProof,
+    build_payload,
+    digest_json,
+    make_proof,
+    verify_proof,
 )
 from mailforge.application.policy import PolicyEngine
 from mailforge.application.providers import ProviderService
@@ -74,6 +82,43 @@ class PreparedSimulationTransport(SimulationTransport):
         prepared = self.store.get_prepared_message(intent_id)
         if prepared is None:
             raise RuntimeError(f"no prepared message for intent {intent_id}")
+        proof_id = prepared["proof_id"]
+        if proof_id:
+            proof_row = self.store.get_outbound_proof(proof_id)
+            if proof_row is None:
+                raise RuntimeError("prepared message proof is missing")
+            proof = OutboundMessageProof(
+                proof_id=proof_row["id"],
+                proof_hash=proof_row["proof_hash"],
+                content_hash=proof_row["content_hash"],
+                payload=proof_row["proof"],
+            )
+            with self.store.connect() as connection:
+                intent_row = connection.execute(
+                    "SELECT campaign_id FROM delivery_intents WHERE id = ?", (intent_id,)
+                ).fetchone()
+            verify_proof(proof, bytes(prepared["mime_bytes"]))
+            if (
+                proof.sender != prepared["from_email"]
+                or proof.recipient != prepared["recipient"]
+                or proof.content_hash != prepared["content_hash"]
+                or proof.payload.get("artifact_ref") != prepared["id"]
+                or proof.payload.get("intent_id") != intent_id
+                or (
+                    proof.message_revision_id
+                    and proof.message_revision_id != prepared["template_version"]
+                )
+                or (
+                    proof.payload.get("campaign_id")
+                    and (
+                        intent_row is None
+                        or proof.payload.get("campaign_id") != intent_row["campaign_id"]
+                    )
+                )
+            ):
+                raise RuntimeError("prepared message proof does not match the message artifact")
+        elif str(prepared["template_name"]).startswith("studio:"):
+            raise RuntimeError("Message Studio preparation requires outbound proof")
         parsed = BytesParser(policy=SMTP).parsebytes(prepared["mime_bytes"])
         if parsed["To"] is None or parsed["Message-ID"] is None:
             raise RuntimeError("prepared MIME message is missing mandatory headers")
@@ -98,6 +143,43 @@ class PreparedSMTPTransport(SimulationTransport):
         prepared = self.store.get_prepared_message(intent_id)
         if prepared is None:
             raise RuntimeError(f"no prepared message for intent {intent_id}")
+        proof_id = prepared["proof_id"]
+        if proof_id:
+            proof_row = self.store.get_outbound_proof(proof_id)
+            if proof_row is None:
+                raise RuntimeError("prepared message proof is missing")
+            proof = OutboundMessageProof(
+                proof_id=proof_row["id"],
+                proof_hash=proof_row["proof_hash"],
+                content_hash=proof_row["content_hash"],
+                payload=proof_row["proof"],
+            )
+            with self.store.connect() as connection:
+                intent_row = connection.execute(
+                    "SELECT campaign_id FROM delivery_intents WHERE id = ?", (intent_id,)
+                ).fetchone()
+            verify_proof(proof, bytes(prepared["mime_bytes"]))
+            if (
+                proof.sender != prepared["from_email"]
+                or proof.recipient != prepared["recipient"]
+                or proof.content_hash != prepared["content_hash"]
+                or proof.payload.get("artifact_ref") != prepared["id"]
+                or proof.payload.get("intent_id") != intent_id
+                or (
+                    proof.message_revision_id
+                    and proof.message_revision_id != prepared["template_version"]
+                )
+                or (
+                    proof.payload.get("campaign_id")
+                    and (
+                        intent_row is None
+                        or proof.payload.get("campaign_id") != intent_row["campaign_id"]
+                    )
+                )
+            ):
+                raise RuntimeError("prepared SMTP proof does not match the dispatch operation")
+        elif str(prepared["template_name"]).startswith("studio:"):
+            raise RuntimeError("Message Studio preparation requires outbound proof")
         if prepared["recipient"] != email:
             raise RuntimeError("prepared recipient does not match delivery intent")
         result = deliver_smtp(
@@ -354,7 +436,7 @@ class OutboundService:
                     PreparationIssue("message_preparation", str(error), intent["normalized_email"])
                 )
                 continue
-            self.store.save_prepared_message(
+            prepared_id = self.store.save_prepared_message(
                 intent_id=intent["id"],
                 template_name=template.name,
                 template_version=template.version,
@@ -375,6 +457,57 @@ class OutboundService:
                     for item in composed.attachments
                 ],
             )
+            revision_id = template.version if template.name.startswith("studio:") else None
+            proof_id = str(uuid.uuid4())
+            proof = make_proof(
+                proof_id,
+                build_payload(
+                    operation_kind=(
+                        "campaign_preparation" if revision_id else "legacy_campaign_preparation"
+                    ),
+                    sender=composed.from_email,
+                    recipient=composed.recipient,
+                    content_hash=composed.content_hash,
+                    prepared_at=self.now_fn().isoformat(),
+                    artifact_kind="prepared_message",
+                    artifact_ref=prepared_id,
+                    message_revision_id=revision_id,
+                    campaign_id=campaign_id,
+                    intent_id=intent["id"],
+                    eligibility={
+                        "state": intent["state"],
+                        "reason": intent["eligibility_reason"],
+                    },
+                    personalization_hash=digest_json(
+                        {
+                            "email": contact["normalized_email"],
+                            "name": contact["display_name"],
+                            "metadata": metadata,
+                        }
+                    ),
+                    policy_revision=self.store.policy_revision(),
+                ),
+            )
+            self.store.record_outbound_proof(
+                proof_id=proof.proof_id,
+                proof_version=proof.proof_version,
+                proof_hash=proof.proof_hash,
+                operation_kind=proof.payload["operation_kind"],
+                message_revision_id=revision_id,
+                campaign_id=campaign_id,
+                intent_id=intent["id"],
+                sender=proof.sender,
+                recipient=proof.recipient,
+                content_hash=proof.content_hash,
+                artifact_kind="prepared_message",
+                artifact_ref=prepared_id,
+                proof_json=json.dumps(
+                    proof.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+                mime_bytes=None,
+                created_at=proof.payload["prepared_at"],
+            )
+            self.store.attach_prepared_proof(prepared_id, proof.proof_id)
             self.store.set_intent_state(intent["id"], DeliveryState.PREPARED, "message_prepared")
             prepared += 1
         if schedule is not None and not issues:

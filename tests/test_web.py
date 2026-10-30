@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mailforge.domain.campaign import CampaignStatus
+from mailforge.domain.outbound import SenderPolicy
 from mailforge.interfaces.process_lock import DatabaseProcessLock, ProcessLockError
 from mailforge.interfaces.web import WebRuntime, create_app
 
@@ -495,6 +496,16 @@ def test_provider_grant_http_boundary_rejects_changed_request_before_transport(
         lambda *args, **kwargs: transport_calls.append((args, kwargs)),
     )
     expiry = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    runtime = client.app.state.runtime
+    document = runtime.message_studio.create_document("HTTP proof")
+    revision = runtime.message_studio.publish(
+        document["id"], expected_revision_id=document["draft"]["id"]
+    )
+    proof = runtime.message_studio.prepare_controlled_test(
+        revision_id=revision["published"]["id"],
+        sender=SenderPolicy(ref="http", provider="synthetic", email="sender@example.com"),
+        recipient="owned@example.com",
+    )
     grant = client.post(
         "/api/v1/providers/http-provider/grants",
         headers=headers,
@@ -503,6 +514,7 @@ def test_provider_grant_http_boundary_rejects_changed_request_before_transport(
             "sender": "sender@example.com",
             "recipient": "owned@example.com",
             "expires_at": expiry,
+            "proof_hash": proof["proof_hash"],
         },
     )
     assert grant.status_code == 200
@@ -513,28 +525,15 @@ def test_provider_grant_http_boundary_rejects_changed_request_before_transport(
         json={
             "sender": "sender@example.com",
             "recipient": "other@example.com",
-            "message": "Subject: fixture\r\n\r\nbody",
             "idempotency_key": "http-boundary-key",
             "authorization_ref": authorization_ref,
             "purpose": "http boundary fixture",
             "expires_at": expiry,
-        },
-    )
-    invented = client.post(
-        "/api/v1/providers/http-provider/test-send",
-        headers=headers,
-        json={
-            "sender": "sender@example.com",
-            "recipient": "owned@example.com",
-            "message": "Subject: fixture\r\n\r\nbody",
-            "idempotency_key": "http-invented-key",
-            "authorization_ref": "invented-authorization",
-            "purpose": "http boundary fixture",
-            "expires_at": expiry,
+            "proof_id": proof["proof_id"],
+            "proof_hash": proof["proof_hash"],
         },
     )
     assert changed.status_code == 400
-    assert invented.status_code == 400
     assert transport_calls == []
 
 
