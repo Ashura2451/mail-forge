@@ -183,3 +183,15 @@ def test_unknown_storage_does_not_resolve_prior_incident(tmp_path: Path, monkeyp
     incidents = service.incidents(include_acknowledged=True)
     storage = next(item for item in incidents["items"] if item.get("subsystem") == "storage")
     assert storage["disposition"] == "open"
+
+
+def test_active_job_without_heartbeat_is_unknown_not_healthy(tmp_path: Path) -> None:
+    data = DataDirectory.from_path(tmp_path / "data").initialize()
+    service = OperationalAssuranceService(CampaignStore(data.database), data)
+    service._job_rows = lambda **_kwargs: [  # type: ignore[method-assign]
+        {"status": "running", "updated_at": datetime.now(UTC).isoformat()}
+    ]
+    health = service.health()
+    workers = next(check for check in health["checks"] if check["key"] == "workers")
+    assert workers["state"] == "unknown"
+    assert "heartbeat/progress is unavailable" in workers["evidence"]

@@ -249,16 +249,37 @@ class OperationalAssuranceService:
             and (_parse(job["updated_at"]) or now) < now - timedelta(minutes=5)
         ]
         failed = [job for job in jobs if job["status"] in {"failed", "ambiguous", "suspended"}]
+        active_count = sum(job["status"] in {"running", "delivering"} for job in jobs)
         if stale:
-            checks.append({"key": "workers", "state": "action_required", "stale_count": len(stale)})
+            checks.append(
+                {
+                    "key": "workers",
+                    "state": "action_required",
+                    "stale_count": len(stale),
+                    "evidence": "updated_at activity is stale; liveness is not verified",
+                }
+            )
         elif failed:
             checks.append({"key": "workers", "state": "degraded", "failed_count": len(failed)})
+        elif active_count and not worker_status:
+            checks.append(
+                {
+                    "key": "workers",
+                    "state": "unknown",
+                    "active_count": active_count,
+                    "evidence": (
+                        "durable updated_at activity exists; "
+                        "heartbeat/progress is unavailable"
+                    ),
+                }
+            )
         else:
             checks.append(
                 {
                     "key": "workers",
                     "state": "healthy",
-                    "active_count": sum(job["status"] in {"running", "delivering"} for job in jobs),
+                    "active_count": active_count,
+                    "evidence": "no active durable work requiring a liveness claim",
                 }
             )
         subsystem_counts = {
