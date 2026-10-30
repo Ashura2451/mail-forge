@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -873,3 +874,22 @@ def test_campaign_restore_cli_respects_runtime_ownership(tmp_path: Path) -> None
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+def test_serve_custom_database_does_not_reacquire_global_lock(tmp_path: Path) -> None:
+    from mailforge.interfaces.cli import main
+
+    custom_database = tmp_path / "data" / "custom.sqlite3"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    with (
+        patch(
+            "mailforge.interfaces.process_lock.default_runtime_lock_path",
+            return_value=lock_path,
+        ),
+        patch("mailforge.interfaces.web.create_app", return_value=object()) as create_app,
+        patch("uvicorn.run") as run,
+    ):
+        main(["serve", "--database", str(custom_database)])
+
+    assert create_app.called
+    assert run.called

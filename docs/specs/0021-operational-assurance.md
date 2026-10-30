@@ -1,6 +1,6 @@
 # Spec 0021: operational assurance
 
-**Status:** In Progress
+**Status:** Accepted
 **Date:** 2026-10-30
 
 ## Summary

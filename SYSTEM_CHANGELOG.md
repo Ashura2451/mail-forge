@@ -16,9 +16,12 @@
   `unknown`; and unknown required evidence cannot aggregate to `healthy`.
 - Recorded the single-runtime ownership contract in `docs/runtime-ownership.md`;
   separate simultaneous database runtimes remain intentionally unsupported.
-- Final cumulative independent review remains required before PR #20 integration;
-  real providers, production credentials, signing, notarization, and milestone
-  033 remain out of scope.
+- Corrected custom-database server startup to acquire the application-scoped
+  runtime authority exactly once, with a CLI regression for the supported
+  custom-database path.
+- Local synthetic 032 acceptance and a distinct-model governance review are
+  complete; real providers, production credentials, signing, notarization, and
+  milestone 033 remain out of scope.
 
 ## 2026-10-29 — Mailbox operations 030
 
