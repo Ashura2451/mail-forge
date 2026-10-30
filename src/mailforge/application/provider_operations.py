@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from mailforge.application.outbound_proof import OutboundMessageProof, verify_proof
 from mailforge.application.providers import ProviderService
 from mailforge.domain.provider import (
     AuthenticationMethod,
@@ -301,6 +302,7 @@ class ProviderOperationsService:
         sender: str | None = None,
         recipient: str | None = None,
         expires_at: str,
+        proof_hash: str | None = None,
     ) -> dict[str, object]:
         """Issue a server-owned, persisted grant for one bounded operation."""
         profile = self.providers.profile(ref)
@@ -316,8 +318,15 @@ class ProviderOperationsService:
             max_submissions=1 if operation is ProviderOperation.CONTROLLED_TEST_SEND else 0,
             expires_at=expires_at,
             authorization_ref=authorization_ref,
+            proof_hash=proof_hash,
         )
         grant.validate()
+        if operation is ProviderOperation.CONTROLLED_TEST_SEND:
+            proof = self.store.get_outbound_proof_by_hash(proof_hash or "")
+            if proof is None or proof["operation_kind"] != "controlled_test":
+                raise PermissionError("controlled test authorization requires a canonical proof")
+            if proof["sender"] != sender or proof["recipient"] != recipient:
+                raise PermissionError("authorization does not match the canonical proof")
         self.store.record_provider_operation_grant(
             account_ref=grant.account_ref,
             operation=grant.operation.value,
@@ -329,6 +338,7 @@ class ProviderOperationsService:
             max_submissions=grant.max_submissions,
             expires_at=grant.expires_at,
             authorization_ref=grant.authorization_ref,
+            proof_hash=grant.proof_hash,
         )
         return {
             "authorization_ref": authorization_ref,
@@ -351,6 +361,7 @@ class ProviderOperationsService:
         sender: str | None = None,
         recipient: str | None = None,
         expires_at: str,
+        proof_hash: str | None = None,
     ) -> ExternalOperationGrant:
         """Resolve and match a grant issued by the server-side authority."""
         row = self.store.get_provider_operation_grant(authorization_ref, account_ref=ref)
@@ -371,6 +382,7 @@ class ProviderOperationsService:
             max_submissions=int(row["max_submissions"]),
             expires_at=row["expires_at"],
             authorization_ref=row["authorization_ref"],
+            proof_hash=row.get("proof_hash"),
         )
         grant.validate()
         if (
@@ -379,6 +391,7 @@ class ProviderOperationsService:
             or grant.sender != sender
             or grant.recipient != recipient
             or grant.expires_at != expires_at
+            or grant.proof_hash != proof_hash
         ):
             raise PermissionError("operation request does not match its issued authorization")
         return grant
@@ -394,10 +407,10 @@ class ProviderOperationsService:
         profile = self.providers.profile(ref)
         if grant.host != profile.host or grant.port != profile.port:
             raise PermissionError("operation authorization endpoint does not match the account")
-        if (
-            self.store.get_provider_operation_grant(grant.authorization_ref, account_ref=ref)
-            is None
-        ):
+        stored = self.store.get_provider_operation_grant(
+            grant.authorization_ref, account_ref=ref
+        )
+        if stored is None:
             self.store.record_provider_operation_grant(
                 account_ref=grant.account_ref,
                 operation=grant.operation.value,
@@ -409,7 +422,19 @@ class ProviderOperationsService:
                 max_submissions=grant.max_submissions,
                 expires_at=grant.expires_at,
                 authorization_ref=grant.authorization_ref,
+                proof_hash=grant.proof_hash,
             )
+        elif (
+            stored["operation"] != grant.operation.value
+            or stored["host"] != grant.host
+            or int(stored["port"]) != grant.port
+            or stored["purpose"] != grant.purpose
+            or stored["sender"] != grant.sender
+            or stored["recipient"] != grant.recipient
+            or stored["expires_at"] != grant.expires_at
+            or stored.get("proof_hash") != grant.proof_hash
+        ):
+            raise PermissionError("operation authorization does not match its stored grant")
         return grant
 
     def diagnostic(
@@ -564,11 +589,13 @@ class ProviderOperationsService:
         ref: str,
         sender: str,
         recipient: str,
-        message: str,
+        message: str | None,
         idempotency_key: str,
         grant: ExternalOperationGrant,
         resolver: CredentialResolver | None = None,
         message_revision_id: str | None = None,
+        proof_id: str | None = None,
+        proof_hash: str | None = None,
     ) -> dict[str, Any]:
         self._require_grant(ref, ProviderOperation.CONTROLLED_TEST_SEND, grant)
         account = self.account(ref)
@@ -580,16 +607,40 @@ class ProviderOperationsService:
             raise PermissionError("sender does not match the operation authorization")
         if grant.recipient and recipient.lower() != grant.recipient.lower():
             raise PermissionError("recipient does not match the operation authorization")
-        if not message or len(message.encode()) > 10 * 1024 * 1024:
-            raise ValueError("controlled test message is empty or exceeds the bounded limit")
+        if not grant.proof_hash or (proof_hash and proof_hash != grant.proof_hash):
+            raise PermissionError("controlled test send requires the proof bound to its grant")
+        proof_row = self.store.get_outbound_proof(proof_id) if proof_id else None
+        if proof_row is None:
+            proof_row = self.store.get_outbound_proof_by_hash(grant.proof_hash)
+        if proof_row is None or proof_row["proof_hash"] != grant.proof_hash:
+            raise PermissionError("controlled test proof is missing or does not match its grant")
+        if proof_row["mime_bytes"] is None:
+            raise PermissionError("controlled test proof has no canonical MIME artifact")
+        proof = OutboundMessageProof(
+            proof_id=proof_row["id"],
+            proof_hash=proof_row["proof_hash"],
+            content_hash=proof_row["content_hash"],
+            payload=proof_row["proof"],
+        )
+        verify_proof(proof, bytes(proof_row["mime_bytes"]))
+        if proof.sender != sender or proof.recipient != recipient:
+            raise PermissionError("send addresses do not match the canonical proof")
+        if message is not None and message.encode() != bytes(proof_row["mime_bytes"]):
+            raise PermissionError("caller-supplied content does not match the canonical proof")
+        if message_revision_id is not None and message_revision_id != proof.message_revision_id:
+            raise PermissionError("message revision does not match the canonical proof")
+        message_bytes = bytes(proof_row["mime_bytes"])
         reservation, owns_reservation = self.store.reserve_provider_test_submission(
             account_ref=ref,
             authorization_ref=grant.authorization_ref,
             idempotency_key=idempotency_key,
             sender=sender,
             recipient=recipient,
-            message_digest=hashlib.sha256(message.encode()).hexdigest(),
-            message_revision_id=message_revision_id,
+            message_digest=hashlib.sha256(message_bytes).hexdigest(),
+            message_revision_id=proof.message_revision_id,
+            proof_id=proof.proof_id,
+            sender_scope_ref=account.get("sender_policy_ref") or "",
+            communication_purpose="transactional",
         )
         if not owns_reservation:
             return reservation
@@ -598,7 +649,9 @@ class ProviderOperationsService:
             pool = self.providers.smtp_pool(
                 ref, resolver or EnvironmentCredentialResolver(), gate=LiveSendGate(enabled=True)
             )
-            result = deliver(pool, sender, recipient, message, gate=LiveSendGate(enabled=True))
+            result = deliver(
+                pool, sender, recipient, message_bytes, gate=LiveSendGate(enabled=True)
+            )
             transaction = pool.last_transaction
             detail = _sanitize_detail(result.detail)
             row = self.store.finalize_provider_test_submission(

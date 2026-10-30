@@ -6,7 +6,9 @@ from threading import Event
 
 import pytest
 
+from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.provider_operations import ProviderOperationsService
+from mailforge.domain.outbound import SenderPolicy
 from mailforge.domain.provider import (
     AuthenticationMethod,
     ExternalOperationGrant,
@@ -52,6 +54,16 @@ def _grant(
     operation=ProviderOperation.CONTROLLED_TEST_SEND,
 ):
     account = service.account(ref)
+    proof_hash = None
+    if operation is ProviderOperation.CONTROLLED_TEST_SEND:
+        studio = MessageStudioService(service.store)
+        document = studio.create_document("Provider test")
+        revision = studio.publish(document["id"], expected_revision_id=document["draft"]["id"])
+        proof_hash = studio.prepare_controlled_test(
+            revision_id=revision["published"]["id"],
+            sender=SenderPolicy(ref="test", provider="synthetic", email="sender@example.com"),
+            recipient="owned@example.com",
+        )["proof_hash"]
     return ExternalOperationGrant(
         account_ref=ref,
         operation=operation,
@@ -67,6 +79,7 @@ def _grant(
         max_submissions=1 if operation is ProviderOperation.CONTROLLED_TEST_SEND else 0,
         expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         authorization_ref="owner-auth-019",
+        proof_hash=proof_hash,
     )
 
 
@@ -105,7 +118,7 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
         max_concurrency=2,
     )
 
-    assert store.schema_version() == 24
+    assert store.schema_version() == 25
     assert account["display_name"] == "Local fixture"
     assert account["inbound_enabled"] is True
     assert any(item["key"] == "google_workspace" for item in service.capabilities())
@@ -122,8 +135,17 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
 
 
 def test_server_issued_grant_is_required_for_provider_test_send(tmp_path):
-    service = ProviderOperationsService(CampaignStore(tmp_path / "grants.sqlite3"))
+    store = CampaignStore(tmp_path / "grants.sqlite3")
+    service = ProviderOperationsService(store)
     service.register(_profile(), sender_email="sender@example.com")
+    studio = MessageStudioService(store)
+    document = studio.create_document("Provider grant")
+    revision = studio.publish(document["id"], expected_revision_id=document["draft"]["id"])
+    proof_hash = studio.prepare_controlled_test(
+        revision_id=revision["published"]["id"],
+        sender=SenderPolicy(ref="test", provider="synthetic", email="sender@example.com"),
+        recipient="owned@example.com",
+    )["proof_hash"]
     expiry = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     issued = service.issue_grant(
         "local",
@@ -132,6 +154,7 @@ def test_server_issued_grant_is_required_for_provider_test_send(tmp_path):
         sender="sender@example.com",
         recipient="owned@example.com",
         expires_at=expiry,
+        proof_hash=proof_hash,
     )
     resolved = service.grant_for_authorization(
         "local",
@@ -141,6 +164,7 @@ def test_server_issued_grant_is_required_for_provider_test_send(tmp_path):
         sender="sender@example.com",
         recipient="owned@example.com",
         expires_at=expiry,
+        proof_hash=proof_hash,
     )
     assert resolved.authorization_ref == issued["authorization_ref"]
     with pytest.raises(PermissionError, match="not issued"):
@@ -234,7 +258,7 @@ def test_controlled_test_send_is_once_only_and_preserves_provider_acceptance(tmp
         ref="local",
         sender="sender@example.com",
         recipient="owned@example.com",
-        message="Subject: fixture\r\n\r\nbody",
+        message=None,
         idempotency_key="test-send-019",
         grant=grant,
         resolver=resolver,
@@ -243,7 +267,7 @@ def test_controlled_test_send_is_once_only_and_preserves_provider_acceptance(tmp
         ref="local",
         sender="sender@example.com",
         recipient="owned@example.com",
-        message="Subject: fixture\r\n\r\nbody",
+        message=None,
         idempotency_key="test-send-019",
         grant=grant,
         resolver=resolver,
@@ -266,7 +290,7 @@ def test_issued_test_grant_is_consumed_before_a_second_key_can_send(tmp_path, mo
         ref="local",
         sender="sender@example.com",
         recipient="owned@example.com",
-        message="Subject: fixture\r\n\r\nbody",
+        message=None,
         idempotency_key="grant-first-key",
         grant=grant,
         resolver=resolver,
@@ -276,7 +300,7 @@ def test_issued_test_grant_is_consumed_before_a_second_key_can_send(tmp_path, mo
             ref="local",
             sender="sender@example.com",
             recipient="owned@example.com",
-            message="Subject: fixture\r\n\r\nbody",
+        message=None,
             idempotency_key="grant-second-key",
             grant=grant,
             resolver=resolver,
@@ -299,7 +323,7 @@ def test_idempotency_reservation_blocks_concurrent_duplicate_smtp_calls(tmp_path
             ref="local",
             sender="sender@example.com",
             recipient="owned@example.com",
-            message="Subject: fixture\r\n\r\nbody",
+        message=None,
             idempotency_key="concurrent-key",
             grant=grant,
             resolver=resolver,
@@ -336,7 +360,7 @@ def test_idempotency_reservation_ownership_is_proven_while_first_send_is_blocked
             ref="local",
             sender="sender@example.com",
             recipient="owned@example.com",
-            message="Subject: fixture\r\n\r\nbody",
+        message=None,
             idempotency_key="overlap-key",
             grant=grant,
             resolver=resolver,
@@ -370,7 +394,7 @@ def test_failed_provider_test_is_ambiguous_and_survives_reopen(tmp_path, monkeyp
             ref="local",
             sender="sender@example.com",
             recipient="owned@example.com",
-            message="Subject: fixture\r\n\r\nbody",
+        message=None,
             idempotency_key="failed-send-key",
             grant=grant,
             resolver=MappingCredentialResolver({"test:provider": "synthetic-password"}),
@@ -394,7 +418,7 @@ def test_idempotency_key_cannot_cross_accounts(tmp_path, monkeypatch):
         ref="first",
         sender="sender@example.com",
         recipient="owned@example.com",
-        message="Subject: fixture\r\n\r\nbody",
+        message=None,
         idempotency_key="cross-account-key",
         grant=_grant(service, "first"),
         resolver=resolver,
@@ -404,7 +428,7 @@ def test_idempotency_key_cannot_cross_accounts(tmp_path, monkeypatch):
             ref="second",
             sender="sender@example.com",
             recipient="owned@example.com",
-            message="Subject: fixture\r\n\r\nbody",
+        message=None,
             idempotency_key="cross-account-key",
             grant=_grant(service, "second"),
             resolver=resolver,
@@ -424,12 +448,12 @@ def test_idempotency_key_cannot_change_request_on_same_account(tmp_path, monkeyp
         ref="local",
         sender="sender@example.com",
         recipient="owned@example.com",
-        message="Subject: fixture\r\n\r\nbody",
+        message=None,
         idempotency_key="same-account-key",
         grant=grant,
         resolver=resolver,
     )
-    with pytest.raises(PermissionError, match="idempotency key"):
+    with pytest.raises(PermissionError, match="canonical proof"):
         service.controlled_test_send(
             ref="local",
             sender="sender@example.com",

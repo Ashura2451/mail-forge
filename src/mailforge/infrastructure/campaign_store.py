@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1895,6 +1895,13 @@ class CampaignStore:
                     (24, utc_now()),
                 )
                 current = 24
+            if current < 25:
+                self._apply_migration_25(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (25, utc_now()),
+                )
+                current = 25
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2273,6 +2280,63 @@ class CampaignStore:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_provider_grants_authorization "
             "ON provider_operation_grants(authorization_ref, account_ref)"
+        )
+
+    @staticmethod
+    def _apply_migration_25(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outbound_message_proofs (
+                id TEXT PRIMARY KEY,
+                proof_version INTEGER NOT NULL,
+                proof_hash TEXT NOT NULL UNIQUE,
+                operation_kind TEXT NOT NULL,
+                message_revision_id TEXT REFERENCES message_revisions(id),
+                campaign_id TEXT REFERENCES campaigns(id) ON DELETE SET NULL,
+                intent_id TEXT REFERENCES delivery_intents(id) ON DELETE SET NULL,
+                sender TEXT NOT NULL,
+                recipient TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                artifact_kind TEXT NOT NULL,
+                artifact_ref TEXT NOT NULL,
+                proof_json TEXT NOT NULL,
+                mime_bytes BLOB,
+                created_at TEXT NOT NULL,
+                CHECK ((artifact_kind = 'prepared_message' AND mime_bytes IS NULL)
+                    OR (artifact_kind = 'controlled_test' AND mime_bytes IS NOT NULL))
+            )
+            """
+        )
+        prepared_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(prepared_messages)")
+        }
+        if "proof_id" not in prepared_columns:
+            connection.execute(
+                "ALTER TABLE prepared_messages ADD COLUMN proof_id TEXT REFERENCES outbound_message_proofs(id)"
+            )
+        submission_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_test_submissions)")
+        }
+        if "proof_id" not in submission_columns:
+            connection.execute(
+                "ALTER TABLE provider_test_submissions ADD COLUMN proof_id TEXT REFERENCES outbound_message_proofs(id)"
+            )
+        grant_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_operation_grants)")
+        }
+        if "proof_hash" not in grant_columns:
+            connection.execute(
+                "ALTER TABLE provider_operation_grants ADD COLUMN proof_hash TEXT"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outbound_proofs_operation "
+            "ON outbound_message_proofs(operation_kind, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outbound_proofs_revision "
+            "ON outbound_message_proofs(message_revision_id, created_at DESC)"
         )
 
     def schema_version(self) -> int:
@@ -2663,6 +2727,7 @@ class CampaignStore:
         max_submissions: int,
         expires_at: str,
         authorization_ref: str,
+        proof_hash: str | None = None,
     ) -> str:
         _assert_safe_reference(account_ref, "provider_grant.account_ref")
         _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
@@ -2681,8 +2746,8 @@ class CampaignStore:
             connection.execute(
                 "INSERT INTO provider_operation_grants "
                 "(id, account_ref, operation, host, port, purpose, sender, recipient, "
-                "max_submissions, expires_at, created_at, authorization_ref) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "max_submissions, expires_at, created_at, authorization_ref, proof_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     grant_id,
                     account_ref,
@@ -2696,6 +2761,7 @@ class CampaignStore:
                     expires_at,
                     utc_now(),
                     authorization_ref,
+                    proof_hash,
                 ),
             )
         return grant_id
@@ -2738,6 +2804,9 @@ class CampaignStore:
         recipient: str,
         message_digest: str,
         message_revision_id: str | None = None,
+        proof_id: str | None = None,
+        sender_scope_ref: str = "",
+        communication_purpose: str = "transactional",
     ) -> dict[str, Any]:
         """Reserve one test submission and consume its grant atomically."""
 
@@ -2756,6 +2825,7 @@ class CampaignStore:
                     or existing["sender"] != sender
                     or existing["recipient"] != recipient
                     or existing["message_digest"] != message_digest
+                    or existing["proof_id"] != proof_id
                 ):
                     raise PermissionError("idempotency key is bound to another operation")
                 return dict(existing), False
@@ -2769,6 +2839,25 @@ class CampaignStore:
             ).fetchone()
             if grant is None:
                 raise PermissionError("operation authorization has no remaining submission")
+            contact = connection.execute(
+                "SELECT id, lifecycle_status FROM contacts WHERE normalized_email = ?",
+                (recipient,),
+            ).fetchone()
+            if contact is not None and contact["lifecycle_status"] != "active":
+                raise PermissionError("controlled-test recipient is not currently eligible")
+            contact_id = contact["id"] if contact is not None else ""
+            now = utc_now()
+            suppression = connection.execute(
+                "SELECT 1 FROM suppressions WHERE active = 1 "
+                "AND (expires_at IS NULL OR expires_at > ?) "
+                "AND (scope_type = 'global' "
+                "OR (scope_type = 'sender' AND scope_id = ?) "
+                "OR (scope_type = 'purpose' AND scope_id = ?)) "
+                "AND (normalized_email = ? OR contact_id = ?) LIMIT 1",
+                (now, sender_scope_ref, communication_purpose, recipient, contact_id),
+            ).fetchone()
+            if suppression is not None:
+                raise PermissionError("controlled-test recipient is currently suppressed")
             consumed = connection.execute(
                 "UPDATE provider_operation_grants "
                 "SET consumed_submissions = consumed_submissions + 1 "
@@ -2778,13 +2867,12 @@ class CampaignStore:
             if consumed.rowcount != 1:
                 raise PermissionError("operation authorization has no remaining submission")
 
-            now = utc_now()
             submission_id = str(uuid.uuid4())
             connection.execute(
                 "INSERT INTO provider_test_submissions("
                 "id, account_ref, idempotency_key, sender, recipient, message_revision_id, authorization_ref, "
-                "message_digest, status, phase, detail, external_access, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'reserved', ?, 1, ?, ?)",
+                "message_digest, proof_id, status, phase, detail, external_access, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'reserved', ?, 1, ?, ?)",
                 (
                     submission_id,
                     account_ref,
@@ -2794,6 +2882,7 @@ class CampaignStore:
                     message_revision_id,
                     authorization_ref,
                     message_digest,
+                    proof_id,
                     "Submission reserved before provider contact",
                     now,
                     now,
@@ -3151,6 +3240,85 @@ class CampaignStore:
                 ),
             )
         return message_id_key
+
+    def record_outbound_proof(
+        self,
+        *,
+        proof_id: str,
+        proof_version: int,
+        proof_hash: str,
+        operation_kind: str,
+        message_revision_id: str | None,
+        campaign_id: str | None,
+        intent_id: str | None,
+        sender: str,
+        recipient: str,
+        content_hash: str,
+        artifact_kind: str,
+        artifact_ref: str,
+        proof_json: str,
+        mime_bytes: bytes | None,
+        created_at: str,
+    ) -> dict[str, Any]:
+        _assert_no_secrets({"proof_json": proof_json}, "outbound_proof")
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO outbound_message_proofs "
+                "(id,proof_version,proof_hash,operation_kind,message_revision_id,campaign_id,intent_id,"
+                "sender,recipient,content_hash,artifact_kind,artifact_ref,proof_json,mime_bytes,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    proof_id,
+                    proof_version,
+                    proof_hash,
+                    operation_kind,
+                    message_revision_id,
+                    campaign_id,
+                    intent_id,
+                    sender,
+                    recipient,
+                    content_hash,
+                    artifact_kind,
+                    artifact_ref,
+                    proof_json,
+                    mime_bytes,
+                    created_at,
+                ),
+            )
+        return self.get_outbound_proof(proof_id) or {}
+
+    def get_outbound_proof(self, proof_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM outbound_message_proofs WHERE id = ?", (proof_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["proof"] = json.loads(result.pop("proof_json"))
+        return result
+
+    def get_outbound_proof_by_hash(self, proof_hash: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM outbound_message_proofs WHERE proof_hash = ?", (proof_hash,)
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["proof"] = json.loads(result.pop("proof_json"))
+        return result
+
+    def attach_prepared_proof(self, prepared_message_id: str, proof_id: str) -> None:
+        with self.transaction(immediate=True) as connection:
+            if (
+                connection.execute(
+                    "UPDATE prepared_messages SET proof_id = ? WHERE id = ?",
+                    (proof_id, prepared_message_id),
+                ).rowcount
+                != 1
+            ):
+                raise KeyError(f"prepared message not found: {prepared_message_id}")
 
     def get_prepared_message(self, intent_id: str) -> sqlite3.Row | None:
         with self.connect() as connection:

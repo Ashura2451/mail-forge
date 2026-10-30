@@ -447,3 +447,12 @@
 - Updated loopback protocol coverage for folder discovery, flags, COPY/MOVE,
   message identity, and durable mailbox projection updates. No real provider,
   mailbox, credential, or recipient data was accessed.
+## 2026-10-30 — Canonical outbound proof 033
+
+- Added schema 25 versioned outbound-message proofs binding published Message
+  Studio revisions, recipients, sender policy, eligibility evidence, exact MIME
+  digests, prepared artifacts, grants, and controlled-test submissions.
+- Controlled tests now require a stored proof and cannot replay caller-supplied
+  content; ambiguous provider outcomes remain durable and unresolved.
+- Local synthetic qualification only: no inbox delivery, production provider,
+  consent, signing/notarization, or production-scale claim is made.

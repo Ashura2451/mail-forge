@@ -92,6 +92,7 @@ class ExternalOperationGrant:
     max_submissions: int = 0
     expires_at: str = ""
     authorization_ref: str = ""
+    proof_hash: str | None = None
 
     def validate(self, *, now: datetime | None = None) -> None:
         if (
@@ -116,9 +117,14 @@ class ExternalOperationGrant:
         if expiry <= (now or datetime.now(UTC)):
             raise ValueError("operation grant has expired")
         if self.operation is ProviderOperation.CONTROLLED_TEST_SEND:
-            if not self.sender or not self.recipient or self.max_submissions != 1:
+            if (
+                not self.sender
+                or not self.recipient
+                or not self.proof_hash
+                or self.max_submissions != 1
+            ):
                 raise ValueError(
-                    "controlled test send requires sender, recipient, and one submission"
+                    "controlled test send requires sender, recipient, proof, and one submission"
                 )
 
 

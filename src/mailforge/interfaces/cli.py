@@ -62,6 +62,7 @@ from mailforge.domain.outbound import (
     ReconciliationDecision,
     ScheduleMode,
     ScheduleSpec,
+    SenderPolicy,
 )
 from mailforge.domain.policy import CommunicationPurpose, EvidenceStatus, PreferenceState
 from mailforge.domain.provider import (
@@ -647,11 +648,20 @@ def build_parser() -> argparse.ArgumentParser:
     provider_test_send.add_argument("--ref", required=True)
     provider_test_send.add_argument("--sender", required=True)
     provider_test_send.add_argument("--recipient", required=True)
-    provider_test_send.add_argument("--message", type=Path, required=True)
+    provider_test_send.add_argument("--message", type=Path)
+    provider_test_send.add_argument("--proof-id", required=True)
+    provider_test_send.add_argument("--proof-hash", required=True)
     provider_test_send.add_argument("--idempotency-key", required=True)
     provider_test_send.add_argument("--authorization-ref", required=True)
     provider_test_send.add_argument("--purpose", required=True)
     provider_test_send.add_argument("--expires-at", required=True)
+    provider_test_proof = provider_commands.add_parser(
+        "test-proof", help="prepare canonical proof from a published Message Studio revision"
+    )
+    provider_test_proof.add_argument("--database", type=Path, required=True)
+    provider_test_proof.add_argument("--revision-id", required=True)
+    provider_test_proof.add_argument("--sender", required=True)
+    provider_test_proof.add_argument("--recipient", required=True)
     automation = subparsers.add_parser("automation", help="manage durable visual workflows")
     automation_commands = automation.add_subparsers(dest="automation_command", required=True)
     automation_list = automation_commands.add_parser("list")
@@ -1736,8 +1746,26 @@ def main(argv: list[str] | None = None) -> int:
                     provider_operations.diagnostic(args.ref, operation, grant=grant), indent=2
                 )
             )
+        elif args.provider_command == "test-proof":
+            store = provider_operations.store
+            studio = MessageStudioService(store, outbound=OutboundService(store))
+            print(
+                json.dumps(
+                    studio.prepare_controlled_test(
+                        revision_id=args.revision_id,
+                        sender=SenderPolicy(
+                            ref=f"cli:{args.sender}", provider="synthetic", email=args.sender
+                        ),
+                        recipient=args.recipient,
+                    ),
+                    indent=2,
+                )
+            )
         elif args.provider_command == "test-send":
             account = provider_operations.account(args.ref)
+            row = provider_operations.store.get_outbound_proof(args.proof_id)
+            if row is None or row["proof_hash"] != args.proof_hash:
+                raise SystemExit("--proof-id and --proof-hash must identify the same stored proof")
             grant = ExternalOperationGrant(
                 account_ref=args.ref,
                 operation=ProviderOperation.CONTROLLED_TEST_SEND,
@@ -1749,6 +1777,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_submissions=1,
                 expires_at=args.expires_at,
                 authorization_ref=args.authorization_ref,
+                proof_hash=args.proof_hash,
             )
             print(
                 json.dumps(
@@ -1756,9 +1785,13 @@ def main(argv: list[str] | None = None) -> int:
                         ref=args.ref,
                         sender=args.sender,
                         recipient=args.recipient,
-                        message=args.message.read_text(encoding="utf-8"),
+                        message=(
+                            args.message.read_text(encoding="utf-8") if args.message else None
+                        ),
                         idempotency_key=args.idempotency_key,
                         grant=grant,
+                        proof_id=args.proof_id,
+                        proof_hash=args.proof_hash,
                     ),
                     indent=2,
                 )
