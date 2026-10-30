@@ -1,23 +1,24 @@
 # Review, feat/mailforge-provider-interoperability-031, 2026-10-30
 
 **Reviewed by**: gpt-6.1-sol, independent reviewer agent (author reported by parent as Codex/GPT-5; author identity not independently authenticated)
-**Scope**: 33 files, branch vs origin/main `db373a251826ff8ccfeaedccfd74a7aa7532bff2`
-**Reviewed revision**: `f6d160c56b17764701b17d70016b66b1f6beddd7`
-**Verdict**: Changes requested
+**Scope**: 34 files, branch vs origin/main `db373a251826ff8ccfeaedccfd74a7aa7532bff2`
+**Reviewed revision**: `cad79e93cc5eb977ab0b20a5424d3ec788f45f32`, incremental re-review from `f6d160c56b17764701b17d70016b66b1f6beddd7`
+**Verdict**: Approve with nits
+**Merge review gate**: PASS; no unresolved Blocker or Major findings.
 
 ## Summary
 
-The earlier grant-reuse, duplicate-send ownership, cross-account request identity, fresh-session capability, refresh-token preservation, and generic IMAP-default defects have been corrected. The implementation now reserves and consumes before SMTP in one immediate SQLite transaction, and the browser checks confirmation and its prepared request fingerprint before submission. Independent execution found no remaining runtime blocker in those corrected paths; the remaining merge concern is regression coverage of the security and interrupted-operation boundaries, with two smaller browser-state defects.
+The earlier grant-reuse, duplicate-send ownership, cross-account request identity, fresh-session capability, refresh-token preservation, and generic IMAP-default defects have been corrected. The implementation now reserves and consumes before SMTP in one immediate SQLite transaction, and the browser checks confirmation and its prepared request fingerprint before submission. Commit `cad79e9` adds the deterministic overlap, HTTP rejection, and failure/reopen regressions needed to resolve the previous Major coverage finding; independent focused checks pass. Two smaller browser-state defects remain nonblocking.
 
-## Major
+## Resolved Major finding
 
-### 🟠 Security and interrupted-reservation branches lack reliable regression coverage, `tests/test_provider_operations_019.py:287`
+### Security and interrupted-reservation coverage, resolved by `cad79e9`
 
-**Problem**: The new concurrency test submits two tasks against an immediate fake SMTP implementation without holding the first request inside SMTP. It can therefore exercise sequential duplicate lookup rather than the critical case where the second request observes an existing, still-reserved row. Repository search also found no HTTP `/grants` → `/test-send` test, no negative test for the persisted-field mismatch branch at `provider_operations.py:376`, and no regression for the new exception-finalization/restart path at `provider_operations.py:631`.
+**Original finding**: The immediate fake transport did not deterministically establish overlap, and HTTP authorization mismatch and exception-finalization branches lacked regression coverage at `f6d160c`.
 
-**Why it matters**: These are the security and recovery boundaries added to prevent repeated consequential operations. The configured-test rubric treats uncovered security/error branching as Major. The current tests and code inspection provide useful positive evidence, but do not reliably protect reservation ownership during actual overlap or prove that rejected/failed/interrupted requests cannot regain submission authority. This is a coverage finding, not a claim that a second send was reproduced on this revision.
+**Resolution**: `test_idempotency_reservation_ownership_is_proven_while_first_send_is_blocked` holds the first caller inside SMTP, proves the duplicate returns the existing `reserved` row, and verifies only one eventual transport call. `test_failed_provider_test_is_ambiguous_and_survives_reopen` injects pool-construction failure and verifies ambiguity and consumed authority survive durable readback/reopen. `test_provider_grant_http_boundary_rejects_changed_request_before_transport` issues a grant through HTTP and verifies altered-recipient and invented-authorization requests are rejected before any transport creation. These exercise the previously uncovered control-flow boundaries; existing tests separately cover consumed-grant reuse and request/account identity conflicts.
 
-**Suggested fix**: Add a deterministic blocking fake transport: hold the first caller after reservation, run the duplicate while it is blocked, assert one SMTP invocation and a returned reserved row, then release and assert the final result. Add HTTP tests with a server-issued grant for altered account/purpose/sender/recipient/expiry, consumed-grant reuse, and malformed/invented authorization, asserting zero additional transport calls. Exercise a pool-construction failure and reopening a database with a reserved operation; verify the consumed grant and original identity remain durable and no automatic replay occurs.
+**Remaining limits**: The HTTP test is representative rather than a permutation of every bound field; actual process termination at the SMTP boundary is not simulated. Those limits do not leave the prior Major finding open, given the deterministic ownership test, durable failure test, existing grant-count/identity tests, and independent reservation backup/readback evidence below.
 
 ## Minor
 
@@ -29,9 +30,9 @@ The earlier grant-reuse, duplicate-send ownership, cross-account request identit
 
 **Suggested fix**: Surface a capability-specific error and retry, or load capabilities through the shell's existing error/refresh authority. Add a failed-response-then-retry browser case.
 
-### 🟡 Submit appears enabled when its handler will silently refuse the request, `web/src/App.tsx:913`
+### 🟡 Submit appears enabled when its handler will silently refuse the request, `web/src/App.tsx:915`
 
-**Problem**: `runTest` correctly refuses an unchecked confirmation or a changed request fingerprint, but the Submit button at line 919 is disabled only for missing grant/key state. Changing the message or account, or clearing confirmation after grant preparation, leaves an enabled primary action whose click does nothing.
+**Problem**: `runTest` correctly refuses an unchecked confirmation or a changed request fingerprint through the new `testReady` predicate, but the Submit button at line 922 still uses only missing grant/key state for `disabled`. Changing the message or account, or clearing confirmation after grant preparation, leaves an enabled primary action whose click does nothing. Extracting `testReady` in `cad79e9` did not wire it into button availability.
 
 **Why it matters**: Chromium verification prepared a grant, cleared confirmation, and separately edited the message: Submit remained enabled in both cases, while the intercepted test-send request count correctly remained unchanged. The safety boundary works, but the interface gives no explanation or recovery instruction for an apparently broken action.
 
@@ -45,7 +46,9 @@ The earlier grant-reuse, duplicate-send ownership, cross-account request identit
 
 ## Test coverage and verification evidence
 
-The source remained at the exact revision above. At review start, the parent packaging process had temporarily removed the three current compiled assets; they were restored byte-for-byte to committed content before browser inspection, and the working tree was clean before this findings file was created. No application code or tests were edited by this reviewer.
+The initial full review and observations below used `f6d160c`; the final incremental re-review used exact HEAD `cad79e9` with a clean starting working tree. No application code or tests were edited by this reviewer. At initial review start, the parent packaging process had temporarily removed the three current compiled assets; they were restored byte-for-byte to committed content before initial browser inspection.
+
+- **Final revision checks, independently rerun at `cad79e9`**: `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_provider_operations_019.py tests/test_provider_interoperability.py tests/test_web.py`: **44 passed**, one Starlette/httpx deprecation warning, 13.05 seconds. `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/e2e/test_browser_acceptance.py::test_direct_providers_route_bootstraps_capabilities`: **1 passed**, 1.65 seconds. Inspected the complete `git diff f6d160c cad79e9`; application changes are confined to extracting the existing capability loader and a stricter shared handler predicate, plus corresponding compiled assets. The earlier migration/backend review remains applicable because backend implementation did not change. The earlier packaged-runtime observation applies to `f6d160c`; the package was not independently requalified against `cad79e9`.
 
 - Independently ran `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests --ignore=tests/e2e`: **261 passed**, one Starlette/httpx deprecation warning, 28.06 seconds.
 - Independently ran an AST comparison using `git show db373a2:<path>` and `git show f6d160c:<path>` with Python `ast.parse`/`ast.dump`. The broad formatting changes in automation, data connections, Data Studio, Integration Hub, mailbox operations, and programmable operations are semantically equivalent; inbound-source behavior changes only at the OAuth-resolution seam. Actual provider/store/credential/SMTP/web changes were inspected directly against their surrounding contracts.
