@@ -3,12 +3,12 @@
 Date: 2026-10-30
 Scope: local synthetic qualification on branch `feat/mailforge-operational-assurance-032`.
 
-Latest source qualification revision: `33c7529`.
+Latest source qualification revision: `327a98b`.
 
 ## Commands and results
 
-- `PYTHONPATH=src .venv/bin/pytest -q --ignore=tests/e2e`: 273 passed, one existing Starlette/httpx deprecation warning.
-- `PYTHONPATH=src .venv/bin/pytest -q tests/test_local_application.py tests/test_operational_assurance_032.py tests/test_web.py`: 30 passed, one existing Starlette/httpx deprecation warning.
+- `PYTHONPATH=src .venv/bin/pytest -q --ignore=tests/e2e`: 274 passed, one existing Starlette/httpx deprecation warning.
+- `PYTHONPATH=src .venv/bin/pytest -q tests/test_local_application.py tests/test_operational_assurance_032.py tests/test_web.py`: 31 passed, one existing Starlette/httpx deprecation warning.
 - `PYTHONPATH=src .venv/bin/pytest -q tests/e2e`: 8 passed.
 - `.venv/bin/ruff check src tests`: passed.
 - `npm run build` and the configured frontend lint/oxlint command: passed; existing React warnings only.
@@ -22,6 +22,7 @@ Latest source qualification revision: `33c7529`.
 - Interrupted backup publication left no destination archive or temporary publication file. Concurrent same-destination backups produced one successful archive and one explicit destination-exists result.
 - Backup validation, staged restore readback, SQLite integrity, incident persistence, and unavailable Keychain-reference behavior were exercised with synthetic data.
 - Source query failures appeared as `source_evidence` action-required health evidence and resolved to a durable `incident_resolved` event after recovery. Acknowledged active incidents remain acknowledged until the condition changes.
+- Active durable jobs without an authoritative heartbeat are classified `unknown`; stale `updated_at` activity is reported as stale activity, not proof of liveness or progress.
 
 ## UI and package observations
 
