@@ -158,3 +158,28 @@ def test_health_exposes_source_failures_and_reopens_persistent_incidents(tmp_pat
         item for item in resolved["items"] if item.get("subsystem") == "source_evidence"
     )
     assert source_incident["disposition"] == "resolved"
+
+
+def test_unknown_storage_does_not_resolve_prior_incident(tmp_path: Path, monkeypatch) -> None:
+    data = DataDirectory.from_path(tmp_path / "data").initialize()
+    service = OperationalAssuranceService(CampaignStore(data.database), data)
+    healthy = service.health()
+    action_required = dict(healthy)
+    action_required["checks"] = [
+        *healthy["checks"],
+        {"key": "storage", "state": "action_required", "free_ratio": 0.01},
+    ]
+    service._persist_incidents(action_required)
+
+    def unavailable_disk_usage(_path):
+        raise OSError("storage observation unavailable")
+
+    monkeypatch.setattr(
+        "mailforge.application.operational_assurance.shutil.disk_usage",
+        unavailable_disk_usage,
+    )
+    unknown = service.health()
+    service._persist_incidents(unknown)
+    incidents = service.incidents(include_acknowledged=True)
+    storage = next(item for item in incidents["items"] if item.get("subsystem") == "storage")
+    assert storage["disposition"] == "open"

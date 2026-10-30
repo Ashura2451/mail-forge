@@ -474,10 +474,11 @@ class OperationalAssuranceService:
                         "incident_observed",
                         {**incident, "disposition": "open", "signature": signature},
                     )
-                elif previous and previous["event_type"] in {
-                    "incident_observed",
-                    "incident_acknowledged",
-                }:
+                elif (
+                    check["state"] == "healthy"
+                    and previous
+                    and previous["event_type"] in {"incident_observed", "incident_acknowledged"}
+                ):
                     self.store.record_event(
                         connection,
                         "operational_incident",
@@ -485,15 +486,14 @@ class OperationalAssuranceService:
                         "incident_resolved",
                         {**incident, "disposition": "resolved"},
                     )
-            current_ids = {
-                self._incident(check["key"], check["state"], None)["id"]
+            current_states = {
+                self._incident(check["key"], check["state"], None)["id"]: check["state"]
                 for check in result["checks"]
             }
             for incident_id, row in latest.items():
-                if incident_id in current_ids or row["event_type"] not in {
-                    "incident_observed",
-                    "incident_acknowledged",
-                }:
+                if incident_id in current_states:
+                    continue
+                if row["event_type"] not in {"incident_observed", "incident_acknowledged"}:
                     continue
                 payload = json.loads(row["payload_json"] or "{}")
                 self.store.record_event(
