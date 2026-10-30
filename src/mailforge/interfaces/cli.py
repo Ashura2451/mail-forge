@@ -1106,10 +1106,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.host not in {"127.0.0.1", "localhost", "::1"}:
             raise SystemExit("mailforge serve only binds to a loopback host")
         try:
-            with DatabaseProcessLock(database):
-                DataDirectory.from_path(
-                    data_directory
-                ).initialize().cleanup_backup_temporary_files()
+            data = DataDirectory.from_path(data_directory)
+            with DatabaseProcessLock(data.database):
+                data.initialize().cleanup_backup_temporary_files()
                 uvicorn.run(
                     create_app(database, frontend_dir=frontend_dir, data_directory=data_directory),
                     host=args.host,
