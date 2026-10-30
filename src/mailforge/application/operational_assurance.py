@@ -64,30 +64,61 @@ class OperationalAssuranceService:
         """Keep diagnostics useful without copying secrets or local paths."""
 
         text = str(value or "")
+        if not text:
+            return ""
         if re.search(r"(?i)(password|secret|token|api[_ -]?key|credential|bearer)", text):
             return "[redacted-sensitive-error]"
-        text = re.sub(r"/(?:Users|private|var|tmp|home|Volumes)/[^\s'\"]+", "[local-path]", text)
-        return text[:300]
+        if re.search(r"/(?:Users|private|var|tmp|home|Volumes|opt)/", text):
+            return "[redacted-local-path]"
+        lowered = text.lower()
+        for label, terms in (
+            ("timeout", ("timeout", "timed out")),
+            ("interrupted", ("interrupt", "abandoned", "terminated")),
+            ("validation", ("invalid", "validation", "schema")),
+            ("authorization", ("authorization", "forbidden", "permission")),
+        ):
+            if any(term in lowered for term in terms):
+                return f"operation-error:{label}"
+        return "operation-error"
 
     def _job_rows(self, *, limit: int | None = 500) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         tables = (
-            ("campaigns", "campaigns", "failure_reason"),
-            ("list_processing_jobs", "list_tools", "error_message"),
-            ("data_studio_jobs", "data_studio", "error_message"),
-            ("data_connection_snapshots", "data_connections", "error_message"),
-            ("automation_runs", "automation", "failure_reason"),
-            ("integration_webhook_deliveries", "integration", "last_error"),
-            ("provider_test_submissions", "providers", "detail"),
-            ("inbound_runs", "inbound", "error_message"),
-            ("inbound_mailbox_actions", "inbound", "error_message"),
+            ("campaigns", "campaigns", "failure_reason", "created_at", "updated_at"),
+            ("list_processing_jobs", "list_tools", "error_message", "created_at", "updated_at"),
+            ("data_studio_jobs", "data_studio", "error_message", "created_at", "updated_at"),
+            (
+                "data_connection_snapshots",
+                "data_connections",
+                "error_message",
+                "created_at",
+                "updated_at",
+            ),
+            ("automation_runs", "automation", "failure_reason", "created_at", "updated_at"),
+            (
+                "integration_webhook_deliveries",
+                "integration",
+                "last_error",
+                "created_at",
+                "updated_at",
+            ),
+            ("provider_test_submissions", "providers", "detail", "created_at", "updated_at"),
+            (
+                "inbound_runs",
+                "inbound",
+                "error_message",
+                "started_at",
+                "COALESCE(finished_at, started_at)",
+            ),
+            ("inbound_mailbox_actions", "inbound", "error_message", "created_at", "updated_at"),
         )
         with self.store.connect() as connection:
-            for table, subsystem, error_column in tables:
+            for table, subsystem, error_column, created_column, updated_column in tables:
                 try:
                     limit_clause = f" LIMIT {limit}" if limit is not None else ""
                     result = connection.execute(
-                        f"SELECT id, status, created_at, updated_at, "
+                        f"SELECT id, status, {created_column} AS created_at, "
+                        f"{updated_column} AS updated_at, "
                         f"{error_column} AS error "
                         f"FROM {table} ORDER BY updated_at DESC{limit_clause}"
                     ).fetchall()

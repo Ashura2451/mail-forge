@@ -889,40 +889,37 @@ class WebRuntime:
         self.workers.shutdown()
         self.automation_workers.shutdown()
 
-    def status(self) -> dict[str, Any]:
+    def worker_status(self) -> dict[str, Any]:
+        return {
+            "campaigns_active": len(self.workers._running),
+            "automations_active": len(self.automation_workers._running),
+            "scheduler": "running" if self.campaign_scheduler.thread.is_alive() else "stopped",
+            "automation_scheduler": (
+                "running" if self.automation_runtime.thread.is_alive() else "stopped"
+            ),
+            "credential_store": self.credential_resolver.readiness(),
+        }
+
+    def liveness(self) -> dict[str, Any]:
+        """Cheap launcher probe; detailed assurance remains an explicit operation."""
+
         status = application_status(self.data_directory)
         status.update(
             {
                 "runtime_id": self.runtime_id,
                 "started_at": self.started_at,
                 "pid": os.getpid(),
-                "worker_status": {
-                    "campaigns_active": len(self.workers._running),
-                    "automations_active": len(self.automation_workers._running),
-                    "scheduler": "running"
-                    if self.campaign_scheduler.thread.is_alive()
-                    else "stopped",
-                    "automation_scheduler": (
-                        "running" if self.automation_runtime.thread.is_alive() else "stopped"
-                    ),
-                    "credential_store": self.credential_resolver.readiness(),
-                },
+                "worker_status": self.worker_status(),
                 "loopback_only": True,
                 "simulation_mode": True,
-                "operational": self.operational_assurance.health(
-                    worker_status={
-                        "campaigns_active": len(self.workers._running),
-                        "automations_active": len(self.automation_workers._running),
-                        "scheduler": "running"
-                        if self.campaign_scheduler.thread.is_alive()
-                        else "stopped",
-                        "automation_scheduler": "running"
-                        if self.automation_runtime.thread.is_alive()
-                        else "stopped",
-                        "credential_store": self.credential_resolver.readiness(),
-                    }
-                ),
             }
+        )
+        return status
+
+    def status(self) -> dict[str, Any]:
+        status = self.liveness()
+        status["operational"] = self.operational_assurance.health(
+            worker_status=status["worker_status"]
         )
         return status
 
@@ -1148,7 +1145,7 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
-        return runtime.status()
+        return runtime.liveness()
 
     @app.get(f"{API_PREFIX}/session")
     async def session_endpoint():
@@ -1197,7 +1194,7 @@ def create_app(
 
     @app.get(f"{API_PREFIX}/operations/health")
     async def operations_health():
-        return runtime.operational_assurance.health(worker_status=runtime.status()["worker_status"])
+        return runtime.operational_assurance.health(worker_status=runtime.worker_status())
 
     @app.get(f"{API_PREFIX}/operations/jobs")
     async def operations_jobs(subsystem: str | None = None, status: str | None = None):
@@ -1227,14 +1224,12 @@ def create_app(
     async def operations_incidents(include_acknowledged: bool = False):
         return runtime.operational_assurance.incidents(
             include_acknowledged=include_acknowledged,
-            worker_status=runtime.status()["worker_status"],
+            worker_status=runtime.worker_status(),
         )
 
     @app.post(f"{API_PREFIX}/operations/health-check")
     async def operations_health_check():
-        return runtime.operational_assurance.health_check(
-            worker_status=runtime.status()["worker_status"]
-        )
+        return runtime.operational_assurance.health_check(worker_status=runtime.worker_status())
 
     @app.post(f"{API_PREFIX}/operations/incidents/{{incident_id}}/acknowledge")
     async def acknowledge_operational_incident(incident_id: str):
@@ -1246,7 +1241,7 @@ def create_app(
     @app.get(f"{API_PREFIX}/operations/diagnostic-export")
     async def operational_diagnostic_export():
         return runtime.operational_assurance.diagnostic_export(
-            worker_status=runtime.status()["worker_status"]
+            worker_status=runtime.worker_status()
         )
 
     @app.get(f"{API_PREFIX}/runtime/backups")

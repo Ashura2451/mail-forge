@@ -316,6 +316,22 @@ class KeychainCredentialResolver:
         return library, item, data, status if status else int(length.value)
 
     @staticmethod
+    def _release_item(item: ctypes.c_void_p) -> None:
+        """Release the retained Keychain item reference returned by Security.framework."""
+
+        if not item:
+            return
+        try:
+            core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+            core.CFRelease.argtypes = [ctypes.c_void_p]
+            core.CFRelease.restype = None
+            core.CFRelease(item)
+        except OSError:
+            # The native path is only available on macOS; injected runners never
+            # reach this helper and should remain fully testable elsewhere.
+            return
+
+    @staticmethod
     def _account(reference: str) -> str:
         match = _REFERENCE.fullmatch(reference)
         if match is None or match["kind"] != "keychain":
@@ -343,14 +359,16 @@ class KeychainCredentialResolver:
         account = self._account(reference)
         if not self._injected_runner:
             library, item, data, result = self._native_find(account)
-            if result <= 0 or not data:
-                raise CredentialError("macOS Keychain item is unavailable")
             try:
+                if result <= 0 or not data:
+                    raise CredentialError("macOS Keychain item is unavailable")
                 value = ctypes.string_at(data, result).decode()
             except (UnicodeDecodeError, ValueError) as error:
                 raise CredentialError("macOS Keychain item is invalid") from error
             finally:
-                library.SecKeychainItemFreeContent(None, data)
+                if data:
+                    library.SecKeychainItemFreeContent(None, data)
+                self._release_item(item)
             return CredentialMaterial(value)
         value = self._run(
             ["/usr/bin/security", "find-generic-password", "-s", self.service, "-a", account, "-w"]
@@ -387,13 +405,17 @@ class KeychainCredentialResolver:
             )
             if status == -25299:
                 _library, existing, data, found = self._native_find(account)
-                if found <= 0 or not existing:
-                    raise CredentialError("macOS Keychain item cannot be replaced")
-                status = library.SecKeychainItemModifyAttributesAndData(
-                    existing, None, len(material.secret.encode()), material.secret.encode()
-                )
-                if data:
-                    library.SecKeychainItemFreeContent(None, data)
+                try:
+                    if found <= 0 or not existing:
+                        raise CredentialError("macOS Keychain item cannot be replaced")
+                    status = library.SecKeychainItemModifyAttributesAndData(
+                        existing, None, len(material.secret.encode()), material.secret.encode()
+                    )
+                finally:
+                    if data:
+                        _library.SecKeychainItemFreeContent(None, data)
+                    self._release_item(existing)
+            self._release_item(item)
             if status:
                 raise CredentialError("macOS Keychain item could not be stored")
             return
@@ -415,12 +437,15 @@ class KeychainCredentialResolver:
         account = self._account(reference)
         if not self._injected_runner:
             library, item, data, result = self._native_find(account)
-            if data:
-                library.SecKeychainItemFreeContent(None, data)
-            if result <= 0 or not item:
-                return
-            if library.SecKeychainItemDelete(item):
-                raise CredentialError("macOS Keychain item could not be revoked")
+            try:
+                if result <= 0 or not item:
+                    return
+                if library.SecKeychainItemDelete(item):
+                    raise CredentialError("macOS Keychain item could not be revoked")
+            finally:
+                if data:
+                    library.SecKeychainItemFreeContent(None, data)
+                self._release_item(item)
             return
         self._run(
             ["/usr/bin/security", "delete-generic-password", "-s", self.service, "-a", account]
