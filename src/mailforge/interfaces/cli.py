@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
 from mailforge.application.automation import AutomationService
@@ -1107,7 +1108,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("mailforge serve only binds to a loopback host")
         try:
             data = DataDirectory.from_path(data_directory)
-            with DatabaseProcessLock(data.database):
+            with ExitStack() as locks:
+                locks.enter_context(DatabaseProcessLock(data.database))
+                if database.resolve() != data.database.resolve():
+                    locks.enter_context(DatabaseProcessLock(database))
                 data.initialize().cleanup_backup_temporary_files()
                 uvicorn.run(
                     create_app(database, frontend_dir=frontend_dir, data_directory=data_directory),
