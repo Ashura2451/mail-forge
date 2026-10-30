@@ -571,16 +571,6 @@ class ProviderOperationsService:
         message_revision_id: str | None = None,
     ) -> dict[str, Any]:
         self._require_grant(ref, ProviderOperation.CONTROLLED_TEST_SEND, grant)
-        existing = next(
-            (
-                item
-                for item in self.store.list_provider_tests(ref)
-                if item["idempotency_key"] == idempotency_key
-            ),
-            None,
-        )
-        if existing is not None:
-            return existing
         account = self.account(ref)
         if not account["profile_enabled"] or not account["outbound_enabled"]:
             raise PermissionError("provider account is disabled for outbound operations")

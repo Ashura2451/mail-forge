@@ -340,6 +340,36 @@ def test_idempotency_key_cannot_cross_accounts(tmp_path, monkeypatch):
     assert len(pool.calls) == 1
 
 
+def test_idempotency_key_cannot_change_request_on_same_account(tmp_path, monkeypatch):
+    store = CampaignStore(tmp_path / "same-account-key.sqlite3")
+    service = ProviderOperationsService(store)
+    service.register(_profile(), sender_email="sender@example.com")
+    pool = _FakePool()
+    monkeypatch.setattr(service.providers, "smtp_pool", lambda *args, **kwargs: pool)
+    resolver = MappingCredentialResolver({"test:provider": "synthetic-password"})
+    grant = _grant(service, "local")
+    service.controlled_test_send(
+        ref="local",
+        sender="sender@example.com",
+        recipient="owned@example.com",
+        message="Subject: fixture\r\n\r\nbody",
+        idempotency_key="same-account-key",
+        grant=grant,
+        resolver=resolver,
+    )
+    with pytest.raises(PermissionError, match="idempotency key"):
+        service.controlled_test_send(
+            ref="local",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            message="Subject: changed\r\n\r\nbody",
+            idempotency_key="same-account-key",
+            grant=grant,
+            resolver=resolver,
+        )
+    assert len(pool.calls) == 1
+
+
 def test_refresh_without_rotation_retains_prior_refresh_token():
     resolver = MappingCredentialResolver(
         {
