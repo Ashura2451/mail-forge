@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
 from mailforge.application.automation import AutomationService
@@ -906,12 +907,15 @@ def main(argv: list[str] | None = None) -> int:
             data.initialize()
             print(json.dumps({"initialized": True, "data_directory_id": data.identity}))
         elif args.app_command == "backup":
-            print(json.dumps({"backup": str(create_backup(data, args.destination))}))
+            with DatabaseProcessLock(data.database):
+                data.initialize().cleanup_backup_temporary_files()
+                print(json.dumps({"backup": str(create_backup(data, args.destination))}))
         elif args.app_command == "validate-backup":
             print(json.dumps(validate_backup(args.backup), indent=2))
         elif args.app_command == "restore":
-            restored = restore_backup(args.backup, args.destination, replace=args.replace)
-            print(json.dumps({"restored": str(restored)}))
+            with DatabaseProcessLock(args.destination / "mailforge.sqlite3"):
+                restored = restore_backup(args.backup, args.destination, replace=args.replace)
+                print(json.dumps({"restored": str(restored)}))
         else:
             application = LocalApplication(data, port=args.port)
             if args.app_command == "start":
@@ -1104,7 +1108,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.host not in {"127.0.0.1", "localhost", "::1"}:
             raise SystemExit("mailforge serve only binds to a loopback host")
         try:
-            with DatabaseProcessLock(database):
+            data = DataDirectory.from_path(data_directory)
+            with ExitStack() as locks:
+                locks.enter_context(DatabaseProcessLock(data.database))
+                data.initialize().cleanup_backup_temporary_files()
                 uvicorn.run(
                     create_app(database, frontend_dir=frontend_dir, data_directory=data_directory),
                     host=args.host,
@@ -1354,7 +1361,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.campaign_command == "restore":
             from mailforge.infrastructure.campaign_store import CampaignStore
 
-            destination = CampaignStore.restore_from(args.source, args.destination)
+            with DatabaseProcessLock(args.destination):
+                destination = CampaignStore.restore_from(args.source, args.destination)
             print(json.dumps({"restored": str(destination)}))
         elif args.campaign_command == "translate-legacy":
             payload = load_legacy_configuration(args.config).to_dict()
@@ -1408,8 +1416,9 @@ def main(argv: list[str] | None = None) -> int:
                 email_standards=EmailStandardsService(service.store),
             )
             if args.campaign_command == "backup":
-                destination = service.store.backup_to(args.destination)
-                print(json.dumps({"backup": str(destination)}))
+                with DatabaseProcessLock(args.database):
+                    destination = service.store.backup_to(args.destination)
+                    print(json.dumps({"backup": str(destination)}))
             elif args.campaign_command == "rehearse-migration":
                 print(
                     json.dumps(

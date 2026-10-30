@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -656,8 +657,9 @@ def test_inbound_workbench_api_supports_detail_rules_extraction_and_drafts(
 
 def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> None:
     database = tmp_path / "runtime.sqlite3"
-    first = DatabaseProcessLock(database)
-    second = DatabaseProcessLock(database)
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    second = DatabaseProcessLock(database, lock_path=lock_path)
     first.acquire()
     try:
         try:
@@ -671,14 +673,46 @@ def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> No
         second.release()
 
 
+def test_database_process_lock_resolves_database_aliases(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    aliases = tmp_path / "aliases"
+    aliases.mkdir()
+    alias = aliases / "alias.sqlite3"
+    database.touch()
+    alias.symlink_to(database)
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    second = DatabaseProcessLock(alias, lock_path=lock_path)
+    first.acquire()
+    try:
+        with pytest.raises(ProcessLockError):
+            second.acquire()
+    finally:
+        first.release()
+        second.release()
+
+    hardlink = aliases / "hardlink.sqlite3"
+    os.link(database, hardlink)
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    second = DatabaseProcessLock(hardlink, lock_path=lock_path)
+    first.acquire()
+    try:
+        with pytest.raises(ProcessLockError):
+            second.acquire()
+    finally:
+        first.release()
+        second.release()
+
+
 def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
     database = tmp_path / "cross-process.sqlite3"
     marker = tmp_path / "holder.ready"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
     holder_code = (
         "import time; "
         "from pathlib import Path; "
         "from mailforge.interfaces.process_lock import DatabaseProcessLock; "
-        f"lock=DatabaseProcessLock(r'{database}'); lock.acquire(); "
+        f"lock=DatabaseProcessLock(r'{database}', lock_path=r'{lock_path}'); lock.acquire(); "
         f"Path(r'{marker}').write_text('ready'); time.sleep(2); lock.release()"
     )
     environment = os.environ.copy()
@@ -695,7 +729,7 @@ def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
                 sys.executable,
                 "-c",
                 f"from mailforge.interfaces.process_lock import DatabaseProcessLock; "
-                f"DatabaseProcessLock(r'{database}').acquire()",
+                f"DatabaseProcessLock(r'{database}', lock_path=r'{lock_path}').acquire()",
             ],
             env=environment,
             capture_output=True,
@@ -706,6 +740,59 @@ def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+def test_database_process_lock_rejects_distinct_databases_under_single_runtime_contract(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(tmp_path / "first.sqlite3", lock_path=lock_path)
+    second = DatabaseProcessLock(tmp_path / "second.sqlite3", lock_path=lock_path)
+    first.acquire()
+    try:
+        with pytest.raises(ProcessLockError):
+            second.acquire()
+    finally:
+        first.release()
+        second.release()
+
+
+def test_database_process_lock_identity_is_stable_across_creation_and_replacement(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    first.acquire()
+    try:
+        database.touch()
+        with pytest.raises(ProcessLockError):
+            DatabaseProcessLock(database, lock_path=lock_path).acquire()
+
+        replacement = tmp_path / "replacement.sqlite3"
+        replacement.write_bytes(b"replacement")
+        os.replace(replacement, database)
+        with pytest.raises(ProcessLockError):
+            DatabaseProcessLock(database, lock_path=lock_path).acquire()
+    finally:
+        first.release()
+
+
+def test_database_process_lock_keeps_directory_authority_when_marker_is_replaced(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    first.acquire()
+    try:
+        replacement = lock_path.with_name("replacement.lock")
+        replacement.write_bytes(b"")
+        os.replace(replacement, lock_path)
+        with pytest.raises(ProcessLockError):
+            DatabaseProcessLock(database, lock_path=lock_path).acquire()
+    finally:
+        first.release()
 
 
 def test_web_runtime_reconciles_running_campaign_after_restart(tmp_path: Path) -> None:
@@ -739,3 +826,70 @@ def test_web_runtime_reconciles_running_campaign_after_restart(tmp_path: Path) -
         ]
     finally:
         second.close()
+
+
+def test_campaign_restore_cli_respects_runtime_ownership(tmp_path: Path) -> None:
+    from mailforge.infrastructure.campaign_store import CampaignStore
+
+    source = tmp_path / "source.sqlite3"
+    destination = tmp_path / "destination.sqlite3"
+    CampaignStore(source)
+    CampaignStore(destination)
+    marker = tmp_path / "holder.ready"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    environment["HOME"] = str(tmp_path / "home")
+    holder_code = (
+        "import time; "
+        "from pathlib import Path; "
+        "from mailforge.interfaces.process_lock import DatabaseProcessLock; "
+        f"lock=DatabaseProcessLock(r'{destination}'); lock.acquire(); "
+        f"Path(r'{marker}').write_text('ready'); time.sleep(3); lock.release()"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", holder_code], env=environment)
+    try:
+        for _ in range(40):
+            if marker.is_file():
+                break
+            time.sleep(0.025)
+        assert marker.is_file()
+        contender = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "mailforge",
+                "campaign",
+                "restore",
+                "--source",
+                str(source),
+                "--destination",
+                str(destination),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        assert contender.returncode != 0
+        assert "already owns database" in contender.stderr
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+
+def test_serve_custom_database_does_not_reacquire_global_lock(tmp_path: Path) -> None:
+    from mailforge.interfaces.cli import main
+
+    custom_database = tmp_path / "data" / "custom.sqlite3"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    with (
+        patch(
+            "mailforge.interfaces.process_lock.default_runtime_lock_path",
+            return_value=lock_path,
+        ),
+        patch("mailforge.interfaces.web.create_app", return_value=object()) as create_app,
+        patch("uvicorn.run") as run,
+    ):
+        main(["serve", "--database", str(custom_database)])
+
+    assert create_app.called
+    assert run.called

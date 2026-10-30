@@ -1,5 +1,28 @@
 # System changelog
 
+## 2026-10-30 — Operational assurance 032 qualification closure work
+
+- Added explicit operational source-failure observations so failed job/count,
+  provider, and backup evidence cannot collapse into empty healthy results.
+- Made backup publication atomic through a same-directory temporary archive and
+  restart cleanup of orphaned publish files.
+- Preserved ambiguous provider outcomes separately from explicit refusal counts.
+- Added bounded local qualification evidence for process recovery, staged restore,
+  packaged Keychain lifecycle, Maintenance screenshots, quota truthfulness, and
+  representative performance measurements.
+- Closed the ownership and health-correctness blockers: runtime locking is now
+  stable and application-scoped across database aliases, creation, replacement,
+  and backup/restore; active work without authoritative heartbeat evidence is
+  `unknown`; and unknown required evidence cannot aggregate to `healthy`.
+- Recorded the single-runtime ownership contract in `docs/runtime-ownership.md`;
+  separate simultaneous database runtimes remain intentionally unsupported.
+- Corrected custom-database server startup to acquire the application-scoped
+  runtime authority exactly once, with a CLI regression for the supported
+  custom-database path.
+- Local synthetic 032 acceptance and a distinct-model governance review are
+  complete; real providers, production credentials, signing, notarization, and
+  milestone 033 remain out of scope.
+
 ## 2026-10-29 — Mailbox operations 030
 
 - Extended the existing inbound/provider authorities with migration 23 folder

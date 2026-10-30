@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,43 @@ def test_tampered_backup_is_refused(tmp_path: Path) -> None:
     with zipfile.ZipFile(malformed, "w") as archive:
         archive.writestr("manifest.json", "[]")
     assert list_backups(data)[0]["valid"] is False
+
+
+def test_interrupted_backup_does_not_publish_partial_archive(tmp_path: Path, monkeypatch) -> None:
+    data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
+    CampaignStore(data.database)
+    import mailforge.application.local_application as local_application
+
+    original_write = local_application.zipfile.ZipFile.writestr
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(local_application.zipfile.ZipFile, "writestr", interrupt)
+    destination = data.backups / "interrupted.zip"
+    with pytest.raises(KeyboardInterrupt):
+        create_backup(data, destination)
+    assert not destination.exists()
+    assert not list(data.backups.glob(".mailforge-backup-publish-*.tmp"))
+    monkeypatch.setattr(local_application.zipfile.ZipFile, "writestr", original_write)
+
+
+def test_concurrent_backup_publication_keeps_one_destination(tmp_path: Path) -> None:
+    data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
+    CampaignStore(data.database)
+    destination = data.backups / "concurrent.zip"
+
+    def make_backup() -> str:
+        try:
+            return str(create_backup(data, destination))
+        except FileExistsError:
+            return "exists"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: make_backup(), range(2)))
+    assert results.count("exists") == 1
+    assert str(destination) in results
+    assert validate_backup(destination)["valid"] is True
 
 
 def test_newer_schema_fails_closed(tmp_path: Path) -> None:
