@@ -870,6 +870,7 @@ function Providers({ data, onRun, sessionReady }: { data: ApiRecord, onRun: (act
   const newTestKey = () => `test-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   const [testKey, setTestKey] = useState(newTestKey)
   const [testAuthorization, setTestAuthorization] = useState('')
+  const [authorizedRequest, setAuthorizedRequest] = useState('')
   const [testPurpose, setTestPurpose] = useState('')
   const [testExpiry, setTestExpiry] = useState(() => new Date(Date.now() + 60 * 60 * 1000).toISOString())
   const [testConfirmed, setTestConfirmed] = useState(false)
@@ -905,10 +906,11 @@ function Providers({ data, onRun, sessionReady }: { data: ApiRecord, onRun: (act
   }
   const changeKind = (nextKind: string) => { setKind(nextKind); applyPreset(preset, nextKind) }
   const create = () => onRun(() => api('/providers', { method: 'POST', body: JSON.stringify({ ref, kind, host, port: Number(port), username, credential_ref: credentialRef, tls_mode: tlsMode, auth_method: authMethod, mailbox, display_name: ref, sender_email: username, inbound_enabled: kind === 'imap' }) }), 'Provider account saved without a network connection')
-  const selectTestAccount = (profile: ApiRecord) => { setTestRef(profile.ref); setTestSender(profile.sender_email || profile.username || ''); setTestAuthorization(''); setTestKey(newTestKey()); setGrantIssued(false) }
-  const issueGrant = () => onRun(async () => { const result = await api<ApiRecord>(`/providers/${testRef}/grants`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, purpose: testPurpose, expires_at: testExpiry }) }); setTestAuthorization(String(result.authorization_ref || '')); setTestKey(newTestKey()); setGrantIssued(true); return result }, 'Server-issued one-submission authorization prepared')
+  const testRequestFingerprint = () => JSON.stringify({ testRef, testSender, testRecipient, testMessage, testPurpose, testExpiry })
+  const selectTestAccount = (profile: ApiRecord) => { setTestRef(profile.ref); setTestSender(profile.sender_email || profile.username || ''); setTestAuthorization(''); setAuthorizedRequest(''); setTestKey(newTestKey()); setGrantIssued(false) }
+  const issueGrant = () => onRun(async () => { const result = await api<ApiRecord>(`/providers/${testRef}/grants`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, purpose: testPurpose, expires_at: testExpiry }) }); setTestAuthorization(String(result.authorization_ref || '')); setAuthorizedRequest(testRequestFingerprint()); setTestKey(newTestKey()); setGrantIssued(true); return result }, 'Server-issued one-submission authorization prepared')
   const runTest = () => {
-    if (!testConfirmed) return
+    if (!testConfirmed || authorizedRequest !== testRequestFingerprint()) return
     return onRun(() => api(`/providers/${testRef}/test-send`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, message: testMessage, idempotency_key: testKey, authorization_ref: testAuthorization, purpose: testPurpose, expires_at: testExpiry }) }), 'Controlled test result recorded')
   }
   const configureInbound = () => onRun(() => api(`/providers/${inboundRef}/inbound`, { method: 'POST', body: JSON.stringify({ mailbox, max_fetch: Number(maxFetch), sync_enabled: syncEnabled, mutation_enabled: mutationEnabled }) }), 'Inbound configuration saved')
