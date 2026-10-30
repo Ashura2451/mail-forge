@@ -1363,7 +1363,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.campaign_command == "restore":
             from mailforge.infrastructure.campaign_store import CampaignStore
 
-            destination = CampaignStore.restore_from(args.source, args.destination)
+            with DatabaseProcessLock(args.destination):
+                destination = CampaignStore.restore_from(args.source, args.destination)
             print(json.dumps({"restored": str(destination)}))
         elif args.campaign_command == "translate-legacy":
             payload = load_legacy_configuration(args.config).to_dict()

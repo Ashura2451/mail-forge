@@ -825,3 +825,51 @@ def test_web_runtime_reconciles_running_campaign_after_restart(tmp_path: Path) -
         ]
     finally:
         second.close()
+
+
+def test_campaign_restore_cli_respects_runtime_ownership(tmp_path: Path) -> None:
+    from mailforge.infrastructure.campaign_store import CampaignStore
+
+    source = tmp_path / "source.sqlite3"
+    destination = tmp_path / "destination.sqlite3"
+    CampaignStore(source)
+    CampaignStore(destination)
+    marker = tmp_path / "holder.ready"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    environment["HOME"] = str(tmp_path / "home")
+    holder_code = (
+        "import time; "
+        "from pathlib import Path; "
+        "from mailforge.interfaces.process_lock import DatabaseProcessLock; "
+        f"lock=DatabaseProcessLock(r'{destination}'); lock.acquire(); "
+        f"Path(r'{marker}').write_text('ready'); time.sleep(3); lock.release()"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", holder_code], env=environment)
+    try:
+        for _ in range(40):
+            if marker.is_file():
+                break
+            time.sleep(0.025)
+        assert marker.is_file()
+        contender = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "mailforge",
+                "campaign",
+                "restore",
+                "--source",
+                str(source),
+                "--destination",
+                str(destination),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        assert contender.returncode != 0
+        assert "already owns database" in contender.stderr
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
