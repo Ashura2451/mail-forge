@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -183,6 +184,92 @@ class EnvironmentCredentialResolver:
         except CredentialError:
             return False
         return True
+
+    def oauth(self, reference: str) -> OAuthTokenMaterial:
+        return oauth_token_from_material(self.resolve(reference))
+
+
+class KeychainCredentialResolver:
+    """Resolve ``keychain:`` references through macOS Keychain Services.
+
+    The adapter shells out to Apple's `/usr/bin/security` utility so the
+    packaged Python runtime needs no third-party native extension. Secret
+    values remain in memory only and are never included in exception text.
+    """
+
+    service = "com.mailforge.credential"
+
+    def __init__(self, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None):
+        self._runner = runner or subprocess.run
+        self._injected_runner = runner is not None
+
+    @staticmethod
+    def _account(reference: str) -> str:
+        match = _REFERENCE.fullmatch(reference)
+        if match is None or match["kind"] != "keychain":
+            raise CredentialError("only keychain: references are available here")
+        return match["name"]
+
+    def _run(self, args: list[str], *, input_value: str | None = None) -> str:
+        if not self._injected_runner and (
+            os.name != "posix" or not os.path.exists("/usr/bin/security")
+        ):
+            raise CredentialError("macOS Keychain is unavailable")
+        try:
+            result = self._runner(
+                args,
+                input=input_value,
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CredentialError("macOS Keychain operation failed") from error
+        return result.stdout.strip()
+
+    def resolve(self, reference: str) -> CredentialMaterial:
+        account = self._account(reference)
+        value = self._run(
+            ["/usr/bin/security", "find-generic-password", "-s", self.service, "-a", account, "-w"]
+        )
+        try:
+            return CredentialMaterial(value)
+        except CredentialError as error:
+            raise CredentialError("macOS Keychain item is empty") from error
+
+    def available(self, reference: str) -> bool:
+        try:
+            self.resolve(reference)
+        except CredentialError:
+            return False
+        return True
+
+    def store(self, reference: str, secret: str) -> None:
+        account = self._account(reference)
+        CredentialMaterial(secret)
+        self._run(
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-U",
+                "-s",
+                self.service,
+                "-a",
+                account,
+                "-w",
+                secret,
+            ]
+        )
+
+    def revoke(self, reference: str) -> None:
+        account = self._account(reference)
+        self._run(
+            ["/usr/bin/security", "delete-generic-password", "-s", self.service, "-a", account]
+        )
+
+    def rotate(self, reference: str, secret: str) -> None:
+        self.store(reference, secret)
 
     def oauth(self, reference: str) -> OAuthTokenMaterial:
         return oauth_token_from_material(self.resolve(reference))

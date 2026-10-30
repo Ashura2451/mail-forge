@@ -60,6 +60,7 @@ from mailforge.application.mailbox_operations import (
     MailboxOperationsService,
 )
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
+from mailforge.application.operational_assurance import OperationalAssuranceService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.programmable_operations import ProgrammableOperationsService
 from mailforge.application.provider_operations import ProviderOperationsService
@@ -805,6 +806,7 @@ class WebRuntime:
         self.inbound = InboundService(self.store)
         self.providers = ProviderService(self.store)
         self.provider_operations = ProviderOperationsService(self.store)
+        self.operational_assurance = OperationalAssuranceService(self.store, self.data_directory)
         self.reporting = ReportingService(self.store)
         self.email_standards = EmailStandardsService(self.store)
         self.workers = WorkerSupervisor(self.outbound)
@@ -902,6 +904,18 @@ class WebRuntime:
                 },
                 "loopback_only": True,
                 "simulation_mode": True,
+                "operational": self.operational_assurance.health(
+                    worker_status={
+                        "campaigns_active": len(self.workers._running),
+                        "automations_active": len(self.automation_workers._running),
+                        "scheduler": "running"
+                        if self.campaign_scheduler.thread.is_alive()
+                        else "stopped",
+                        "automation_scheduler": "running"
+                        if self.automation_runtime.thread.is_alive()
+                        else "stopped",
+                    }
+                ),
             }
         )
         return status
@@ -1174,6 +1188,33 @@ def create_app(
     @app.get(f"{API_PREFIX}/runtime")
     async def runtime_status():
         return runtime.status()
+
+    @app.get(f"{API_PREFIX}/operations/health")
+    async def operations_health():
+        return runtime.operational_assurance.health(worker_status=runtime.status()["worker_status"])
+
+    @app.get(f"{API_PREFIX}/operations/jobs")
+    async def operations_jobs(subsystem: str | None = None, status: str | None = None):
+        return runtime.operational_assurance.jobs(subsystem=subsystem, status=status)
+
+    @app.get(f"{API_PREFIX}/operations/incidents")
+    async def operations_incidents(include_acknowledged: bool = False):
+        return runtime.operational_assurance.incidents(include_acknowledged=include_acknowledged)
+
+    @app.post(f"{API_PREFIX}/operations/health-check")
+    async def operations_health_check():
+        return runtime.operational_assurance.health_check()
+
+    @app.post(f"{API_PREFIX}/operations/incidents/{{incident_id}}/acknowledge")
+    async def acknowledge_operational_incident(incident_id: str):
+        try:
+            return runtime.operational_assurance.acknowledge(incident_id)
+        except ValueError as error:
+            return _error(400, "incident_invalid", str(error))
+
+    @app.get(f"{API_PREFIX}/operations/diagnostic-export")
+    async def operational_diagnostic_export():
+        return runtime.operational_assurance.diagnostic_export()
 
     @app.get(f"{API_PREFIX}/runtime/backups")
     async def runtime_backups():
