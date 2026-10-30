@@ -292,17 +292,32 @@ class ProviderOperationsService:
         result["external_access"] = False
         return result
 
-    def _require_grant(
-        self, ref: str, operation: ProviderOperation, grant: ExternalOperationGrant | None
-    ) -> ExternalOperationGrant:
-        if grant is None:
-            raise PermissionError("explicit external operation authorization is required")
-        grant.validate()
-        if grant.account_ref != ref or grant.operation is not operation:
-            raise PermissionError("operation authorization does not match the selected account")
+    def issue_grant(
+        self,
+        ref: str,
+        operation: ProviderOperation,
+        *,
+        purpose: str,
+        sender: str | None = None,
+        recipient: str | None = None,
+        expires_at: str,
+    ) -> dict[str, object]:
+        """Issue a server-owned, persisted grant for one bounded operation."""
         profile = self.providers.profile(ref)
-        if grant.host != profile.host or grant.port != profile.port:
-            raise PermissionError("operation authorization endpoint does not match the account")
+        authorization_ref = f"grant-{secrets.token_urlsafe(24)}"
+        grant = ExternalOperationGrant(
+            account_ref=ref,
+            operation=operation,
+            host=profile.host,
+            port=profile.port,
+            purpose=purpose,
+            sender=sender,
+            recipient=recipient,
+            max_submissions=1 if operation is ProviderOperation.CONTROLLED_TEST_SEND else 0,
+            expires_at=expires_at,
+            authorization_ref=authorization_ref,
+        )
+        grant.validate()
         self.store.record_provider_operation_grant(
             account_ref=grant.account_ref,
             operation=grant.operation.value,
@@ -315,6 +330,83 @@ class ProviderOperationsService:
             expires_at=grant.expires_at,
             authorization_ref=grant.authorization_ref,
         )
+        return {
+            "authorization_ref": authorization_ref,
+            "account_ref": ref,
+            "operation": operation.value,
+            "purpose": purpose,
+            "sender": sender,
+            "recipient": recipient,
+            "expires_at": expires_at,
+            "external_access": False,
+        }
+
+    def grant_for_authorization(
+        self,
+        ref: str,
+        operation: ProviderOperation,
+        *,
+        authorization_ref: str,
+        purpose: str,
+        sender: str | None = None,
+        recipient: str | None = None,
+        expires_at: str,
+    ) -> ExternalOperationGrant:
+        """Resolve and match a grant issued by the server-side authority."""
+        row = self.store.get_provider_operation_grant(authorization_ref, account_ref=ref)
+        if row is None:
+            raise PermissionError("operation authorization was not issued by Mailforge")
+        try:
+            granted_operation = ProviderOperation(row["operation"])
+        except ValueError as error:
+            raise PermissionError("operation authorization is invalid") from error
+        grant = ExternalOperationGrant(
+            account_ref=row["account_ref"],
+            operation=granted_operation,
+            host=row["host"],
+            port=int(row["port"]),
+            purpose=row["purpose"],
+            sender=row["sender"],
+            recipient=row["recipient"],
+            max_submissions=int(row["max_submissions"]),
+            expires_at=row["expires_at"],
+            authorization_ref=row["authorization_ref"],
+        )
+        grant.validate()
+        if (
+            grant.operation is not operation
+            or grant.purpose != purpose
+            or grant.sender != sender
+            or grant.recipient != recipient
+            or grant.expires_at != expires_at
+        ):
+            raise PermissionError("operation request does not match its issued authorization")
+        return grant
+
+    def _require_grant(
+        self, ref: str, operation: ProviderOperation, grant: ExternalOperationGrant | None
+    ) -> ExternalOperationGrant:
+        if grant is None:
+            raise PermissionError("explicit external operation authorization is required")
+        grant.validate()
+        if grant.account_ref != ref or grant.operation is not operation:
+            raise PermissionError("operation authorization does not match the selected account")
+        profile = self.providers.profile(ref)
+        if grant.host != profile.host or grant.port != profile.port:
+            raise PermissionError("operation authorization endpoint does not match the account")
+        if self.store.get_provider_operation_grant(grant.authorization_ref, account_ref=ref) is None:
+            self.store.record_provider_operation_grant(
+                account_ref=grant.account_ref,
+                operation=grant.operation.value,
+                host=grant.host,
+                port=grant.port,
+                purpose=grant.purpose,
+                sender=grant.sender,
+                recipient=grant.recipient,
+                max_submissions=grant.max_submissions,
+                expires_at=grant.expires_at,
+                authorization_ref=grant.authorization_ref,
+            )
         return grant
 
     def diagnostic(

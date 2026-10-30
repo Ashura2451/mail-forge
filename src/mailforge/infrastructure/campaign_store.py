@@ -2673,6 +2673,21 @@ class CampaignStore:
         with self.connect() as connection:
             return [dict(row) for row in connection.execute(query, parameters)]
 
+    def get_provider_operation_grant(
+        self, authorization_ref: str, *, account_ref: str | None = None
+    ) -> dict[str, Any] | None:
+        _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
+        query = "SELECT * FROM provider_operation_grants WHERE authorization_ref = ?"
+        parameters: tuple[Any, ...] = (authorization_ref,)
+        if account_ref is not None:
+            _assert_safe_reference(account_ref, "provider_grant.account_ref")
+            query += " AND account_ref = ?"
+            parameters += (account_ref,)
+        query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+        with self.connect() as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return dict(row) if row is not None else None
+
     def get_provider_profile(self, ref: str) -> sqlite3.Row:
         _assert_safe_reference(ref, "provider_profile.ref")
         with self.connect() as connection:

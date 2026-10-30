@@ -11,6 +11,7 @@ import time
 from email.message import EmailMessage
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mailforge.domain.campaign import CampaignStatus
@@ -18,19 +19,23 @@ from mailforge.interfaces.process_lock import DatabaseProcessLock, ProcessLockEr
 from mailforge.interfaces.web import WebRuntime, create_app
 
 
-def _client(tmp_path: Path) -> tuple[TestClient, dict[str, str]]:
+def _client(tmp_path: Path, request: pytest.FixtureRequest) -> tuple[TestClient, dict[str, str]]:
     client = TestClient(
         create_app(
             tmp_path / "mailforge.sqlite3",
             allowed_hosts={"testserver", "127.0.0.1", "localhost", "::1"},
         )
     )
+    client.__enter__()
+    request.addfinalizer(lambda: client.__exit__(None, None, None))
     session = client.get("/api/v1/session")
     return client, {"x-mailforge-csrf": session.json()["csrf_token"]}
 
 
-def test_local_session_requires_csrf_and_rejects_non_loopback_host(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_local_session_requires_csrf_and_rejects_non_loopback_host(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     assert client.post("/api/v1/lists", json={"name": "blocked"}).status_code == 403
     assert (
         client.post(
@@ -43,8 +48,10 @@ def test_local_session_requires_csrf_and_rejects_non_loopback_host(tmp_path: Pat
     assert client.get("/api/v1/status", headers={"host": "evil.example"}).status_code == 400
 
 
-def test_runtime_setup_health_and_application_backup_routes(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_runtime_setup_health_and_application_backup_routes(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     health = client.get("/healthz")
     setup = client.get("/api/v1/setup")
     assert health.status_code == 200
@@ -68,8 +75,10 @@ def test_runtime_setup_health_and_application_backup_routes(tmp_path: Path) -> N
     assert backups.json()["items"][0]["valid"] is True
 
 
-def test_local_api_runs_contact_campaign_lifecycle(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_local_api_runs_contact_campaign_lifecycle(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     created = client.post("/api/v1/lists", headers=headers, json={"name": "Audience"})
     assert created.status_code == 200
     list_id = created.json()["id"]
@@ -119,8 +128,10 @@ def test_local_api_runs_contact_campaign_lifecycle(tmp_path: Path) -> None:
     assert client.get("/api/v1/activity").json()["items"]
 
 
-def test_local_api_data_connection_upload_preview_and_snapshot(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_local_api_data_connection_upload_preview_and_snapshot(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     source = tmp_path / "contacts.sqlite3"
     with sqlite3.connect(source) as connection:
         connection.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT)")
@@ -160,8 +171,10 @@ def test_local_api_data_connection_upload_preview_and_snapshot(tmp_path: Path) -
     assert snapshot.json()["record_count"] == 2
 
 
-def test_local_api_exposes_operational_reports_with_bounded_exports(tmp_path: Path) -> None:
-    client, _headers = _client(tmp_path)
+def test_local_api_exposes_operational_reports_with_bounded_exports(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, _headers = _client(tmp_path, request)
 
     definitions = client.get("/api/v1/reports/definitions")
     summary = client.get("/api/v1/reports/summary?preset=last_7_days&timezone=UTC")
@@ -179,8 +192,10 @@ def test_local_api_exposes_operational_reports_with_bounded_exports(tmp_path: Pa
     assert invalid.json()["error"]["code"] == "range_too_large"
 
 
-def test_local_api_supports_typed_segments_and_recurring_snapshots(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_local_api_supports_typed_segments_and_recurring_snapshots(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Segments"}).json()["id"]
     field = client.post(
         "/api/v1/fields",
@@ -263,8 +278,10 @@ def test_local_api_supports_typed_segments_and_recurring_snapshots(tmp_path: Pat
     assert type_change.json()["error"]["code"] == "field_type_migration_required"
 
 
-def test_data_studio_api_shares_pinned_recipe_preview_and_job_authority(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_data_studio_api_shares_pinned_recipe_preview_and_job_authority(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     definition = {
         "steps": [
             {"type": "normalize", "fields": ["email"], "operation": "email"},
@@ -309,9 +326,9 @@ def test_data_studio_api_shares_pinned_recipe_preview_and_job_authority(tmp_path
 
 
 def test_data_studio_connected_destinations_are_explicit_and_snapshot_pinned(
-    tmp_path: Path,
+    tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
-    client, headers = _client(tmp_path)
+    client, headers = _client(tmp_path, request)
     definition = {
         "output": {"format": "jsonl"},
         "steps": [{"type": "normalize", "fields": ["email"], "operation": "email"}],
@@ -448,8 +465,10 @@ def test_compiled_frontend_is_served(tmp_path: Path) -> None:
     assert response.headers["content-security-policy"].startswith("default-src 'self'")
 
 
-def test_campaign_preview_outcomes_and_resume_are_versioned(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_campaign_preview_outcomes_and_resume_are_versioned(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Preview"}).json()["id"]
     campaign_id = client.post(
         "/api/v1/campaigns", headers=headers, json={"name": "Preview", "list_id": list_id}
@@ -461,8 +480,10 @@ def test_campaign_preview_outcomes_and_resume_are_versioned(tmp_path: Path) -> N
     )
 
 
-def test_inbound_eml_import_and_review_updates_eligibility(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_inbound_eml_import_and_review_updates_eligibility(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Inbound"}).json()["id"]
     upload = {"file": ("audience.txt", b"alice@example.com\n", "text/plain")}
     client.post(f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload)
@@ -506,8 +527,10 @@ def test_inbound_eml_import_and_review_updates_eligibility(tmp_path: Path) -> No
     assert client.get("/api/v1/inbound").json()["items"] == []
 
 
-def test_inbound_workbench_api_supports_detail_rules_extraction_and_drafts(tmp_path: Path) -> None:
-    client, headers = _client(tmp_path)
+def test_inbound_workbench_api_supports_detail_rules_extraction_and_drafts(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
     message = EmailMessage()
     message["From"] = "alice@example.com"
     message["To"] = "operator@example.com"

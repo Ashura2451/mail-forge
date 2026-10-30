@@ -117,6 +117,40 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
     assert reopened.get_provider_account("local")["inbound"]["mailbox"] == "Qualification"
 
 
+def test_server_issued_grant_is_required_for_provider_test_send(tmp_path):
+    service = ProviderOperationsService(CampaignStore(tmp_path / "grants.sqlite3"))
+    service.register(_profile(), sender_email="sender@example.com")
+    expiry = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    issued = service.issue_grant(
+        "local",
+        ProviderOperation.CONTROLLED_TEST_SEND,
+        purpose="owner-controlled local qualification fixture",
+        sender="sender@example.com",
+        recipient="owned@example.com",
+        expires_at=expiry,
+    )
+    resolved = service.grant_for_authorization(
+        "local",
+        ProviderOperation.CONTROLLED_TEST_SEND,
+        authorization_ref=issued["authorization_ref"],
+        purpose="owner-controlled local qualification fixture",
+        sender="sender@example.com",
+        recipient="owned@example.com",
+        expires_at=expiry,
+    )
+    assert resolved.authorization_ref == issued["authorization_ref"]
+    with pytest.raises(PermissionError, match="not issued"):
+        service.grant_for_authorization(
+            "local",
+            ProviderOperation.CONTROLLED_TEST_SEND,
+            authorization_ref="typed-by-operator",
+            purpose="owner-controlled local qualification fixture",
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            expires_at=expiry,
+        )
+
+
 def test_oauth_state_pkce_exact_redirect_and_single_use(tmp_path):
     store = CampaignStore(tmp_path / "oauth.sqlite3")
     service = ProviderOperationsService(store)
