@@ -656,8 +656,9 @@ def test_inbound_workbench_api_supports_detail_rules_extraction_and_drafts(
 
 def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> None:
     database = tmp_path / "runtime.sqlite3"
-    first = DatabaseProcessLock(database)
-    second = DatabaseProcessLock(database)
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    second = DatabaseProcessLock(database, lock_path=lock_path)
     first.acquire()
     try:
         try:
@@ -673,11 +674,14 @@ def test_database_process_lock_prevents_two_local_runtimes(tmp_path: Path) -> No
 
 def test_database_process_lock_resolves_database_aliases(tmp_path: Path) -> None:
     database = tmp_path / "state.sqlite3"
-    alias = tmp_path / "alias.sqlite3"
+    aliases = tmp_path / "aliases"
+    aliases.mkdir()
+    alias = aliases / "alias.sqlite3"
     database.touch()
     alias.symlink_to(database)
-    first = DatabaseProcessLock(database)
-    second = DatabaseProcessLock(alias)
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    second = DatabaseProcessLock(alias, lock_path=lock_path)
     first.acquire()
     try:
         with pytest.raises(ProcessLockError):
@@ -686,10 +690,10 @@ def test_database_process_lock_resolves_database_aliases(tmp_path: Path) -> None
         first.release()
         second.release()
 
-    hardlink = tmp_path / "hardlink.sqlite3"
+    hardlink = aliases / "hardlink.sqlite3"
     os.link(database, hardlink)
-    first = DatabaseProcessLock(database)
-    second = DatabaseProcessLock(hardlink)
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    second = DatabaseProcessLock(hardlink, lock_path=lock_path)
     first.acquire()
     try:
         with pytest.raises(ProcessLockError):
@@ -702,11 +706,12 @@ def test_database_process_lock_resolves_database_aliases(tmp_path: Path) -> None
 def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
     database = tmp_path / "cross-process.sqlite3"
     marker = tmp_path / "holder.ready"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
     holder_code = (
         "import time; "
         "from pathlib import Path; "
         "from mailforge.interfaces.process_lock import DatabaseProcessLock; "
-        f"lock=DatabaseProcessLock(r'{database}'); lock.acquire(); "
+        f"lock=DatabaseProcessLock(r'{database}', lock_path=r'{lock_path}'); lock.acquire(); "
         f"Path(r'{marker}').write_text('ready'); time.sleep(2); lock.release()"
     )
     environment = os.environ.copy()
@@ -723,7 +728,7 @@ def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
                 sys.executable,
                 "-c",
                 f"from mailforge.interfaces.process_lock import DatabaseProcessLock; "
-                f"DatabaseProcessLock(r'{database}').acquire()",
+                f"DatabaseProcessLock(r'{database}', lock_path=r'{lock_path}').acquire()",
             ],
             env=environment,
             capture_output=True,
@@ -734,6 +739,59 @@ def test_database_process_lock_rejects_a_second_process(tmp_path: Path) -> None:
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+def test_database_process_lock_rejects_distinct_databases_under_single_runtime_contract(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(tmp_path / "first.sqlite3", lock_path=lock_path)
+    second = DatabaseProcessLock(tmp_path / "second.sqlite3", lock_path=lock_path)
+    first.acquire()
+    try:
+        with pytest.raises(ProcessLockError):
+            second.acquire()
+    finally:
+        first.release()
+        second.release()
+
+
+def test_database_process_lock_identity_is_stable_across_creation_and_replacement(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    first.acquire()
+    try:
+        database.touch()
+        with pytest.raises(ProcessLockError):
+            DatabaseProcessLock(database, lock_path=lock_path).acquire()
+
+        replacement = tmp_path / "replacement.sqlite3"
+        replacement.write_bytes(b"replacement")
+        os.replace(replacement, database)
+        with pytest.raises(ProcessLockError):
+            DatabaseProcessLock(database, lock_path=lock_path).acquire()
+    finally:
+        first.release()
+
+
+def test_database_process_lock_keeps_directory_authority_when_marker_is_replaced(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "runtime.sqlite3"
+    lock_path = tmp_path / "coordination" / "runtime.lock"
+    first = DatabaseProcessLock(database, lock_path=lock_path)
+    first.acquire()
+    try:
+        replacement = lock_path.with_name("replacement.lock")
+        replacement.write_bytes(b"")
+        os.replace(replacement, lock_path)
+        with pytest.raises(ProcessLockError):
+            DatabaseProcessLock(database, lock_path=lock_path).acquire()
+    finally:
+        first.release()
 
 
 def test_web_runtime_reconciles_running_campaign_after_restart(tmp_path: Path) -> None:

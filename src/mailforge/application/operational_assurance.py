@@ -261,7 +261,7 @@ class OperationalAssuranceService:
             )
         elif failed:
             checks.append({"key": "workers", "state": "degraded", "failed_count": len(failed)})
-        elif active_count and not worker_status:
+        elif active_count:
             checks.append(
                 {
                     "key": "workers",
@@ -269,7 +269,7 @@ class OperationalAssuranceService:
                     "active_count": active_count,
                     "evidence": (
                         "durable updated_at activity exists; "
-                        "heartbeat/progress is unavailable"
+                        "authoritative heartbeat/progress evidence is unavailable"
                     ),
                 }
             )
@@ -390,14 +390,13 @@ class OperationalAssuranceService:
                 }
             )
         states = {check["state"] for check in checks}
-        overall = (
-            "unavailable"
-            if "unavailable" in states
-            else "action_required"
-            if "action_required" in states
-            else "degraded"
-            if "degraded" in states
-            else "healthy"
+        overall = next(
+            (
+                state
+                for state in ("unavailable", "action_required", "degraded", "unknown", "healthy")
+                if state in states
+            ),
+            "unknown",
         )
         return {
             "state": overall,

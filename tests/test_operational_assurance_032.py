@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from mailforge.application.local_application import DataDirectory
+from mailforge.application.local_application import DataDirectory, create_backup
 from mailforge.application.operational_assurance import OperationalAssuranceService
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.infrastructure.credentials import KeychainCredentialResolver, LocalCredentialResolver
@@ -194,4 +194,61 @@ def test_active_job_without_heartbeat_is_unknown_not_healthy(tmp_path: Path) -> 
     health = service.health()
     workers = next(check for check in health["checks"] if check["key"] == "workers")
     assert workers["state"] == "unknown"
-    assert "heartbeat/progress is unavailable" in workers["evidence"]
+    assert "authoritative heartbeat/progress evidence is unavailable" in workers["evidence"]
+
+
+def test_active_job_remains_unknown_with_running_supervisors(tmp_path: Path) -> None:
+    data = DataDirectory.from_path(tmp_path / "data").initialize()
+    service = OperationalAssuranceService(CampaignStore(data.database), data)
+    service._job_rows = lambda **_kwargs: [  # type: ignore[method-assign]
+        {"status": "running", "updated_at": datetime.now(UTC).isoformat()}
+    ]
+    health = service.health(
+        worker_status={
+            "scheduler": "running",
+            "automation_scheduler": "running",
+            "campaigns_active": 0,
+        }
+    )
+    workers = next(check for check in health["checks"] if check["key"] == "workers")
+    assert workers["state"] == "unknown"
+    assert health["state"] == "action_required"  # no verified backup exists
+
+
+def test_unknown_required_evidence_cannot_aggregate_to_healthy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = DataDirectory.from_path(tmp_path / "data").initialize()
+    service = OperationalAssuranceService(CampaignStore(data.database), data)
+    service._job_rows = lambda **_kwargs: []  # type: ignore[method-assign]
+    service._all_counts = lambda *_args, **_kwargs: {}  # type: ignore[method-assign]
+    service._backup_observation = lambda **_kwargs: (datetime.now(UTC), 1)  # type: ignore[method-assign]
+
+    def unavailable_disk_usage(_path):
+        raise OSError("storage observation unavailable")
+
+    monkeypatch.setattr(
+        "mailforge.application.operational_assurance.shutil.disk_usage",
+        unavailable_disk_usage,
+    )
+    health = service.health(
+        worker_status={"scheduler": "running", "automation_scheduler": "running"}
+    )
+    storage = next(check for check in health["checks"] if check["key"] == "storage")
+    assert storage["state"] == "unknown"
+    assert health["state"] == "unknown"
+
+
+def test_web_health_uses_worker_status_without_overriding_job_evidence(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "state.sqlite3", allowed_hosts={"testserver"})
+    runtime = app.state.runtime
+    create_backup(runtime.data_directory)
+    runtime.operational_assurance._job_rows = lambda **_kwargs: [  # type: ignore[method-assign]
+        {"status": "running", "updated_at": datetime.now(UTC).isoformat()}
+    ]
+    with TestClient(app) as client:
+        client.get("/api/v1/session")
+        health = client.get("/api/v1/operations/health")
+    workers = next(check for check in health.json()["checks"] if check["key"] == "workers")
+    assert workers["state"] == "unknown"
+    assert health.json()["state"] == "unknown"

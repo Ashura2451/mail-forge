@@ -10,6 +10,12 @@
 - Added bounded local qualification evidence for process recovery, staged restore,
   packaged Keychain lifecycle, Maintenance screenshots, quota truthfulness, and
   representative performance measurements.
+- Closed the ownership and health-correctness blockers: runtime locking is now
+  stable and application-scoped across database aliases, creation, replacement,
+  and backup/restore; active work without authoritative heartbeat evidence is
+  `unknown`; and unknown required evidence cannot aggregate to `healthy`.
+- Recorded the single-runtime ownership contract in `docs/runtime-ownership.md`;
+  separate simultaneous database runtimes remain intentionally unsupported.
 - Final cumulative independent review remains required before PR #20 integration;
   real providers, production credentials, signing, notarization, and milestone
   033 remain out of scope.

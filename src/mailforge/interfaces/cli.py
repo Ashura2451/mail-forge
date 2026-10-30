@@ -913,8 +913,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.app_command == "validate-backup":
             print(json.dumps(validate_backup(args.backup), indent=2))
         elif args.app_command == "restore":
-            restored = restore_backup(args.backup, args.destination, replace=args.replace)
-            print(json.dumps({"restored": str(restored)}))
+            with DatabaseProcessLock(args.destination / "mailforge.sqlite3"):
+                restored = restore_backup(args.backup, args.destination, replace=args.replace)
+                print(json.dumps({"restored": str(restored)}))
         else:
             application = LocalApplication(data, port=args.port)
             if args.app_command == "start":
@@ -1416,8 +1417,9 @@ def main(argv: list[str] | None = None) -> int:
                 email_standards=EmailStandardsService(service.store),
             )
             if args.campaign_command == "backup":
-                destination = service.store.backup_to(args.destination)
-                print(json.dumps({"backup": str(destination)}))
+                with DatabaseProcessLock(args.database):
+                    destination = service.store.backup_to(args.destination)
+                    print(json.dumps({"backup": str(destination)}))
             elif args.campaign_command == "rehearse-migration":
                 print(
                     json.dumps(

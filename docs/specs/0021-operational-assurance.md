@@ -38,6 +38,23 @@ instead of adding a second event store. Implement `KeychainCredentialResolver`
 over Apple's Security.framework with opaque references and runtime-only
 material; injected command runners are test-only.
 
+Runtime ownership is intentionally application-scoped. The supported local
+contract permits one Mailforge runtime owner per user installation, rather
+than simultaneous independent databases. `DatabaseProcessLock` therefore
+coordinates through a stable private application-data directory and holds
+that directory's advisory lock for the full runtime or backup/restore
+operation. The authority is not derived from the database inode, database
+pathname, or a deletable marker, so canonical, relative, symlink, and
+hard-link aliases cannot create a second owner. Creation, replacement, and
+restore of the database remain covered by the same ownership boundary.
+
+Operational health is conservative: active durable work without an
+authoritative heartbeat or progress record is `unknown`, not `healthy`, and
+`unknown` is included in overall-state precedence. Incident closure requires
+an observed recovery state; missing or unavailable evidence leaves the
+incident unresolved. Ambiguous external outcomes remain durable and are not
+automatically replayed by recovery controls.
+
 ## Build plan
 
 1. Add bounded operational observations and durable health-check/incident APIs.
@@ -52,6 +69,9 @@ material; injected command runners are test-only.
 The local SQLite authority remains the only durable operational store. Health
 states are truthful local observations and do not imply provider acceptance,
 inbox delivery, signed release readiness, or production SLO compliance.
+The single-runtime ownership decision is a deliberate compatibility boundary:
+separate simultaneous database runtimes are rejected until a future product
+decision defines an explicit multi-runtime coordination protocol.
 
 ## Follow-up
 
