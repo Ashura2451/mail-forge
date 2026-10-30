@@ -32,3 +32,16 @@ Latest source qualification revision: `327a98b`.
 ## Limits
 
 This is local evidence only. It does not qualify real providers, mailbox access, production credentials, signing/notarization, release promotion, production scale, or provider quota. Screenshots were inspected from temporary local captures and are not retained as repository artifacts. The package is unsigned and unnotarized by design.
+
+## Portable evidence manifest
+
+| Evidence | Procedure / command | Result | Scope and redaction |
+| --- | --- | --- | --- |
+| Lock identity | `tests/test_web.py::test_database_process_lock_resolves_database_aliases` | Canonical, symlink, and hard-link aliases cannot acquire a second lock | Disposable paths; no database contents retained |
+| Runtime ownership | Lock probe for distinct data directories and selected database paths | Same database authority is rejected; same-directory backup lock is rejected | Lock primitives, not live dual-server scheduling |
+| Process recovery | Disposable child-process termination probes for Campaigns and Data Studio | Campaign `started → ambiguous`; Data Studio `running → pending → completed` | Synthetic rows/artifacts only |
+| Ambiguous effect | Campaign recovery assertion | No automatic retry after ambiguous external effect | No provider contacted |
+| Backup/restore | Interrupted publication, concurrent destination, staged restore and integrity checks | No partial destination; one winner; restored artifact and incident persisted | Synthetic local archive only |
+| Keychain | Native and packaged synthetic store/resolve/rotate/revoke cycle | Lifecycle passed | No real credentials; unsigned package |
+| Health semantics | Source failure/recovery and active-job-without-heartbeat tests | Failures are action-required; recovery resolves; active durable work is `unknown` without heartbeat | No production telemetry |
+| Maintenance UI | Playwright viewport assertions and Maintenance health/diagnostic/backup journey | Desktop, short viewport, tablet, mobile checks passed | Screenshots were temporary local captures |
