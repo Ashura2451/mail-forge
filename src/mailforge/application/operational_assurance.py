@@ -214,11 +214,23 @@ class OperationalAssuranceService:
                         "status": row["status"],
                         "configured_rate_per_minute": row["pacing_per_minute"],
                         "configured_concurrency": row["max_concurrency"],
-                        "quota_evidence": "configured-local-limit",
+                        "observed_local_usage": {
+                            "attempts": int(row["attempts"] or 0),
+                            "accepted": int(row["accepted"] or 0),
+                            "refused": int(row["refused"] or 0),
+                        },
+                        "provider_reported_limit": None,
+                        "quota_evidence": "configured-local-limit-and-local-attempts",
                     }
                     for row in connection.execute(
-                        "SELECT ref,status,pacing_per_minute,max_concurrency "
-                        "FROM provider_accounts ORDER BY ref"
+                        "SELECT a.ref,a.status,a.pacing_per_minute,a.max_concurrency, "
+                        "COUNT(t.id) AS attempts, "
+                        "SUM(CASE WHEN t.status='provider_accepted' "
+                        "THEN 1 ELSE 0 END) AS accepted, "
+                        "SUM(CASE WHEN t.status NOT IN ('provider_accepted','pending') "
+                        "THEN 1 ELSE 0 END) AS refused "
+                        "FROM provider_accounts a LEFT JOIN provider_test_submissions t "
+                        "ON t.account_ref=a.ref GROUP BY a.ref ORDER BY a.ref"
                     ).fetchall()
                 ]
         except Exception:
