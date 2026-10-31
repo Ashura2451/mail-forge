@@ -84,6 +84,13 @@ class MessageStudioError(ValueError):
         self.code = code
 
 
+_PREVIEW_CSP = (
+    "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src 'none'; "
+    "connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; "
+    "form-action 'none'; base-uri 'none'; script-src 'none'"
+)
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -152,7 +159,13 @@ class MessageStudioService:
             "attachments": [],
         }
 
-    def validate_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
+    def validate_document(
+        self,
+        document: Mapping[str, Any],
+        *,
+        allow_missing_assets: bool = True,
+        pin_assets: bool = True,
+    ) -> dict[str, Any]:
         if not isinstance(document, Mapping):
             raise MessageStudioError("message document must be an object")
         try:
@@ -172,7 +185,9 @@ class MessageStudioService:
                 raise MessageStudioError(f"{field} is invalid or too long")
             self._validate_template_text(candidate[field], field)
         if candidate.get("composition_mode", "structured") == "custom_html":
-            return self._validate_custom_document(candidate)
+            return self._validate_custom_document(
+                candidate, allow_missing_assets=allow_missing_assets, pin_assets=pin_assets
+            )
         if candidate.get("composition_mode", "structured") != "structured":
             raise MessageStudioError("unsupported composition mode", "composition_mode")
         override = candidate.get("plain_text_override")
@@ -206,37 +221,27 @@ class MessageStudioService:
         self, manifest: Sequence[Mapping[str, Any]]
     ) -> dict[str, dict[str, Any]]:
         by_reference: dict[str, dict[str, Any]] = {}
-        all_assets = self.list_assets()
-        by_filename: dict[str, dict[str, Any]] = {}
-        for item in all_assets:
-            try:
-                full = self.get_asset(item["id"], include_data=True)
-            except MessageStudioError:
-                continue
-            by_filename.setdefault(item["filename"], full)
         for item in manifest:
             reference = str(item.get("reference", "")).replace("\\", "/").lstrip("/")
-            if not reference:
+            if not reference or not item.get("asset_id"):
                 continue
-            asset = None
-            if item.get("asset_id"):
-                try:
-                    asset = self.get_asset(str(item["asset_id"]), include_data=True)
-                except MessageStudioError:
-                    asset = None
-            if asset is None:
-                asset = by_filename.get(PurePath(reference).name)
-            if asset is not None:
-                by_reference[reference] = {
-                    "id": asset["id"],
-                    "filename": asset["filename"],
-                    "media_type": asset["media_type"],
-                    "data": asset["data_blob"],
-                    "kind": "stylesheet" if asset["media_type"] == "text/css" else asset["kind"],
-                }
+            asset = self.get_asset(str(item["asset_id"]), include_data=True)
+            if item.get("sha256") and item["sha256"] != asset["sha256"]:
+                raise MessageStudioError(
+                    "custom HTML asset content does not match its pinned digest", "asset_integrity"
+                )
+            by_reference[reference] = {
+                "id": asset["id"],
+                "filename": asset["filename"],
+                "media_type": asset["media_type"],
+                "data": asset["data_blob"],
+                "kind": "stylesheet" if asset["media_type"] == "text/css" else asset["kind"],
+            }
         return by_reference
 
-    def _validate_custom_document(self, candidate: dict[str, Any]) -> dict[str, Any]:
+    def _validate_custom_document(
+        self, candidate: dict[str, Any], *, allow_missing_assets: bool, pin_assets: bool
+    ) -> dict[str, Any]:
         custom = candidate.get("custom_html")
         if not isinstance(custom, Mapping):
             raise MessageStudioError("custom HTML source is required", "html_empty")
@@ -246,20 +251,39 @@ class MessageStudioService:
         manifest = custom.get("asset_manifest", [])
         if not isinstance(manifest, list) or len(manifest) > 200:
             raise MessageStudioError("custom HTML asset manifest is invalid", "asset_manifest")
-        assets = self._custom_asset_lookup(manifest)
         for reference in local_references(original):
             if not any(
                 str(item.get("reference", "")).replace("\\", "/").lstrip("/") == reference
                 for item in manifest
             ):
                 manifest.append({"reference": reference})
+        if pin_assets:
+            matches: dict[str, list[dict[str, Any]]] = {}
+            for item in self.list_assets():
+                matches.setdefault(item["filename"], []).append(item)
+            for item in manifest:
+                reference = str(item.get("reference", "")).replace("\\", "/").lstrip("/")
+                if not reference or item.get("asset_id"):
+                    continue
+                candidates = matches.get(PurePath(reference).name, [])
+                if len(candidates) > 1:
+                    raise MessageStudioError(
+                        f"multiple local assets match {reference}; choose one explicitly",
+                        "asset_ambiguous",
+                    )
+                if candidates:
+                    item["asset_id"], item["sha256"] = candidates[0]["id"], candidates[0]["sha256"]
+                elif not allow_missing_assets:
+                    raise MessageStudioError(
+                        f"local asset is missing: {reference}", "missing_asset"
+                    )
         assets = self._custom_asset_lookup(manifest)
         try:
             analyzed = analyze_html(original, assets)
         except CustomHTMLImportError as error:
             raise MessageStudioError(str(error), error.code) from error
         blocking = [item for item in analyzed["diagnostics"] if item["severity"] == "ERROR"]
-        allowed_draft_errors = {"missing_asset"}
+        allowed_draft_errors = {"missing_asset"} if allow_missing_assets else set()
         if any(item["code"] not in allowed_draft_errors for item in blocking):
             first = blocking[0]
             raise MessageStudioError(first["message"], first["code"])
@@ -486,7 +510,7 @@ class MessageStudioService:
         *,
         expected_revision_id: str | None = None,
     ) -> dict[str, Any]:
-        source = self.validate_document(document)
+        source = self.validate_document(document, pin_assets=False)
         now = self.now_fn().isoformat()
         revision_id = str(uuid.uuid4())
         with self.store.transaction(immediate=True) as connection:
@@ -538,7 +562,15 @@ class MessageStudioService:
             ).fetchone()
             if revision is None:
                 raise MessageStudioError("draft revision was not found", "revision_not_found")
-            self.validate_document(json.loads(revision["document_json"]))
+            original_document = json.loads(revision["document_json"])
+            validated_document = self.validate_document(
+                original_document, allow_missing_assets=False, pin_assets=True
+            )
+            if validated_document != original_document:
+                connection.execute(
+                    "UPDATE message_revisions SET document_json = ?, content_hash = ? WHERE id = ?",
+                    (_canonical(validated_document), _hash(validated_document), revision_id),
+                )
             connection.execute(
                 "UPDATE message_revisions SET status = 'published', published_at = ? WHERE id = ?",
                 (now, revision_id),
@@ -570,9 +602,9 @@ class MessageStudioService:
         document["name"] = name or f"{document['name']} copy"
         return self.create_document(document["name"], kind=source["kind"], document=document)
 
-    def create_asset(
+    def _create_asset_with_ownership(
         self, filename: str, media_type: str, data: bytes, *, kind: str = "attachment"
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         filename = _filename(filename)
         if kind not in {"image", "attachment"} or len(data) > MAX_ASSET_BYTES:
             raise MessageStudioError("asset kind or size is invalid", "asset_limit")
@@ -589,13 +621,19 @@ class MessageStudioService:
                 "SELECT * FROM message_assets WHERE kind = ? AND sha256 = ?", (kind, digest)
             ).fetchone()
             if existing:
-                return _row(existing)
+                return _row(existing), False
             asset_id = str(uuid.uuid4())
             connection.execute(
                 "INSERT INTO message_assets(id,kind,filename,media_type,size_bytes,sha256,data_blob,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (asset_id, kind, filename, media_type, len(data), digest, data, now),
             )
-        return self.get_asset(asset_id)
+        return self.get_asset(asset_id), True
+
+    def create_asset(
+        self, filename: str, media_type: str, data: bytes, *, kind: str = "attachment"
+    ) -> dict[str, Any]:
+        asset, _created = self._create_asset_with_ownership(filename, media_type, data, kind=kind)
+        return asset
 
     def import_custom_html(
         self,
@@ -628,13 +666,14 @@ class MessageStudioService:
         manifest: list[dict[str, Any]] = []
         try:
             for item in candidates:
-                asset = self.create_asset(
+                asset, created_new = self._create_asset_with_ownership(
                     item.filename,
                     item.media_type,
                     item.data,
                     kind="attachment" if item.kind == "stylesheet" else "image",
                 )
-                created.append(asset["id"])
+                if created_new:
+                    created.append(asset["id"])
                 manifest.append(
                     {"reference": item.reference, "asset_id": asset["id"], "kind": item.kind}
                 )
@@ -1157,12 +1196,18 @@ class MessageStudioService:
         )
         rendered = self.renderer.render(definition, context, seed=0, now=self.now_fn())
         rendered_html = rendered.html or ""
-        if re.search(
-            r"(?:src|background)=[\"'](?:https?:|//|javascript:|data:text/html)",
-            rendered_html,
-            re.I,
-        ):
-            raise MessageStudioError("prepared HTML contains an unsafe resource URL", "unsafe_url")
+        final_analysis = analyze_html(rendered_html, {}, preview=preview)
+        unsafe = [
+            item
+            for item in final_analysis["diagnostics"]
+            if item["severity"] == "ERROR" or item["code"] == "remote_resource"
+        ]
+        if unsafe:
+            first = unsafe[0]
+            raise MessageStudioError(
+                f"personalized HTML contains unsafe content: {first['message']}", first["code"]
+            )
+        rendered_html = final_analysis["prepared_source"]
         diagnostics = list(analyzed["diagnostics"])
         if any(item["code"] == "missing_asset" for item in diagnostics):
             raise MessageStudioError("custom HTML has missing local assets", "missing_asset")
@@ -1198,6 +1243,14 @@ class MessageStudioService:
             "_attachments": tuple(attachments),
         }
 
+    @staticmethod
+    def _preview_snapshot(html_source: str) -> str:
+        return (
+            '<!doctype html><meta http-equiv="Content-Security-Policy" '
+            f'content="{html.escape(_PREVIEW_CSP, quote=True)}">'
+            f'<meta name="referrer" content="no-referrer">{html_source}'
+        )
+
     def preview(
         self,
         document: Mapping[str, Any] | None = None,
@@ -1220,6 +1273,7 @@ class MessageStudioService:
         result = self.render_document(
             document, contact=contact, condition_mode=condition_mode, preview=True
         )
+        result["html"] = self._preview_snapshot(result["html"])
         result.pop("_rendered", None)
         result.pop("_attachments", None)
         return result
