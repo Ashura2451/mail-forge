@@ -456,3 +456,47 @@
   content; ambiguous provider outcomes remain durable and unresolved.
 - Local synthetic qualification only: no inbox delivery, production provider,
   consent, signing/notarization, or production-scale claim is made.
+
+## 2026-10-30 — Custom HTML template interoperability 034
+
+- Added custom HTML composition inside Message Studio with source-preserving,
+  immutable revisions, paste/edit support, bounded `.html`/`.htm` import, and
+  export of original source plus owned assets.
+- Added bounded local asset/CSS ZIP handling with path, symlink, nesting,
+  duplicate, signature, compression, size, count, and active-content controls.
+- Added deterministic diagnostics and preparation for unsafe markup, missing or
+  remote resources, basic CSS transformation, conditional/VML compatibility,
+  personalization, meaningful plain text, sandboxed resource-free preview, and
+  existing CID/MIME composition.
+- Bound custom source identity into canonical outbound proof metadata; no
+  direct-send path or caller-supplied MIME authority was added.
+- Focused validation is local and synthetic. External email-client fidelity,
+  real-provider qualification, legal-policy approval, signing/notarization,
+  and universal CSS/VML compatibility remain unclaimed.
+
+## 2026-10-31 — Custom HTML interoperability closure
+
+- Restored and regression-tested structured Message Studio preview/save/publish
+  behavior alongside custom HTML mode.
+- Hardened imported resource handling for `srcset`, `poster`, audio/video,
+  HTML content signatures, generated plain-text refresh, and custom revision
+  publishing.
+- Added exact loopback SMTP fixture capture: received DATA bytes match the
+  prepared proof-bound MIME bytes and preserve HTML/text/CID structure.
+- Restored locked Ruff validation and deterministic browser scroll assertions;
+  the complete suite now passes locally. Independent review findings were
+  remediated; cross-model approval, real-provider qualification, and
+  signing/notarization remain unclaimed.
+- Final review follow-up tightened HTML tag-content validation and preserves
+  existing inline CSS precedence during safe transformation.
+
+## 2026-10-31 — Custom HTML security and integrity remediation
+
+- Rejected CSS escape/comment/resource-function bypasses and added a restrictive
+  CSP to the isolated preview boundary.
+- Revalidated recipient URLs after personalization and failed closed on unsafe
+  schemes and attributes.
+- Pinned filename-resolved assets to immutable IDs and SHA-256 digests before
+  publication; failed imports now roll back only newly created assets.
+- Requalified the bundled Python runtime and macOS arm64 package from the final
+  remediation source. Cross-model independent review remains unavailable.

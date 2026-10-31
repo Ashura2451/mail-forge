@@ -1,8 +1,9 @@
 # Message Studio
 
 Message Studio is the local composition surface for safe, reusable email
-content. The browser edits a bounded structured document; it does not persist
-arbitrary HTML as the business authority.
+content. The browser supports both the bounded structured document mode and a
+custom HTML source mode. Custom HTML remains untrusted input and is persisted
+as a source artifact plus a separately validated prepared representation.
 
 ## Canonical path
 
@@ -12,7 +13,9 @@ and supplies `RenderedTemplate` plus bounded `ResolvedAttachment` records to
 the existing `OutboundService` and `MessageComposer`. Browser preview, CLI
 rendering, campaign preparation, and workflow preparation all use this path.
 
-Documents are durable SQLite records in schema 10:
+Documents are durable SQLite records in the current CampaignStore schema
+(Message Studio tables were introduced in schema 10; current outbound proof
+support is schema 25):
 
 - `message_documents` identifies a message or reusable template.
 - `message_revisions` stores immutable JSON revisions and content hashes.
@@ -20,6 +23,32 @@ Documents are durable SQLite records in schema 10:
 - `message_recipient_attachments` maps a revision/contact to an explicit
   attachment identity.
 - `message_campaign_snapshots` preserves the exact revision used by a run.
+
+## Custom HTML mode
+
+Operators can paste HTML into a custom document or import an `.html`/`.htm`
+file with an optional bounded ZIP containing local PNG, JPEG, GIF, WebP, and
+CSS assets. The original UTF-8 source, SHA-256 identity, asset manifest,
+diagnostics, and prepared source are stored in the ordinary immutable revision
+JSON. Assets are deduplicated through `message_assets`; no second asset store
+or revision authority exists.
+
+The importer does not fetch remote images or stylesheets. ZIP entries are
+checked for path traversal, symlinks, nesting, duplicates, unsupported active
+content, file/count/size/depth limits, and compression abuse. Scripts, event
+handlers, forms, frames, active SVG, unsafe schemes, CSS imports, and unsafe
+resource URLs are rejected or removed with `ERROR`, `WARNING`, or `INFO`
+diagnostics. Simple CSS selectors are inlined while media queries and Outlook
+conditional/VML source are retained with compatibility warnings.
+
+Preview is generated from a resource-free snapshot in an opaque sandboxed
+iframe. Local images become bounded data URLs for preview and deterministic
+CID assets for MIME. The existing `SafeTemplateRenderer`, `MessageComposer`,
+recipient eligibility, and canonical outbound proof remain the only preparation
+path. `srcset`, `poster`, active media, and external resource references are
+also bounded before preview/preparation. Generated plain text is refreshed when
+source changes unless the operator supplies an explicit override. Export
+produces the preserved original HTML and owned assets in a ZIP.
 
 The structured vocabulary includes paragraphs, headings, lists, buttons,
 images, dividers, spacing, columns, and segment-backed conditional blocks.
@@ -52,6 +81,7 @@ parts; static and recipient-specific attachments are explicit MIME records.
 Preview HTML is shown in a blank sandboxed iframe, and no preview or browser
 action contacts a provider or recipient.
 
-Local acceptance proves deterministic composition and MIME construction only.
-It does not claim universal email-client fidelity, inbox placement, consent,
-real-provider qualification, hosted operation, or live delivery readiness.
+Local acceptance proves bounded custom-source handling, deterministic
+composition, and MIME construction only. It does not claim universal
+email-client fidelity, inbox placement, consent, real-provider qualification,
+hosted operation, or live delivery readiness.

@@ -458,6 +458,18 @@ class OutboundService:
                 ],
             )
             revision_id = template.version if template.name.startswith("studio:") else None
+            source_identity = None
+            if revision_id:
+                with self.store.connect() as connection:
+                    revision_row = connection.execute(
+                        "SELECT document_json FROM message_revisions WHERE id = ?", (revision_id,)
+                    ).fetchone()
+                if revision_row is not None:
+                    revision_document = json.loads(revision_row["document_json"])
+                    if revision_document.get("composition_mode") == "custom_html":
+                        source_identity = revision_document.get("custom_html", {}).get(
+                            "source_hash"
+                        )
             proof_id = str(uuid.uuid4())
             proof = make_proof(
                 proof_id,
@@ -472,6 +484,7 @@ class OutboundService:
                     artifact_kind="prepared_message",
                     artifact_ref=prepared_id,
                     message_revision_id=revision_id,
+                    source_identity=source_identity,
                     campaign_id=campaign_id,
                     intent_id=intent["id"],
                     eligibility={
