@@ -7,15 +7,23 @@ from __future__ import annotations
 
 import hashlib
 import html
+import io
 import json
 import re
 import uuid
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import PurePath
 from typing import Any
 
 from mailforge.application.composition import MessageComposer, ResolvedAttachment
+from mailforge.application.custom_html import (
+    CustomHTMLImportError,
+    analyze_html,
+    local_references,
+    read_zip_assets,
+)
 from mailforge.application.outbound_proof import (
     build_payload,
     digest_json,
@@ -55,6 +63,7 @@ ALLOWED_MEDIA = {
     "image/webp",
     "application/pdf",
     "text/plain",
+    "text/css",
 }
 MERGE_FIELD = re.compile(
     r"\{\{\s*(?P<name>(?:email|name)|contact\.[a-z][a-z0-9_]{0,63})"
@@ -162,6 +171,10 @@ class MessageStudioService:
             if not isinstance(candidate.get(field, ""), str) or len(candidate[field]) > 10_000:
                 raise MessageStudioError(f"{field} is invalid or too long")
             self._validate_template_text(candidate[field], field)
+        if candidate.get("composition_mode", "structured") == "custom_html":
+            return self._validate_custom_document(candidate)
+        if candidate.get("composition_mode", "structured") != "structured":
+            raise MessageStudioError("unsupported composition mode", "composition_mode")
         override = candidate.get("plain_text_override")
         if override is not None:
             if not isinstance(override, str) or len(override) > 100_000:
@@ -187,6 +200,75 @@ class MessageStudioService:
             raise MessageStudioError("a message may reference at most 50 attachments")
         for attachment in attachments:
             self._validate_attachment_ref(attachment)
+        return candidate
+
+    def _custom_asset_lookup(self, manifest: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+        by_reference: dict[str, dict[str, Any]] = {}
+        all_assets = self.list_assets()
+        by_filename: dict[str, dict[str, Any]] = {}
+        for item in all_assets:
+            try:
+                full = self.get_asset(item["id"], include_data=True)
+            except MessageStudioError:
+                continue
+            by_filename.setdefault(item["filename"], full)
+        for item in manifest:
+            reference = str(item.get("reference", "")).replace("\\", "/").lstrip("/")
+            if not reference:
+                continue
+            asset = None
+            if item.get("asset_id"):
+                try:
+                    asset = self.get_asset(str(item["asset_id"]), include_data=True)
+                except MessageStudioError:
+                    asset = None
+            if asset is None:
+                asset = by_filename.get(PurePath(reference).name)
+            if asset is not None:
+                by_reference[reference] = {
+                    "id": asset["id"],
+                    "filename": asset["filename"],
+                    "media_type": asset["media_type"],
+                    "data": asset["data_blob"],
+                    "kind": "stylesheet" if asset["media_type"] == "text/css" else asset["kind"],
+                }
+        return by_reference
+
+    def _validate_custom_document(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        custom = candidate.get("custom_html")
+        if not isinstance(custom, Mapping):
+            raise MessageStudioError("custom HTML source is required", "html_empty")
+        original = custom.get("original_source")
+        if not isinstance(original, str):
+            raise MessageStudioError("custom HTML source is required", "html_empty")
+        manifest = custom.get("asset_manifest", [])
+        if not isinstance(manifest, list) or len(manifest) > 200:
+            raise MessageStudioError("custom HTML asset manifest is invalid", "asset_manifest")
+        assets = self._custom_asset_lookup(manifest)
+        for reference in local_references(original):
+            if not any(str(item.get("reference", "")).replace("\\", "/").lstrip("/") == reference for item in manifest):
+                manifest.append({"reference": reference})
+        assets = self._custom_asset_lookup(manifest)
+        try:
+            analyzed = analyze_html(original, assets)
+        except CustomHTMLImportError as error:
+            raise MessageStudioError(str(error), error.code) from error
+        blocking = [item for item in analyzed["diagnostics"] if item["severity"] == "ERROR"]
+        allowed_draft_errors = {"missing_asset"}
+        if any(item["code"] not in allowed_draft_errors for item in blocking):
+            first = blocking[0]
+            raise MessageStudioError(first["message"], first["code"])
+        candidate["composition_mode"] = "custom_html"
+        candidate["custom_html"] = {
+            "original_source": original,
+            "source_hash": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+            "prepared_source": analyzed["prepared_source"],
+            "asset_manifest": manifest,
+            "diagnostics": analyzed["diagnostics"],
+            "css_mode": "simple-inline-preserve-media",
+        }
+        if not candidate.get("plain_text_override"):
+            candidate["plain_text_override"] = analyzed["plain_text"]
         return candidate
 
     def _validate_template_text(self, value: str, field: str) -> None:
@@ -505,6 +587,88 @@ class MessageStudioService:
                 (asset_id, kind, filename, media_type, len(data), digest, data, now),
             )
         return self.get_asset(asset_id)
+
+    def import_custom_html(
+        self,
+        name: str,
+        html_data: bytes,
+        *,
+        filename: str = "message.html",
+        assets_zip: bytes | None = None,
+        kind: str = "template",
+    ) -> dict[str, Any]:
+        """Import source plus optional local assets without filesystem extraction."""
+
+        suffix = PurePath(filename.replace("\\", "/")).suffix.lower()
+        if suffix not in {".html", ".htm"}:
+            raise MessageStudioError("custom HTML import requires an .html or .htm file", "html_type")
+        if len(html_data) > 512 * 1024:
+            raise MessageStudioError("custom HTML exceeds the 512 KiB limit", "html_limit")
+        try:
+            source = html_data.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise MessageStudioError("custom HTML must be valid UTF-8", "html_encoding") from error
+        candidates = read_zip_assets(assets_zip) if assets_zip is not None else []
+        created: list[str] = []
+        manifest: list[dict[str, Any]] = []
+        try:
+            for item in candidates:
+                asset = self.create_asset(item.filename, item.media_type, item.data, kind="attachment" if item.kind == "stylesheet" else "image")
+                created.append(asset["id"])
+                manifest.append({"reference": item.reference, "asset_id": asset["id"], "kind": item.kind})
+            document = self.blank_document(name)
+            document.update(
+                {
+                    "composition_mode": "custom_html",
+                    "plain_text_override": None,
+                    "custom_html": {
+                        "original_source": source,
+                        "asset_manifest": manifest,
+                    },
+                    "blocks": [{"type": "text", "text": "Imported custom HTML"}],
+                }
+            )
+            result = self.create_document(name, kind=kind, document=document)
+        except (MessageStudioError, CustomHTMLImportError):
+            for asset_id in created:
+                try:
+                    self.archive_asset(asset_id)
+                except MessageStudioError:
+                    pass
+            raise
+        draft = result.get("draft") or {}
+        return {
+            **result,
+            "import": {
+                "source_filename": PurePath(filename).name,
+                "asset_count": len(manifest),
+                "diagnostics": (draft.get("document") or {}).get("custom_html", {}).get("diagnostics", []),
+            },
+        }
+
+    def export_custom_html(self, document_id: str, *, revision_id: str | None = None) -> tuple[bytes, str]:
+        document = self.get_document(document_id)
+        revision = next(
+            (item for item in document["revisions"] if item["id"] == revision_id), None
+        ) if revision_id else (document.get("published") or document.get("draft"))
+        if revision is None:
+            raise MessageStudioError("document revision was not found", "revision_not_found")
+        source = revision["document"]
+        if source.get("composition_mode") != "custom_html":
+            raise MessageStudioError("only custom HTML documents can be exported", "composition_mode")
+        custom = source["custom_html"]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("original.html", custom["original_source"])
+            for item in custom.get("asset_manifest", []):
+                if not item.get("asset_id"):
+                    continue
+                asset = self.get_asset(item["asset_id"], include_data=True)
+                reference = str(item.get("reference") or asset["filename"]).replace("\\", "/").lstrip("/")
+                if reference.startswith("../") or "/../" in reference:
+                    raise MessageStudioError("asset export path is invalid", "asset_path")
+                archive.writestr(reference, asset["data_blob"])
+        return output.getvalue(), f"{document['name'].strip() or 'mailforge-template'}.zip"
 
     def get_asset(self, asset_id: str, *, include_data: bool = False) -> dict[str, Any]:
         with self.store.connect() as connection:
@@ -845,9 +1009,12 @@ class MessageStudioService:
         *,
         contact: Mapping[str, Any] | None = None,
         condition_mode: str | None = None,
+        preview: bool = False,
     ) -> dict[str, Any]:
         source = self.validate_document(document)
         context, contact_id = self._contact_context(contact)
+        if source.get("composition_mode", "structured") == "custom_html":
+            return self._render_custom_document(source, context, preview=preview)
         condition_modes = (
             contact.get("_data_studio_condition_modes") if isinstance(contact, Mapping) else None
         )
@@ -917,6 +1084,71 @@ class MessageStudioService:
             "_attachments": tuple(attachments),
         }
 
+    def _render_custom_document(
+        self, source: Mapping[str, Any], context: Mapping[str, Any], *, preview: bool
+    ) -> dict[str, Any]:
+        custom = source["custom_html"]
+        fallback_warnings: list[str] = []
+        context = self._with_fallbacks(dict(context), source, fallback_warnings)
+        assets = self._custom_asset_lookup(custom.get("asset_manifest", []))
+        analyzed = analyze_html(custom["original_source"], assets, preview=preview)
+        if analyzed["has_errors"] and any(
+            item["severity"] == "ERROR" and item["code"] != "missing_asset"
+            for item in analyzed["diagnostics"]
+        ):
+            first = next(item for item in analyzed["diagnostics"] if item["severity"] == "ERROR")
+            raise MessageStudioError(first["message"], first["code"])
+        attachments: list[ResolvedAttachment] = []
+        for item in custom.get("asset_manifest", []):
+            asset = assets.get(str(item.get("reference", "")).replace("\\", "/").lstrip("/"))
+            if asset and asset.get("kind") != "stylesheet":
+                attachments.append(
+                    self._asset_attachment(asset["id"], content_id=f"mailforge-custom-{asset['id']}")
+                )
+        html_template = analyzed["prepared_source"]
+        text_template = source.get("plain_text_override") or analyzed["plain_text"]
+        definition = TemplateDefinition(
+            name=source["name"],
+            version="custom-html-1",
+            subject=source["subject"],
+            text=text_template,
+            html=html_template,
+        )
+        rendered = self.renderer.render(definition, context, seed=0, now=self.now_fn())
+        rendered_html = rendered.html or ""
+        if re.search(r"(?:src|background)=[\"'](?:https?:|//|javascript:|data:text/html)", rendered_html, re.I):
+            raise MessageStudioError("prepared HTML contains an unsafe resource URL", "unsafe_url")
+        diagnostics = list(analyzed["diagnostics"])
+        if any(item["code"] == "missing_asset" for item in diagnostics):
+            raise MessageStudioError("custom HTML has missing local assets", "missing_asset")
+        manifest = [
+            {
+                "filename": item.spec.filename,
+                "content_type": item.content_type,
+                "content_id": item.spec.content_id,
+                "bytes": len(item.data),
+            }
+            for item in attachments
+        ]
+        approximate_bytes = sum(
+            len(value.encode("utf-8")) for value in (rendered.subject, rendered.text, rendered_html)
+        ) + sum(len(item.data) for item in attachments)
+        if approximate_bytes > MAX_MESSAGE_ASSET_BYTES:
+            raise MessageStudioError("rendered message exceeds the 25 MiB local limit", "message_limit")
+        warnings = fallback_warnings + [item["message"] for item in diagnostics if item["severity"] != "ERROR"]
+        return {
+            "subject": rendered.subject,
+            "preheader": "",
+            "html": rendered_html,
+            "text": rendered.text,
+            "warnings": list(dict.fromkeys(warnings)),
+            "diagnostics": diagnostics,
+            "attachments": manifest,
+            "approximate_bytes": approximate_bytes,
+            "_rendered": rendered,
+            "_attachments": tuple(attachments),
+        }
+
     def preview(
         self,
         document: Mapping[str, Any] | None = None,
@@ -936,7 +1168,9 @@ class MessageStudioService:
         if document is None:
             raise MessageStudioError("a document or revision is required")
         contact = self.store.get_contact(contact_id) if contact_id else None
-        result = self.render_document(document, contact=contact, condition_mode=condition_mode)
+        result = self.render_document(
+            document, contact=contact, condition_mode=condition_mode, preview=True
+        )
         result.pop("_rendered", None)
         result.pop("_attachments", None)
         return result
@@ -1012,6 +1246,11 @@ class MessageStudioService:
             }
         )
         proof_id = str(uuid.uuid4())
+        source_identity = (
+            document.get("custom_html", {}).get("source_hash")
+            if document.get("composition_mode") == "custom_html"
+            else None
+        )
         payload = build_payload(
             operation_kind="controlled_test",
             sender=composed.from_email,
@@ -1021,6 +1260,7 @@ class MessageStudioService:
             artifact_kind="controlled_test",
             artifact_ref=proof_id,
             message_revision_id=revision_id,
+            source_identity=source_identity,
             eligibility={
                 "status": "controlled_test_scope",
                 "reason": "recipient is authorized by the bounded provider grant",

@@ -2024,6 +2024,51 @@ def create_app(
         except (MessageStudioError, KeyError) as error:
             return _error(400, getattr(error, "code", "preview_invalid"), str(error))
 
+    @app.post(f"{API_PREFIX}/message-studio/custom-html/import")
+    async def import_custom_html(
+        name: str = "Imported HTML template",
+        kind: str = "template",
+        html_file: UploadFile = File(...),  # noqa: B008
+        assets_zip: UploadFile | None = File(default=None),  # noqa: B008
+    ):
+        try:
+            html_data = html_file.file.read(512 * 1024 + 1)
+            if len(html_data) > 512 * 1024:
+                return _error(413, "html_limit", "custom HTML exceeds the 512 KiB local limit")
+            zip_data = None
+            if assets_zip is not None:
+                zip_data = assets_zip.file.read(25 * 1024 * 1024 + 1)
+                if len(zip_data) > 25 * 1024 * 1024:
+                    return _error(413, "zip_limit", "asset ZIP exceeds the 25 MiB local limit")
+            return runtime.message_studio.import_custom_html(
+                name.strip() or "Imported HTML template",
+                html_data,
+                filename=html_file.filename or "message.html",
+                assets_zip=zip_data,
+                kind=kind,
+            )
+        except MessageStudioError as error:
+            return _error(400, error.code, str(error))
+        except ValueError as error:
+            return _error(400, "custom_html_invalid", str(error))
+
+    @app.get(f"{API_PREFIX}/message-studio/documents/{{document_id}}/export")
+    async def export_custom_html(document_id: str, revision_id: str | None = None):
+        try:
+            data, filename = runtime.message_studio.export_custom_html(
+                document_id, revision_id=revision_id
+            )
+            return Response(
+                content=data,
+                media_type="application/zip",
+                headers={
+                    "content-disposition": f'attachment; filename="{filename}"',
+                    "cache-control": "no-store",
+                },
+            )
+        except MessageStudioError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
     @app.get(f"{API_PREFIX}/message-studio/assets")
     async def message_assets(kind: str | None = None):
         return {"items": runtime.message_studio.list_assets(kind=kind)}

@@ -456,3 +456,20 @@
   content; ambiguous provider outcomes remain durable and unresolved.
 - Local synthetic qualification only: no inbox delivery, production provider,
   consent, signing/notarization, or production-scale claim is made.
+
+## 2026-10-30 — Custom HTML template interoperability 034
+
+- Added custom HTML composition inside Message Studio with source-preserving,
+  immutable revisions, paste/edit support, bounded `.html`/`.htm` import, and
+  export of original source plus owned assets.
+- Added bounded local asset/CSS ZIP handling with path, symlink, nesting,
+  duplicate, signature, compression, size, count, and active-content controls.
+- Added deterministic diagnostics and preparation for unsafe markup, missing or
+  remote resources, basic CSS transformation, conditional/VML compatibility,
+  personalization, meaningful plain text, sandboxed resource-free preview, and
+  existing CID/MIME composition.
+- Bound custom source identity into canonical outbound proof metadata; no
+  direct-send path or caller-supplied MIME authority was added.
+- Focused validation is local and synthetic. External email-client fidelity,
+  real-provider qualification, legal-policy approval, signing/notarization,
+  and universal CSS/VML compatibility remain unclaimed.
