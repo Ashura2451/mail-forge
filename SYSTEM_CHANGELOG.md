@@ -489,3 +489,14 @@
   signing/notarization remain unclaimed.
 - Final review follow-up tightened HTML tag-content validation and preserves
   existing inline CSS precedence during safe transformation.
+
+## 2026-10-31 — Custom HTML security and integrity remediation
+
+- Rejected CSS escape/comment/resource-function bypasses and added a restrictive
+  CSP to the isolated preview boundary.
+- Revalidated recipient URLs after personalization and failed closed on unsafe
+  schemes and attributes.
+- Pinned filename-resolved assets to immutable IDs and SHA-256 digests before
+  publication; failed imports now roll back only newly created assets.
+- Requalified the bundled Python runtime and macOS arm64 package from the final
+  remediation source. Cross-model independent review remains unavailable.

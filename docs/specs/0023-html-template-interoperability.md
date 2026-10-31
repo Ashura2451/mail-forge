@@ -101,6 +101,20 @@ client-specific linting, personalized attachments, native Windows packaging,
 and installation/update continuity remain roadmap candidates rather than this
 milestone's implementation.
 
+## Security and integrity remediation
+
+The final 034 implementation rejects CSS escape sequences, comments, resource
+functions, resource at-rules, and unsupported URL schemes before preparation.
+Preview output carries a restrictive `Content-Security-Policy` in addition to
+the opaque sandbox frame. Recipient-specific HTML is validated again after
+template rendering, so unsafe URL schemes fail closed rather than being merely
+HTML-escaped.
+
+Filename references are resolved and pinned to canonical asset IDs and SHA-256
+digests before publication. Published revisions do not fall back to the newest
+same-named asset. Import rollback archives only assets created by that import;
+deduplicated pre-existing assets remain available.
+
 ## Rationale
 
 Research and the pre-change capability inventory are recorded in the executor
