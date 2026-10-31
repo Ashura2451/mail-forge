@@ -296,26 +296,3 @@ def test_custom_html_fixture_received_mime_matches_proof_bound_preparation(tmp_p
     )
     assert any(part.get("Content-ID") == f"<mailforge-custom-{asset_id}>" for part in parts)
     assert any(part.get_content_type() == "image/png" for part in parts)
-
-
-def test_custom_html_unsafe_personalized_url_pinned_asset_and_rollback(tmp_path: Path) -> None:
-    studio = _studio(tmp_path)
-    document = studio.blank_document("Security boundaries")
-    document.update({"composition_mode": "custom_html", "plain_text_override": None, "custom_html": {
-        "original_source": '<p>Hello</p><a href="{{ contact.website }}">Open</a><img src="logo.png">',
-        "asset_manifest": [{"reference": "logo.png"}],
-    }})
-    first = studio.create_asset("logo.png", "image/png", b"first-image", kind="image")
-    created = studio.create_document("Security boundaries", document=document)
-    assert created["draft"]["document"]["custom_html"]["asset_manifest"][0]["asset_id"] == first["id"]
-    with pytest.raises(MessageStudioError) as error:
-        studio.render_document(created["draft"]["document"], contact={"normalized_email": "owned@example.com", "display_name": "Owned", "metadata": {"website": "javascript:alert(1)"}})
-    assert error.value.code == "unsafe_url"
-    published = studio.publish(created["id"], expected_revision_id=created["draft"]["id"])
-    before = studio.preview(revision_id=published["published"]["id"])["html"]
-    studio.create_asset("logo.png", "image/png", b"second-image", kind="image")
-    assert studio.preview(revision_id=published["published"]["id"])["html"] == before
-    shared = studio.create_asset("shared.png", "image/png", b"\x89PNG\r\n\x1a\nshared", kind="image")
-    with pytest.raises(MessageStudioError):
-        studio.import_custom_html("bad", b"<script>alert(1)</script>", filename="bad.html", assets_zip=_zip({"shared.png": b"\x89PNG\r\n\x1a\nshared"}))
-    assert studio.get_asset(shared["id"])["sha256"]

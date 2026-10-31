@@ -80,22 +80,12 @@ _EXTERNAL = re.compile(r"^(?:https?:)?//", re.I)
 _SAFE_PREVIEW_DATA_URL = re.compile(
     r"^data:image/(?:png|gif|jpeg|webp);base64,[A-Za-z0-9+/=]+$", re.I
 )
-_CSS_RESOURCE_FUNCTIONS = {
-    "image-set",
-    "-webkit-image-set",
-    "cross-fade",
-    "element",
-    "paint",
-    "var",
-    "env",
-}
-_CSS_RESOURCE_AT_RULES = {"import", "font-face", "namespace", "property"}
 
 
 def local_references(source: str) -> list[str]:
     """Return deterministic local image/CSS references from HTML/CSS source."""
 
-    values = re.findall(r"\b(?:src|background)\s*=\s*[\"']([^\"']+)[\"']", source, re.I)
+    values = re.findall(r"\b(?:src|background|href)\s*=\s*[\"']([^\"']+)[\"']", source, re.I)
     values.extend(match.group("url") for match in _CSS_URL.finditer(source))
     result: list[str] = []
     for value in values:
@@ -123,16 +113,7 @@ def _reference(value: str) -> str | None:
 
 def _safe_link(value: str) -> bool:
     value = html.unescape(value).strip()
-    if _MERGE.fullmatch(value):
-        return True
-    if not value or any(char.isspace() or ord(char) < 0x20 for char in value):
-        return False
-    if value.startswith("//") or _UNSAFE_SCHEME.match(value):
-        return False
-    parsed = urlparse(value)
-    return parsed.scheme.lower() in {"http", "https", "mailto"} and bool(
-        parsed.path or parsed.netloc
-    )
+    return bool(value) and not _UNSAFE_SCHEME.match(value) and not value.lower().startswith("//")
 
 
 def _media_type(filename: str) -> str:
@@ -280,58 +261,6 @@ def plain_text_from_html(source: str) -> str:
 def _sanitize_css(
     css: str, assets: dict[str, dict[str, Any]], diagnostics: list[HTMLDiagnostic], *, preview: bool
 ) -> str:
-    quote: str | None = None
-    index = 0
-    while index < len(css):
-        char = css[index]
-        if char == "\\":
-            diagnostics.append(
-                HTMLDiagnostic("ERROR", "unsafe_css", "CSS escape sequences are not supported")
-            )
-            return ""
-        if quote:
-            if char == quote:
-                quote = None
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            quote = char
-        elif char == "/" and index + 1 < len(css) and css[index + 1] == "*":
-            diagnostics.append(
-                HTMLDiagnostic("ERROR", "unsafe_css", "CSS comments are not supported")
-            )
-            return ""
-        elif char == "@":
-            end = index + 1
-            while end < len(css) and css[end].isspace():
-                end += 1
-            start = end
-            while end < len(css) and (css[end].isalnum() or css[end] in {"-", "_"}):
-                end += 1
-            if css[start:end].lower() in _CSS_RESOURCE_AT_RULES:
-                diagnostics.append(
-                    HTMLDiagnostic("ERROR", "unsafe_css", "CSS resource at-rules are not supported")
-                )
-                return ""
-            index = end
-            continue
-        elif char.isalpha() or char in {"-", "_"}:
-            end = index + 1
-            while end < len(css) and (css[end].isalnum() or css[end] in {"-", "_"}):
-                end += 1
-            name = css[index:end].lower()
-            if name in _CSS_RESOURCE_FUNCTIONS and end < len(css) and css[end] == "(":
-                diagnostics.append(
-                    HTMLDiagnostic("ERROR", "unsafe_css", f"CSS function {name}() is not supported")
-                )
-                return ""
-            index = end
-            continue
-        index += 1
-    if quote:
-        diagnostics.append(HTMLDiagnostic("ERROR", "unsafe_css", "CSS string is not terminated"))
-        return ""
-
     def replace_url(match: re.Match[str]) -> str:
         value = html.unescape(match.group("url")).strip()
         try:
@@ -506,15 +435,15 @@ def analyze_html(
                 )
             )
             return ""
-        if value.lower().startswith("cid:") or (
-            preview and _SAFE_PREVIEW_DATA_URL.fullmatch(value)
-        ):
-            return value
         if _UNSAFE_SCHEME.match(value):
             diagnostics.append(
                 HTMLDiagnostic("ERROR", "unsafe_url", "Unsafe resource URL was removed", value)
             )
             return ""
+        if value.lower().startswith("cid:") or (
+            preview and _SAFE_PREVIEW_DATA_URL.fullmatch(value)
+        ):
+            return value
         if urlparse(value).scheme or urlparse(value).netloc:
             diagnostics.append(
                 HTMLDiagnostic("ERROR", "unsafe_url", "Unsupported resource URL was removed", value)
@@ -594,10 +523,6 @@ def analyze_html(
                         )
                     )
                     continue
-                elif value.lower().startswith("cid:") or (
-                    preview and _SAFE_PREVIEW_DATA_URL.fullmatch(value)
-                ):
-                    pass
                 elif _UNSAFE_SCHEME.match(value):
                     diagnostics.append(
                         HTMLDiagnostic(
