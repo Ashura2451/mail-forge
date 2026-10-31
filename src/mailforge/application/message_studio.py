@@ -651,7 +651,10 @@ class MessageStudioService:
                 }
             )
             result = self.create_document(name, kind=kind, document=document)
-        except MessageStudioError, CustomHTMLImportError:
+        except (
+            MessageStudioError,
+            CustomHTMLImportError,
+        ):
             for asset_id in created:
                 try:
                     self.archive_asset(asset_id)

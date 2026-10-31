@@ -67,7 +67,8 @@ _ATTR = re.compile(
     re.S,
 )
 _TAG = re.compile(
-    r"<(?P<closing>/)?(?P<name>[A-Za-z][A-Za-z0-9:_-]*)(?P<attrs>[^>]*?)(?P<self>/?)>", re.S
+    r"<(?P<closing>/)?(?P<name>[A-Za-z][A-Za-z0-9:_-]*)(?P<attrs>(?:[^\"'>]|\"[^\"]*\"|'[^']*')*)(?P<self>/?)>",
+    re.S,
 )
 _CSS_RULE = re.compile(r"(?P<selectors>[^{}]+)\{(?P<body>[^{}]*)\}", re.S)
 _CSS_URL = re.compile(r"url\(\s*(?P<quote>[\"']?)(?P<url>.*?)(?P=quote)\s*\)", re.I | re.S)

@@ -108,6 +108,17 @@ def test_custom_html_rejects_active_content(tmp_path: Path, source: bytes) -> No
     assert error.value.code in {"active_content", "unsafe_url"}
 
 
+def test_custom_html_removes_event_handlers_when_attribute_contains_tag_end(tmp_path: Path) -> None:
+    studio = _studio(tmp_path)
+    with pytest.raises(MessageStudioError) as error:
+        studio.import_custom_html(
+            "Malformed active content",
+            b'<p title="x > y" onclick="alert(1)">Hello</p>',
+            filename="unsafe.html",
+        )
+    assert error.value.code == "event_handler"
+
+
 def test_custom_html_rejects_non_html_file_content(tmp_path: Path) -> None:
     studio = _studio(tmp_path)
     with pytest.raises(MessageStudioError) as error:
