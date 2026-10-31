@@ -473,3 +473,19 @@
 - Focused validation is local and synthetic. External email-client fidelity,
   real-provider qualification, legal-policy approval, signing/notarization,
   and universal CSS/VML compatibility remain unclaimed.
+
+## 2026-10-31 — Custom HTML interoperability closure
+
+- Restored and regression-tested structured Message Studio preview/save/publish
+  behavior alongside custom HTML mode.
+- Hardened imported resource handling for `srcset`, `poster`, audio/video,
+  HTML content signatures, generated plain-text refresh, and custom revision
+  publishing.
+- Added exact loopback SMTP fixture capture: received DATA bytes match the
+  prepared proof-bound MIME bytes and preserve HTML/text/CID structure.
+- Restored locked Ruff validation and deterministic browser scroll assertions;
+  the complete suite now passes locally. Independent review findings were
+  remediated; cross-model approval, real-provider qualification, and
+  signing/notarization remain unclaimed.
+- Final review follow-up tightened HTML tag-content validation and preserves
+  existing inline CSS precedence during safe transformation.

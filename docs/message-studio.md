@@ -45,7 +45,10 @@ Preview is generated from a resource-free snapshot in an opaque sandboxed
 iframe. Local images become bounded data URLs for preview and deterministic
 CID assets for MIME. The existing `SafeTemplateRenderer`, `MessageComposer`,
 recipient eligibility, and canonical outbound proof remain the only preparation
-path. Export produces the preserved original HTML and owned assets in a ZIP.
+path. `srcset`, `poster`, active media, and external resource references are
+also bounded before preview/preparation. Generated plain text is refreshed when
+source changes unless the operator supplies an explicit override. Export
+produces the preserved original HTML and owned assets in a ZIP.
 
 The structured vocabulary includes paragraphs, headings, lists, buttons,
 images, dividers, spacing, columns, and segment-backed conditional blocks.

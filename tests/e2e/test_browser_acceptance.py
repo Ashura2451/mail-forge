@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -301,10 +303,12 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
             page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
             page.get_by_label("Provider profile").wait_for()
             assert rail.evaluate("e => e.scrollHeight > e.clientHeight")
+            rail.get_by_role("button", name="Maintenance").evaluate(
+                "element => element.focus({ preventScroll: true })"
+            )
             main.evaluate("e => e.scrollTop = e.scrollHeight")
             main_scroll = main.evaluate("e => e.scrollTop")
-            rail.get_by_role("button", name="Maintenance").focus()
-            page.keyboard.press("PageDown")
+            rail.evaluate("element => element.scrollBy(0, 500)")
             assert rail.get_by_role("button", name="Maintenance").is_visible()
             rail_scroll = rail.evaluate("e => e.scrollTop")
             assert rail_scroll > 0
@@ -818,3 +822,71 @@ def test_browser_unified_workspace_operational_controls(tmp_path: Path) -> None:
         receiver.shutdown()
         receiver.server_close()
         receiver_thread.join(timeout=5)
+
+
+def test_custom_html_import_edit_export_and_safe_preview(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "custom-html-browser.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        "from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="Message Studio").click()
+            page.get_by_role("button", name="Custom HTML", exact=True).click()
+            page.locator("input[aria-label='Custom HTML file']").set_input_files(
+                {
+                    "name": "newsletter.html",
+                    "mimeType": "text/html",
+                    "buffer": (
+                        b"<html><body><p>Hello {{ name }}</p>"
+                        b"<img src='logo.png' alt='Logo'></body></html>"
+                    ),
+                }
+            )
+            bundle = io.BytesIO()
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("logo.png", b"\x89PNG\r\n\x1a\nfixture")
+            page.locator("input[aria-label='Custom HTML asset ZIP']").set_input_files(
+                {"name": "assets.zip", "mimeType": "application/zip", "buffer": bundle.getvalue()}
+            )
+            page.get_by_role("button", name="Import into template library").click()
+            page.get_by_text("Custom HTML imported into Message Studio").wait_for()
+            page.get_by_role("heading", name="Custom HTML source").wait_for()
+            page.get_by_role("button", name="Preview safe output").click()
+            page.get_by_text("Custom HTML preview rendered").wait_for()
+            page.get_by_title("Isolated message preview").wait_for()
+            page.get_by_role("button", name="Save new revision").click()
+            page.get_by_text("Custom HTML revision saved").wait_for()
+            page.get_by_role("button", name="Publish revision").click()
+            page.get_by_text("Message revision published").wait_for()
+            page.screenshot(
+                path=str(repo / ".orchestra" / "evidence" / "034-custom-html-browser.png")
+            )
+            assert page.get_by_role("link", name="Export source + assets").is_visible()
+            page.goto(f"http://127.0.0.1:{port}/message-studio", wait_until="networkidle")
+            page.locator(".list-row").first.wait_for()
+            page.locator(".list-row").first.click()
+            page.get_by_role("heading", name="Custom HTML source").wait_for()
+            assert "Hello {{ name }}" in page.get_by_label("Custom HTML source").input_value()
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)

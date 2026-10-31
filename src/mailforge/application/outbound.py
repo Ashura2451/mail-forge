@@ -467,7 +467,9 @@ class OutboundService:
                 if revision_row is not None:
                     revision_document = json.loads(revision_row["document_json"])
                     if revision_document.get("composition_mode") == "custom_html":
-                        source_identity = revision_document.get("custom_html", {}).get("source_hash")
+                        source_identity = revision_document.get("custom_html", {}).get(
+                            "source_hash"
+                        )
             proof_id = str(uuid.uuid4())
             proof = make_proof(
                 proof_id,

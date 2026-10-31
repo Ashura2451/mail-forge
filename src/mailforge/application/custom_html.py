@@ -66,7 +66,9 @@ _ATTR = re.compile(
     r"(?P<name>[A-Za-z_:][A-Za-z0-9_.:-]*)(?:\s*=\s*(?P<quote>[\"'])(?P<quoted>.*?)\2|\s*=\s*(?P<bare>[^\s>]+))?",
     re.S,
 )
-_TAG = re.compile(r"<(?P<closing>/)?(?P<name>[A-Za-z][A-Za-z0-9:_-]*)(?P<attrs>[^>]*?)(?P<self>/?)>", re.S)
+_TAG = re.compile(
+    r"<(?P<closing>/)?(?P<name>[A-Za-z][A-Za-z0-9:_-]*)(?P<attrs>[^>]*?)(?P<self>/?)>", re.S
+)
 _CSS_RULE = re.compile(r"(?P<selectors>[^{}]+)\{(?P<body>[^{}]*)\}", re.S)
 _CSS_URL = re.compile(r"url\(\s*(?P<quote>[\"']?)(?P<url>.*?)(?P=quote)\s*\)", re.I | re.S)
 _MERGE = re.compile(
@@ -132,7 +134,9 @@ def _validate_image(filename: str, data: bytes) -> None:
         ".webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
     }
     if suffix in signatures and not signatures[suffix]:
-        raise CustomHTMLImportError(f"asset {filename} does not match its image signature", "asset_signature")
+        raise CustomHTMLImportError(
+            f"asset {filename} does not match its image signature", "asset_signature"
+        )
 
 
 def read_zip_assets(raw: bytes) -> list[AssetCandidate]:
@@ -158,25 +162,36 @@ def read_zip_assets(raw: bytes) -> list[AssetCandidate]:
                 raise CustomHTMLImportError("absolute ZIP paths are not allowed", "zip_path")
             parts = [part for part in raw_name.split("/") if part not in {"", "."}]
             if len(parts) > MAX_ARCHIVE_DEPTH or any(part == ".." for part in parts):
-                raise CustomHTMLImportError("ZIP path traversal or nesting is not allowed", "zip_path")
+                raise CustomHTMLImportError(
+                    "ZIP path traversal or nesting is not allowed", "zip_path"
+                )
             normalized = "/".join(parts)
             if not normalized or normalized in seen:
-                raise CustomHTMLImportError("duplicate ZIP asset names are not allowed", "zip_duplicate")
+                raise CustomHTMLImportError(
+                    "duplicate ZIP asset names are not allowed", "zip_duplicate"
+                )
             seen.add(normalized)
             if PurePosixPath(normalized).suffix.lower() == ".zip":
                 raise CustomHTMLImportError("nested ZIP archives are not allowed", "zip_nested")
             suffix = PurePosixPath(normalized).suffix.lower()
             if suffix not in ALLOWED_IMAGE_EXTENSIONS and suffix != ".css":
                 raise CustomHTMLImportError(
-                    f"unsupported active or asset file in ZIP: {suffix or 'unknown'}", "zip_file_type"
+                    f"unsupported active or asset file in ZIP: {suffix or 'unknown'}",
+                    "zip_file_type",
                 )
-            if info.file_size > MAX_EXTRACTED_BYTES or info.compress_size == 0 or (
-                info.file_size / max(info.compress_size, 1) > MAX_COMPRESSION_RATIO
+            if (
+                info.file_size > MAX_EXTRACTED_BYTES
+                or info.compress_size == 0
+                or (info.file_size / max(info.compress_size, 1) > MAX_COMPRESSION_RATIO)
             ):
-                raise CustomHTMLImportError("ZIP entry exceeds decompression safety limits", "zip_bomb")
+                raise CustomHTMLImportError(
+                    "ZIP entry exceeds decompression safety limits", "zip_bomb"
+                )
             total += info.file_size
             if total > MAX_EXTRACTED_BYTES:
-                raise CustomHTMLImportError("extracted ZIP assets exceed the 50 MiB limit", "zip_limit")
+                raise CustomHTMLImportError(
+                    "extracted ZIP assets exceed the 50 MiB limit", "zip_limit"
+                )
             data = archive.read(info)
             if len(data) != info.file_size:
                 raise CustomHTMLImportError("ZIP entry size changed while reading", "zip_integrity")
@@ -190,10 +205,14 @@ def read_zip_assets(raw: bytes) -> list[AssetCandidate]:
                 data.decode("utf-8")
                 kind = "stylesheet"
             candidates.append(
-                AssetCandidate(normalized, PurePosixPath(normalized).name, _media_type(normalized), data, kind)
+                AssetCandidate(
+                    normalized, PurePosixPath(normalized).name, _media_type(normalized), data, kind
+                )
             )
     except zipfile.BadZipFile as error:
-        raise CustomHTMLImportError("asset bundle is not a valid ZIP archive", "zip_invalid") from error
+        raise CustomHTMLImportError(
+            "asset bundle is not a valid ZIP archive", "zip_invalid"
+        ) from error
     return candidates
 
 
@@ -235,7 +254,9 @@ def plain_text_from_html(source: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line)).strip()
 
 
-def _sanitize_css(css: str, assets: dict[str, dict[str, Any]], diagnostics: list[HTMLDiagnostic], *, preview: bool) -> str:
+def _sanitize_css(
+    css: str, assets: dict[str, dict[str, Any]], diagnostics: list[HTMLDiagnostic], *, preview: bool
+) -> str:
     def replace_url(match: re.Match[str]) -> str:
         value = html.unescape(match.group("url")).strip()
         try:
@@ -246,17 +267,25 @@ def _sanitize_css(css: str, assets: dict[str, dict[str, Any]], diagnostics: list
         if ref:
             asset = assets.get(ref)
             if not asset:
-                diagnostics.append(HTMLDiagnostic("ERROR", "missing_asset", "Local CSS asset is missing", ref))
+                diagnostics.append(
+                    HTMLDiagnostic("ERROR", "missing_asset", "Local CSS asset is missing", ref)
+                )
                 return "url("
             if asset.get("kind") != "stylesheet":
                 replacement = _asset_url(asset, preview=preview)
                 return f"url('{replacement}')"
             return "url("
         if _EXTERNAL.match(value):
-            diagnostics.append(HTMLDiagnostic("WARNING", "remote_resource", "Remote CSS resource was not fetched", value))
+            diagnostics.append(
+                HTMLDiagnostic(
+                    "WARNING", "remote_resource", "Remote CSS resource was not fetched", value
+                )
+            )
             return "url("
         if _UNSAFE_SCHEME.match(value):
-            diagnostics.append(HTMLDiagnostic("ERROR", "unsafe_css_url", "Unsafe CSS URL was removed", value))
+            diagnostics.append(
+                HTMLDiagnostic("ERROR", "unsafe_css_url", "Unsafe CSS URL was removed", value)
+            )
             return "url("
         return f"url('{value}')"
 
@@ -285,17 +314,22 @@ def _inline_simple_css(source: str) -> str:
                     rules.append((selector, declaration))
     for selector, declaration in rules:
         if selector.startswith("."):
-            pattern = re.compile(rf"(<[A-Za-z][^>]*\bclass=[\"'][^\"']*\b{re.escape(selector[1:])}\b[^\"']*[\"'][^>]*)(>)", re.I)
+            pattern = re.compile(
+                rf"(<[A-Za-z][^>]*\bclass=[\"'][^\"']*\b{re.escape(selector[1:])}\b[^\"']*[\"'][^>]*)(>)",
+                re.I,
+            )
         elif selector.startswith("#"):
-            pattern = re.compile(rf"(<[A-Za-z][^>]*\bid=[\"']{re.escape(selector[1:])}[\"'][^>]*)(>)", re.I)
+            pattern = re.compile(
+                rf"(<[A-Za-z][^>]*\bid=[\"']{re.escape(selector[1:])}[\"'][^>]*)(>)", re.I
+            )
         else:
             pattern = re.compile(rf"(<{re.escape(selector)}\b[^>]*)(>)", re.I)
 
-        def add_style(match: re.Match[str]) -> str:
+        def add_style(match: re.Match[str], declaration: str = declaration) -> str:
             prefix, close = match.group(1), match.group(2)
             existing = re.search(r"\bstyle=[\"']([^\"']*)[\"']", prefix, re.I)
             if existing:
-                merged = f"{existing.group(1).rstrip(';')};{declaration}"
+                merged = f"{declaration.rstrip(';')};{existing.group(1)}"
                 return prefix[: existing.start(1)] + merged + prefix[existing.end(1) :] + close
             return f'{prefix} style="{html.escape(declaration, quote=True)}"{close}'
 
@@ -311,34 +345,100 @@ def analyze_html(
 ) -> dict[str, Any]:
     if not isinstance(source, str) or not source.strip():
         raise CustomHTMLImportError("custom HTML source is required", "html_empty")
+    if not re.search(r"<\s*[A-Za-z][A-Za-z0-9:_-]*(?:\s|/?>)", source):
+        raise CustomHTMLImportError("HTML source contains no valid element tags", "html_signature")
     if len(source.encode("utf-8")) > MAX_CUSTOM_HTML_BYTES:
         raise CustomHTMLImportError("custom HTML exceeds the 512 KiB limit", "html_limit")
     diagnostics: list[HTMLDiagnostic] = []
     if re.search(r"<!--[\s\S]*?\[if\s+(?:mso|!mso|gte|lte|lt|gt)", source, re.I):
-        diagnostics.append(HTMLDiagnostic("WARNING", "conditional_markup", "Outlook conditional markup is retained and requires client testing"))
+        diagnostics.append(
+            HTMLDiagnostic(
+                "WARNING",
+                "conditional_markup",
+                "Outlook conditional markup is retained and requires client testing",
+            )
+        )
     if re.search(r"<\s*v:(?:rect|roundrect|shape|image)\b", source, re.I):
-        diagnostics.append(HTMLDiagnostic("WARNING", "vml_markup", "VML is retained for source fidelity and is not previewed"))
+        diagnostics.append(
+            HTMLDiagnostic(
+                "WARNING", "vml_markup", "VML is retained for source fidelity and is not previewed"
+            )
+        )
 
     def replace_style(match: re.Match[str]) -> str:
         body = _sanitize_css(match.group("body"), assets, diagnostics, preview=preview)
         return f"<style>{body}</style>"
 
-    transformed = re.sub(r"<style[^>]*>(?P<body>.*?)</style>", replace_style, source, flags=re.I | re.S)
+    transformed = re.sub(
+        r"<style[^>]*>(?P<body>.*?)</style>", replace_style, source, flags=re.I | re.S
+    )
 
     def replace_link(match: re.Match[str]) -> str:
         tag = match.group(0)
-        attrs = dict((m.group("name").lower(), m.group("quoted") or m.group("bare") or "") for m in _ATTR.finditer(match.group("attrs")))
+        attrs = dict(
+            (m.group("name").lower(), m.group("quoted") or m.group("bare") or "")
+            for m in _ATTR.finditer(match.group("attrs"))
+        )
         href = attrs.get("href", "")
         if attrs.get("rel", "").lower() == "stylesheet":
             ref = _reference(href)
             asset = assets.get(ref or "")
             if asset and asset.get("kind") == "stylesheet":
-                return f"<style>{_sanitize_css(asset.get('data', b'').decode('utf-8'), assets, diagnostics, preview=preview)}</style>"
-            diagnostics.append(HTMLDiagnostic("WARNING", "external_stylesheet", "External stylesheet was not fetched", href))
+                stylesheet = _sanitize_css(
+                    asset.get("data", b"").decode("utf-8"),
+                    assets,
+                    diagnostics,
+                    preview=preview,
+                )
+                return f"<style>{stylesheet}</style>"
+            diagnostics.append(
+                HTMLDiagnostic(
+                    "WARNING", "external_stylesheet", "External stylesheet was not fetched", href
+                )
+            )
             return ""
         return tag
 
     transformed = re.sub(r"<link(?P<attrs>[^>]*)>", replace_link, transformed, flags=re.I | re.S)
+
+    def resource_value(value: str) -> str:
+        try:
+            ref = _reference(value)
+        except CustomHTMLImportError as error:
+            diagnostics.append(HTMLDiagnostic("ERROR", error.code, str(error), value))
+            return ""
+        if ref:
+            asset = assets.get(ref)
+            if not asset:
+                diagnostics.append(
+                    HTMLDiagnostic("ERROR", "missing_asset", "Local asset is missing", ref)
+                )
+                return ""
+            return _asset_url(asset, preview=preview)
+        if _EXTERNAL.match(value):
+            diagnostics.append(
+                HTMLDiagnostic(
+                    "WARNING", "remote_resource", "Remote resource was not fetched", value
+                )
+            )
+            return ""
+        if _UNSAFE_SCHEME.match(value):
+            diagnostics.append(
+                HTMLDiagnostic("ERROR", "unsafe_url", "Unsafe resource URL was removed", value)
+            )
+            return ""
+        return value
+
+    def resource_set(value: str) -> str:
+        candidates: list[str] = []
+        for candidate in value.split(","):
+            pieces = candidate.strip().split()
+            if not pieces:
+                continue
+            safe = resource_value(pieces[0])
+            if safe:
+                candidates.append(" ".join([safe, *pieces[1:]]))
+        return ", ".join(candidates)
 
     def replace_tag(match: re.Match[str]) -> str:
         name = match.group("name").lower()
@@ -346,8 +446,24 @@ def analyze_html(
             if name in {"script", "iframe", "object", "embed", "form", "svg", "link", "meta"}:
                 return ""
             return match.group(0)
-        if name in {"script", "iframe", "object", "embed", "form", "svg", "link", "meta", "base"}:
-            diagnostics.append(HTMLDiagnostic("ERROR", "active_content", f"Unsupported active element <{name}> was removed"))
+        if name in {
+            "script",
+            "iframe",
+            "object",
+            "embed",
+            "form",
+            "svg",
+            "link",
+            "meta",
+            "base",
+            "audio",
+            "video",
+        }:
+            diagnostics.append(
+                HTMLDiagnostic(
+                    "ERROR", "active_content", f"Unsupported active element <{name}> was removed"
+                )
+            )
             return ""
         attrs: list[str] = []
         for item in _ATTR.finditer(match.group("attrs")):
@@ -355,9 +471,13 @@ def analyze_html(
             value = item.group("quoted") if item.group("quoted") is not None else item.group("bare")
             value = value or ""
             if key.startswith("on"):
-                diagnostics.append(HTMLDiagnostic("ERROR", "event_handler", "Event-handler attribute was removed", key))
+                diagnostics.append(
+                    HTMLDiagnostic(
+                        "ERROR", "event_handler", "Event-handler attribute was removed", key
+                    )
+                )
                 continue
-            if key in {"src", "background"}:
+            if key in {"src", "background", "poster"}:
                 try:
                     ref = _reference(value)
                 except CustomHTMLImportError as error:
@@ -366,17 +486,36 @@ def analyze_html(
                 if ref:
                     asset = assets.get(ref)
                     if not asset:
-                        diagnostics.append(HTMLDiagnostic("ERROR", "missing_asset", "Local asset is missing", ref))
+                        diagnostics.append(
+                            HTMLDiagnostic("ERROR", "missing_asset", "Local asset is missing", ref)
+                        )
                         continue
                     value = _asset_url(asset, preview=preview)
                 elif _EXTERNAL.match(value):
-                    diagnostics.append(HTMLDiagnostic("WARNING", "remote_resource", "Remote image resource was not fetched", value))
+                    diagnostics.append(
+                        HTMLDiagnostic(
+                            "WARNING",
+                            "remote_resource",
+                            "Remote image resource was not fetched",
+                            value,
+                        )
+                    )
                     continue
                 elif _UNSAFE_SCHEME.match(value):
-                    diagnostics.append(HTMLDiagnostic("ERROR", "unsafe_url", "Unsafe resource URL was removed", value))
+                    diagnostics.append(
+                        HTMLDiagnostic(
+                            "ERROR", "unsafe_url", "Unsafe resource URL was removed", value
+                        )
+                    )
+                    continue
+            elif key == "srcset":
+                value = resource_set(value)
+                if not value:
                     continue
             elif key in {"href", "action", "cite"} and not _safe_link(value):
-                diagnostics.append(HTMLDiagnostic("ERROR", "unsafe_url", "Unsafe link URL was removed", value))
+                diagnostics.append(
+                    HTMLDiagnostic("ERROR", "unsafe_url", "Unsafe link URL was removed", value)
+                )
                 continue
             elif key == "style":
                 value = _sanitize_css(value, assets, diagnostics, preview=preview)
@@ -384,7 +523,9 @@ def analyze_html(
                 attrs.append(f'{key}="{html.escape(value, quote=True)}"')
             else:
                 attrs.append(key)
-        return f"<{name}{(' ' + ' '.join(attrs)) if attrs else ''}{'/' if match.group('self') else ''}>"
+        spacing = f" {' '.join(attrs)}" if attrs else ""
+        closing = "/" if match.group("self") else ""
+        return f"<{name}{spacing}{closing}>"
 
     transformed = _TAG.sub(replace_tag, transformed)
     if preview:

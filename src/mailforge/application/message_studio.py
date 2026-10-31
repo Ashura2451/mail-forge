@@ -202,7 +202,9 @@ class MessageStudioService:
             self._validate_attachment_ref(attachment)
         return candidate
 
-    def _custom_asset_lookup(self, manifest: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _custom_asset_lookup(
+        self, manifest: Sequence[Mapping[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
         by_reference: dict[str, dict[str, Any]] = {}
         all_assets = self.list_assets()
         by_filename: dict[str, dict[str, Any]] = {}
@@ -246,7 +248,10 @@ class MessageStudioService:
             raise MessageStudioError("custom HTML asset manifest is invalid", "asset_manifest")
         assets = self._custom_asset_lookup(manifest)
         for reference in local_references(original):
-            if not any(str(item.get("reference", "")).replace("\\", "/").lstrip("/") == reference for item in manifest):
+            if not any(
+                str(item.get("reference", "")).replace("\\", "/").lstrip("/") == reference
+                for item in manifest
+            ):
                 manifest.append({"reference": reference})
         assets = self._custom_asset_lookup(manifest)
         try:
@@ -259,6 +264,9 @@ class MessageStudioService:
             first = blocking[0]
             raise MessageStudioError(first["message"], first["code"])
         candidate["composition_mode"] = "custom_html"
+        plain_text_generated = custom.get("plain_text_generated") is True or not candidate.get(
+            "plain_text_override"
+        )
         candidate["custom_html"] = {
             "original_source": original,
             "source_hash": hashlib.sha256(original.encode("utf-8")).hexdigest(),
@@ -266,8 +274,9 @@ class MessageStudioService:
             "asset_manifest": manifest,
             "diagnostics": analyzed["diagnostics"],
             "css_mode": "simple-inline-preserve-media",
+            "plain_text_generated": plain_text_generated,
         }
-        if not candidate.get("plain_text_override"):
+        if plain_text_generated:
             candidate["plain_text_override"] = analyzed["plain_text"]
         return candidate
 
@@ -601,21 +610,34 @@ class MessageStudioService:
 
         suffix = PurePath(filename.replace("\\", "/")).suffix.lower()
         if suffix not in {".html", ".htm"}:
-            raise MessageStudioError("custom HTML import requires an .html or .htm file", "html_type")
+            raise MessageStudioError(
+                "custom HTML import requires an .html or .htm file", "html_type"
+            )
         if len(html_data) > 512 * 1024:
             raise MessageStudioError("custom HTML exceeds the 512 KiB limit", "html_limit")
         try:
             source = html_data.decode("utf-8-sig")
         except UnicodeDecodeError as error:
             raise MessageStudioError("custom HTML must be valid UTF-8", "html_encoding") from error
+        if "\x00" in source or "<" not in source or ">" not in source:
+            raise MessageStudioError(
+                "HTML file content does not match an HTML document", "html_signature"
+            )
         candidates = read_zip_assets(assets_zip) if assets_zip is not None else []
         created: list[str] = []
         manifest: list[dict[str, Any]] = []
         try:
             for item in candidates:
-                asset = self.create_asset(item.filename, item.media_type, item.data, kind="attachment" if item.kind == "stylesheet" else "image")
+                asset = self.create_asset(
+                    item.filename,
+                    item.media_type,
+                    item.data,
+                    kind="attachment" if item.kind == "stylesheet" else "image",
+                )
                 created.append(asset["id"])
-                manifest.append({"reference": item.reference, "asset_id": asset["id"], "kind": item.kind})
+                manifest.append(
+                    {"reference": item.reference, "asset_id": asset["id"], "kind": item.kind}
+                )
             document = self.blank_document(name)
             document.update(
                 {
@@ -629,7 +651,7 @@ class MessageStudioService:
                 }
             )
             result = self.create_document(name, kind=kind, document=document)
-        except (MessageStudioError, CustomHTMLImportError):
+        except MessageStudioError, CustomHTMLImportError:
             for asset_id in created:
                 try:
                     self.archive_asset(asset_id)
@@ -642,20 +664,28 @@ class MessageStudioService:
             "import": {
                 "source_filename": PurePath(filename).name,
                 "asset_count": len(manifest),
-                "diagnostics": (draft.get("document") or {}).get("custom_html", {}).get("diagnostics", []),
+                "diagnostics": (draft.get("document") or {})
+                .get("custom_html", {})
+                .get("diagnostics", []),
             },
         }
 
-    def export_custom_html(self, document_id: str, *, revision_id: str | None = None) -> tuple[bytes, str]:
+    def export_custom_html(
+        self, document_id: str, *, revision_id: str | None = None
+    ) -> tuple[bytes, str]:
         document = self.get_document(document_id)
-        revision = next(
-            (item for item in document["revisions"] if item["id"] == revision_id), None
-        ) if revision_id else (document.get("published") or document.get("draft"))
+        revision = (
+            next((item for item in document["revisions"] if item["id"] == revision_id), None)
+            if revision_id
+            else (document.get("published") or document.get("draft"))
+        )
         if revision is None:
             raise MessageStudioError("document revision was not found", "revision_not_found")
         source = revision["document"]
         if source.get("composition_mode") != "custom_html":
-            raise MessageStudioError("only custom HTML documents can be exported", "composition_mode")
+            raise MessageStudioError(
+                "only custom HTML documents can be exported", "composition_mode"
+            )
         custom = source["custom_html"]
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -664,7 +694,9 @@ class MessageStudioService:
                 if not item.get("asset_id"):
                     continue
                 asset = self.get_asset(item["asset_id"], include_data=True)
-                reference = str(item.get("reference") or asset["filename"]).replace("\\", "/").lstrip("/")
+                reference = (
+                    str(item.get("reference") or asset["filename"]).replace("\\", "/").lstrip("/")
+                )
                 if reference.startswith("../") or "/../" in reference:
                     raise MessageStudioError("asset export path is invalid", "asset_path")
                 archive.writestr(reference, asset["data_blob"])
@@ -1103,10 +1135,16 @@ class MessageStudioService:
             asset = assets.get(str(item.get("reference", "")).replace("\\", "/").lstrip("/"))
             if asset and asset.get("kind") != "stylesheet":
                 attachments.append(
-                    self._asset_attachment(asset["id"], content_id=f"mailforge-custom-{asset['id']}")
+                    self._asset_attachment(
+                        asset["id"], content_id=f"mailforge-custom-{asset['id']}"
+                    )
                 )
         html_template = analyzed["prepared_source"]
-        text_template = source.get("plain_text_override") or analyzed["plain_text"]
+        text_template = (
+            analyzed["plain_text"]
+            if custom.get("plain_text_generated")
+            else source.get("plain_text_override") or analyzed["plain_text"]
+        )
         definition = TemplateDefinition(
             name=source["name"],
             version="custom-html-1",
@@ -1116,7 +1154,11 @@ class MessageStudioService:
         )
         rendered = self.renderer.render(definition, context, seed=0, now=self.now_fn())
         rendered_html = rendered.html or ""
-        if re.search(r"(?:src|background)=[\"'](?:https?:|//|javascript:|data:text/html)", rendered_html, re.I):
+        if re.search(
+            r"(?:src|background)=[\"'](?:https?:|//|javascript:|data:text/html)",
+            rendered_html,
+            re.I,
+        ):
             raise MessageStudioError("prepared HTML contains an unsafe resource URL", "unsafe_url")
         diagnostics = list(analyzed["diagnostics"])
         if any(item["code"] == "missing_asset" for item in diagnostics):
@@ -1134,8 +1176,12 @@ class MessageStudioService:
             len(value.encode("utf-8")) for value in (rendered.subject, rendered.text, rendered_html)
         ) + sum(len(item.data) for item in attachments)
         if approximate_bytes > MAX_MESSAGE_ASSET_BYTES:
-            raise MessageStudioError("rendered message exceeds the 25 MiB local limit", "message_limit")
-        warnings = fallback_warnings + [item["message"] for item in diagnostics if item["severity"] != "ERROR"]
+            raise MessageStudioError(
+                "rendered message exceeds the 25 MiB local limit", "message_limit"
+            )
+        warnings = fallback_warnings + [
+            item["message"] for item in diagnostics if item["severity"] != "ERROR"
+        ]
         return {
             "subject": rendered.subject,
             "preheader": "",
@@ -1283,7 +1329,9 @@ class MessageStudioService:
             content_hash=proof.content_hash,
             artifact_kind="controlled_test",
             artifact_ref=proof_id,
-            proof_json=json.dumps(proof.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            proof_json=json.dumps(
+                proof.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
             mime_bytes=composed.serialized,
             created_at=prepared_at,
         )
