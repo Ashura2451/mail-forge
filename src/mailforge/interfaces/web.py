@@ -2692,7 +2692,9 @@ def create_app(
                     "metadata": metadata,
                 }
             document = json.loads(revision["document_json"])
-            rendered = runtime.message_studio.render_document(document, contact=contact)
+            rendered = runtime.message_studio.render_document(
+                document, contact=contact, immutable_revision=True
+            )
             job = runtime.data_studio.get_job(job_id)
             artifact = next(item for item in job["artifacts"] if item["id"] == artifact_id)
             consumer = runtime.data_studio.record_consumer(

@@ -1116,8 +1116,17 @@ class MessageStudioService:
         contact: Mapping[str, Any] | None = None,
         condition_mode: str | None = None,
         preview: bool = False,
+        immutable_revision: bool = False,
     ) -> dict[str, Any]:
-        source = self.validate_document(document)
+        # Draft/document rendering may resolve currently available local assets,
+        # but a published revision is an immutable snapshot.  Published callers
+        # must verify its manifest as stored; they must never repin a missing
+        # digest from the current asset store.
+        source = self.validate_document(
+            document,
+            allow_missing_assets=not immutable_revision,
+            pin_assets=not immutable_revision,
+        )
         context, contact_id = self._contact_context(contact)
         if source.get("composition_mode", "structured") == "custom_html":
             return self._render_custom_document(source, context, preview=preview)
@@ -1294,16 +1303,24 @@ class MessageStudioService:
         if revision_id:
             with self.store.connect() as connection:
                 row = connection.execute(
-                    "SELECT document_json FROM message_revisions WHERE id = ?", (revision_id,)
+                    "SELECT document_json, status FROM message_revisions WHERE id = ?",
+                    (revision_id,),
                 ).fetchone()
             if row is None:
                 raise MessageStudioError("message revision was not found", "revision_not_found")
             document = json.loads(row["document_json"])
+            immutable_revision = row["status"] == "published"
+        else:
+            immutable_revision = False
         if document is None:
             raise MessageStudioError("a document or revision is required")
         contact = self.store.get_contact(contact_id) if contact_id else None
         result = self.render_document(
-            document, contact=contact, condition_mode=condition_mode, preview=True
+            document,
+            contact=contact,
+            condition_mode=condition_mode,
+            preview=True,
+            immutable_revision=immutable_revision,
         )
         result["html"] = self._preview_snapshot(result["html"])
         result.pop("_rendered", None)
@@ -1365,7 +1382,7 @@ class MessageStudioService:
             raise MessageStudioError(
                 "controlled-test recipient is suppressed", "recipient_ineligible"
             )
-        rendered = self.render_document(document, contact=contact)
+        rendered = self.render_document(document, contact=contact, immutable_revision=True)
         composed = self.composer.compose(
             sender=sender,
             recipient=normalized_recipient,
@@ -1445,11 +1462,15 @@ class MessageStudioService:
     def validate_revision(self, revision_id: str) -> dict[str, Any]:
         with self.store.connect() as connection:
             row = connection.execute(
-                "SELECT document_json FROM message_revisions WHERE id = ?", (revision_id,)
+                "SELECT document_json, status FROM message_revisions WHERE id = ?", (revision_id,)
             ).fetchone()
         if row is None:
             raise MessageStudioError("message revision was not found", "revision_not_found")
-        document = self.validate_document(json.loads(row["document_json"]))
+        document = self.validate_document(
+            json.loads(row["document_json"]),
+            allow_missing_assets=row["status"] != "published",
+            pin_assets=row["status"] != "published",
+        )
         return {"valid": True, "content_hash": _hash(document), "warnings": []}
 
     def campaign_snapshot(
@@ -1919,7 +1940,7 @@ class MessageStudioService:
         )
 
         def render(contact: Mapping[str, Any], _intent: Mapping[str, Any], _seed: int):
-            result = self.render_document(document, contact=contact)
+            result = self.render_document(document, contact=contact, immutable_revision=True)
             return result["_rendered"], result["_attachments"]
 
         return self.outbound._prepare_campaign(

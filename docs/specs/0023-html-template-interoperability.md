@@ -129,6 +129,13 @@ digests before publication. Published revisions do not fall back to the newest
 same-named asset. Import rollback archives only assets created by that import;
 deduplicated pre-existing assets remain available.
 
+Validation mode is selected by the trusted lifecycle boundary. Mutable draft
+documents may resolve available assets, while every published-revision caller
+(including Message Studio preview, Data Studio recipient preview, controlled
+preparation, campaign preparation, and canonical rendering) verifies the
+stored manifest read-only. A missing digest is therefore an integrity failure;
+it is never populated in memory and treated as historical proof.
+
 ## Rationale
 
 Research and the pre-change capability inventory are recorded in the executor

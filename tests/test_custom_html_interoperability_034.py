@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import zipfile
 from email.parser import BytesParser
 from email.policy import SMTP
@@ -383,3 +384,76 @@ def test_published_custom_asset_digest_is_required_and_detects_same_id_mutation(
             recipient="owned@example.com",
         )
     assert error.value.code == "asset_integrity"
+
+
+def test_historical_published_missing_digest_fails_closed_across_callers(tmp_path: Path) -> None:
+    studio = _studio(tmp_path)
+    imported = studio.import_custom_html(
+        "Historical digest proof",
+        b'<p>Hello {{ name }}</p><img src="logo.png">',
+        filename="historical.html",
+        assets_zip=_zip({"logo.png": b"\x89PNG\r\n\x1a\nhistorical-image"}),
+    )
+    published = studio.publish(imported["id"], expected_revision_id=imported["draft"]["id"])
+    revision_id = published["published"]["id"]
+
+    # Simulate a pre-034 published row that has an asset identity but no
+    # historical digest evidence. The immutable record must remain untouched.
+    with studio.store.transaction(immediate=True) as connection:
+        row = connection.execute(
+            "SELECT document_json FROM message_revisions WHERE id = ?", (revision_id,)
+        ).fetchone()
+        document = json.loads(row["document_json"])
+        document["custom_html"]["asset_manifest"][0].pop("sha256", None)
+        connection.execute(
+            "UPDATE message_revisions SET document_json = ? WHERE id = ?",
+            (json.dumps(document, sort_keys=True, separators=(",", ":")), revision_id),
+        )
+
+    with pytest.raises(MessageStudioError) as error:
+        studio.preview(revision_id=revision_id)
+    assert error.value.code == "asset_integrity"
+
+    with pytest.raises(MessageStudioError) as error:
+        studio.prepare_controlled_test(
+            revision_id=revision_id,
+            sender=SenderPolicy(ref="sender", provider="synthetic", email="sender@example.com"),
+            recipient="owned@example.com",
+        )
+    assert error.value.code == "asset_integrity"
+    with studio.store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM outbound_message_proofs").fetchone()[0] == 0
+
+    list_id = studio.store.create_list("Historical audience")
+    studio.outbound.campaigns.import_candidates(
+        [
+            ContactCandidate(
+                "owned@example.com", "owned@example.com", "synthetic", 1, {"name": "Owned"}
+            )
+        ],
+        list_id,
+    )
+    campaign_id = studio.outbound.campaigns.create_campaign(
+        "Historical digest campaign",
+        list_id,
+        sender_config_ref="sender",
+        template_ref="studio",
+        message_revision_id=revision_id,
+    )
+    report = studio.prepare_campaign(
+        campaign_id,
+        sender=SenderPolicy(ref="sender", provider="synthetic", email="sender@example.com"),
+        revision_id=revision_id,
+    )
+    assert report.prepared == 0
+    assert len(report.issues) == 1
+    assert report.issues[0].email == "owned@example.com"
+    assert "digest" in report.issues[0].message
+    assert studio.store.list_intents(campaign_id)[0]["state"] != "prepared"
+
+    with studio.store.connect() as connection:
+        stored = connection.execute(
+            "SELECT document_json FROM message_revisions WHERE id = ?", (revision_id,)
+        ).fetchone()
+    stored_document = json.loads(stored["document_json"])
+    assert "sha256" not in stored_document["custom_html"]["asset_manifest"][0]

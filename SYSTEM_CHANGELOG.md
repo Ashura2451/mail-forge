@@ -508,3 +508,6 @@
 - Responsive-shell acceptance now synchronizes with the observable Providers
   route idle state before measuring scroll ownership; no arbitrary sleep was
   added.
+- Published-revision callers now use read-only digest verification, including
+  Data Studio recipient preview and campaign preparation; historical manifests
+  missing digest evidence cannot be silently repinned.
