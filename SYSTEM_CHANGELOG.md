@@ -500,3 +500,11 @@
   publication; failed imports now roll back only newly created assets.
 - Requalified the bundled Python runtime and macOS arm64 package from the final
   remediation source. Cross-model independent review remains unavailable.
+
+## 2026-11-01 — Custom HTML digest and scroll closure
+
+- Published custom HTML manifests now persist and verify SHA-256 digests from
+  authoritative asset bytes; missing or mutated content fails closed.
+- Responsive-shell acceptance now synchronizes with the observable Providers
+  route idle state before measuring scroll ownership; no arbitrary sleep was
+  added.

@@ -226,7 +226,17 @@ class MessageStudioService:
             if not reference or not item.get("asset_id"):
                 continue
             asset = self.get_asset(str(item["asset_id"]), include_data=True)
-            if item.get("sha256") and item["sha256"] != asset["sha256"]:
+            actual_digest = hashlib.sha256(asset["data_blob"]).hexdigest()
+            if asset["sha256"] != actual_digest:
+                raise MessageStudioError(
+                    "stored asset content does not match its canonical digest", "asset_integrity"
+                )
+            if not item.get("sha256"):
+                raise MessageStudioError(
+                    "custom HTML asset digest is missing from the published manifest",
+                    "asset_integrity",
+                )
+            if item["sha256"] != actual_digest:
                 raise MessageStudioError(
                     "custom HTML asset content does not match its pinned digest", "asset_integrity"
                 )
@@ -263,7 +273,22 @@ class MessageStudioService:
                 matches.setdefault(item["filename"], []).append(item)
             for item in manifest:
                 reference = str(item.get("reference", "")).replace("\\", "/").lstrip("/")
-                if not reference or item.get("asset_id"):
+                if not reference:
+                    continue
+                if item.get("asset_id"):
+                    asset = self.get_asset(str(item["asset_id"]), include_data=True)
+                    actual_digest = hashlib.sha256(asset["data_blob"]).hexdigest()
+                    if asset["sha256"] != actual_digest:
+                        raise MessageStudioError(
+                            "stored asset content does not match its canonical digest",
+                            "asset_integrity",
+                        )
+                    if item.get("sha256") and item["sha256"] != actual_digest:
+                        raise MessageStudioError(
+                            "custom HTML asset content does not match its pinned digest",
+                            "asset_integrity",
+                        )
+                    item["sha256"] = actual_digest
                     continue
                 candidates = matches.get(PurePath(reference).name, [])
                 if len(candidates) > 1:
@@ -272,7 +297,14 @@ class MessageStudioService:
                         "asset_ambiguous",
                     )
                 if candidates:
-                    item["asset_id"], item["sha256"] = candidates[0]["id"], candidates[0]["sha256"]
+                    asset = self.get_asset(candidates[0]["id"], include_data=True)
+                    actual_digest = hashlib.sha256(asset["data_blob"]).hexdigest()
+                    if asset["sha256"] != actual_digest:
+                        raise MessageStudioError(
+                            "stored asset content does not match its canonical digest",
+                            "asset_integrity",
+                        )
+                    item["asset_id"], item["sha256"] = asset["id"], actual_digest
                 elif not allow_missing_assets:
                     raise MessageStudioError(
                         f"local asset is missing: {reference}", "missing_asset"

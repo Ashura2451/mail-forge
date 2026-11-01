@@ -66,7 +66,7 @@ The source contract is:
     "original_source": "...",
     "source_hash": "sha256",
     "prepared_source": "...",
-    "asset_manifest": [{"reference": "images/logo.png", "asset_id": "...", "kind": "image"}],
+    "asset_manifest": [{"reference": "images/logo.png", "asset_id": "...", "sha256": "...", "kind": "image"}],
     "diagnostics": [],
     "css_mode": "simple-inline-preserve-media"
   },
@@ -100,6 +100,20 @@ HTML/CSS compatibility or automatic VML correctness. Full visual editing,
 client-specific linting, personalized attachments, native Windows packaging,
 and installation/update continuity remain roadmap candidates rather than this
 milestone's implementation.
+
+## Final asset-integrity and scroll closure
+
+Every published local asset reference is persisted with its canonical asset ID,
+reference, kind, and SHA-256 digest computed from authoritative stored bytes.
+Published rendering, recipient rendering, campaign preparation, and controlled
+preparation fail with `asset_integrity` when the digest is missing, the stored
+row digest disagrees with its bytes, or the bytes no longer match the published
+digest. Historical published revisions without complete manifests are not
+silently repinned; they require explicit republish from a validated draft.
+
+The responsive-shell acceptance route waits for observable network/layout
+quiescence before recording scroll ownership, preserving the independent main
+workspace and sidebar scroll contract across asynchronous route transitions.
 
 ## Security and integrity remediation
 

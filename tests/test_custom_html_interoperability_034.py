@@ -352,3 +352,34 @@ def test_custom_html_security_integrity_remediation(tmp_path: Path) -> None:
             assets_zip=_zip({"shared.png": b"\x89PNG\r\n\x1a\nshared"}),
         )
     assert studio.get_asset(shared["id"])["sha256"]
+
+
+def test_published_custom_asset_digest_is_required_and_detects_same_id_mutation(
+    tmp_path: Path,
+) -> None:
+    studio = _studio(tmp_path)
+    imported = studio.import_custom_html(
+        "Digest binding",
+        b'<img src="logo.png">',
+        filename="digest.html",
+        assets_zip=_zip({"logo.png": b"\x89PNG\r\n\x1a\noriginal"}),
+    )
+    published = studio.publish(imported["id"], expected_revision_id=imported["draft"]["id"])
+    manifest = published["published"]["document"]["custom_html"]["asset_manifest"]
+    assert manifest[0]["sha256"]
+    asset_id = manifest[0]["asset_id"]
+    with studio.store.transaction(immediate=True) as connection:
+        connection.execute(
+            "UPDATE message_assets SET data_blob = ?, size_bytes = ? WHERE id = ?",
+            (b"\x89PNG\r\n\x1a\nforged", 14, asset_id),
+        )
+    with pytest.raises(MessageStudioError) as error:
+        studio.preview(revision_id=published["published"]["id"])
+    assert error.value.code == "asset_integrity"
+    with pytest.raises(MessageStudioError) as error:
+        studio.prepare_controlled_test(
+            revision_id=published["published"]["id"],
+            sender=SenderPolicy(ref="sender", provider="synthetic", email="sender@example.com"),
+            recipient="owned@example.com",
+        )
+    assert error.value.code == "asset_integrity"

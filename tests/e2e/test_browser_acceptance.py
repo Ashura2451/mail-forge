@@ -300,7 +300,7 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
                 assert page.locator("body").evaluate("e => e.scrollHeight <= innerHeight + 1")
 
             page.set_viewport_size({"width": 1280, "height": 600})
-            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
+            page.goto(f"http://127.0.0.1:{port}/providers", wait_until="networkidle")
             page.get_by_label("Provider profile").wait_for()
             assert rail.evaluate("e => e.scrollHeight > e.clientHeight")
             rail.get_by_role("button", name="Maintenance").evaluate(
