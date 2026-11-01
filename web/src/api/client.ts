@@ -55,3 +55,13 @@ export async function uploadMany(path: string, files: File[], fields: Record<str
   if (!response.ok) throw new Error(payload.error?.message || 'Data Studio request failed')
   return payload
 }
+
+export async function uploadFiles(path: string, files: Record<string, File>, fields: Record<string, string> = {}) {
+  const form = new FormData()
+  Object.entries(files).forEach(([key, file]) => form.append(key, file))
+  Object.entries(fields).forEach(([key, value]) => form.append(key, value))
+  const response = await fetch(`/api/v1${path}`, { method: 'POST', body: form, credentials: 'same-origin', headers: { 'x-mailforge-csrf': csrf } })
+  const payload = await response.json()
+  if (!response.ok) throw new Error(payload.error?.message || 'Import failed')
+  return payload
+}

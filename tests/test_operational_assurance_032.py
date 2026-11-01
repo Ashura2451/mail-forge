@@ -215,9 +215,7 @@ def test_active_job_remains_unknown_with_running_supervisors(tmp_path: Path) -> 
     assert health["state"] == "action_required"  # no verified backup exists
 
 
-def test_unknown_required_evidence_cannot_aggregate_to_healthy(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_unknown_required_evidence_cannot_aggregate_to_healthy(tmp_path: Path, monkeypatch) -> None:
     data = DataDirectory.from_path(tmp_path / "data").initialize()
     service = OperationalAssuranceService(CampaignStore(data.database), data)
     service._job_rows = lambda **_kwargs: []  # type: ignore[method-assign]

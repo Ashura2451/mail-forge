@@ -407,9 +407,7 @@ class ProviderOperationsService:
         profile = self.providers.profile(ref)
         if grant.host != profile.host or grant.port != profile.port:
             raise PermissionError("operation authorization endpoint does not match the account")
-        stored = self.store.get_provider_operation_grant(
-            grant.authorization_ref, account_ref=ref
-        )
+        stored = self.store.get_provider_operation_grant(grant.authorization_ref, account_ref=ref)
         if stored is None:
             self.store.record_provider_operation_grant(
                 account_ref=grant.account_ref,

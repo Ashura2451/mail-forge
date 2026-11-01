@@ -76,6 +76,7 @@ class _SMTPServer(socketserver.ThreadingTCPServer):
         self.scenario = scenario
         self.connections = 0
         self.commands: list[str] = []
+        self.received_messages: list[bytes] = []
         super().__init__(("127.0.0.1", 0), _SMTPHandler)
 
 
@@ -119,8 +120,15 @@ class _SMTPHandler(socketserver.BaseRequestHandler):
                 self._send(connection, f"{code} recipient response\r\n".encode())
             elif verb == "DATA":
                 self._send(connection, b"354 end data with <CR><LF>.<CR><LF>\r\n")
-                while self._readline(connection) not in {b".\r\n", b"."}:
-                    pass
+                received = bytearray()
+                while True:
+                    data_line = self._readline(connection)
+                    if data_line in {b".\r\n", b"."}:
+                        break
+                    if data_line.startswith(b".."):
+                        data_line = data_line[1:]
+                    received.extend(data_line)
+                server.received_messages.append(bytes(received))
                 if server.scenario.get("disconnect_after_data"):
                     connection.close()
                     return

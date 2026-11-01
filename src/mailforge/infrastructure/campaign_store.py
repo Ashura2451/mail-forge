@@ -2327,9 +2327,7 @@ class CampaignStore:
             for row in connection.execute("PRAGMA table_info(provider_operation_grants)")
         }
         if "proof_hash" not in grant_columns:
-            connection.execute(
-                "ALTER TABLE provider_operation_grants ADD COLUMN proof_hash TEXT"
-            )
+            connection.execute("ALTER TABLE provider_operation_grants ADD COLUMN proof_hash TEXT")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_outbound_proofs_operation "
             "ON outbound_message_proofs(operation_kind, created_at DESC)"
