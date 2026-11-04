@@ -47,6 +47,17 @@ qualification remain blocked pending separate Business Owner authorization.
 - Restart, idempotency, and concurrent-submission behavior are covered by
   focused tests and the existing operational authorities.
 - The current browser workflow remains the single operator surface.
+- Sandbox-classified accounts require `sandbox_qualification` and synthetic
+  identities at both grant issuance and submission; process-gated readiness is
+  reported separately from stored classification metadata.
+- Controlled-test grants store a secret-free fingerprint of security-relevant
+  provider configuration. Credential-reference, TLS, CA, endpoint, or related
+  drift rejects transport before reservation.
+- The normal single-process database lock is the recovery authority. A
+  `reserved` provider-test row found after restart becomes durable, non-retryable
+  `ambiguous`, retaining its consumed grant and attempt identity.
+- Operators explicitly select a published revision; the browser does not
+  silently choose the first available revision.
 
 ## Explicit exclusions
 
@@ -61,3 +72,7 @@ tests, browser evidence for the controlled journey, CLI/API parity, security
 tampering cases, restart/idempotency coverage, frontend build/lint, Ruff, and
 package smoke checks. Any external qualification is reported as `BLOCKED` unless
 separately authorized and actually exercised.
+
+The local trust assumption is limited to the Mailforge process, the registered
+fixture endpoint, the non-forwarding fixture implementation, and the local
+test environment. An arbitrary loopback SMTP listener is not thereby trusted.

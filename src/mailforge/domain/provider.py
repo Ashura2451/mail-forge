@@ -117,6 +117,7 @@ class ExternalOperationGrant:
     expires_at: str = ""
     authorization_ref: str = ""
     proof_hash: str | None = None
+    profile_fingerprint: str | None = None
 
     def validate(self, *, now: datetime | None = None) -> None:
         if (

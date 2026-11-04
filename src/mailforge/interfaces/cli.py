@@ -1772,40 +1772,40 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.provider_command == "test-send":
-            account = provider_operations.account(args.ref)
-            row = provider_operations.store.get_outbound_proof(args.proof_id)
-            if row is None or row["proof_hash"] != args.proof_hash:
-                raise SystemExit("--proof-id and --proof-hash must identify the same stored proof")
-            grant = ExternalOperationGrant(
-                account_ref=args.ref,
-                operation=ProviderOperation.CONTROLLED_TEST_SEND,
-                host=account["host"],
-                port=account["port"],
-                purpose=args.purpose,
-                sender=args.sender,
-                recipient=args.recipient,
-                max_submissions=1,
-                expires_at=args.expires_at,
-                authorization_ref=args.authorization_ref,
-                proof_hash=args.proof_hash,
-            )
-            print(
-                json.dumps(
-                    provider_operations.controlled_test_send(
-                        ref=args.ref,
-                        sender=args.sender,
-                        recipient=args.recipient,
-                        message=(
-                            args.message.read_text(encoding="utf-8") if args.message else None
-                        ),
-                        idempotency_key=args.idempotency_key,
-                        grant=grant,
-                        proof_id=args.proof_id,
-                        proof_hash=args.proof_hash,
-                    ),
-                    indent=2,
+            with DatabaseProcessLock(args.database):
+                provider_operations.store.reconcile_abandoned_provider_test_submissions()
+                row = provider_operations.store.get_outbound_proof(args.proof_id)
+                if row is None or row["proof_hash"] != args.proof_hash:
+                    raise SystemExit(
+                        "--proof-id and --proof-hash must identify the same stored proof"
+                    )
+                grant = provider_operations.grant_for_authorization(
+                    args.ref,
+                    ProviderOperation.CONTROLLED_TEST_SEND,
+                    authorization_ref=args.authorization_ref,
+                    purpose=args.purpose,
+                    sender=args.sender,
+                    recipient=args.recipient,
+                    expires_at=args.expires_at,
+                    proof_hash=args.proof_hash,
                 )
-            )
+                print(
+                    json.dumps(
+                        provider_operations.controlled_test_send(
+                            ref=args.ref,
+                            sender=args.sender,
+                            recipient=args.recipient,
+                            message=(
+                                args.message.read_text(encoding="utf-8") if args.message else None
+                            ),
+                            idempotency_key=args.idempotency_key,
+                            grant=grant,
+                            proof_id=args.proof_id,
+                            proof_hash=args.proof_hash,
+                        ),
+                        indent=2,
+                    )
+                )
     elif args.command == "inbound":
         if args.inbound_command == "synthetic-demo":
             print(json.dumps(run_inbound_demo(args.database), indent=2, default=str))

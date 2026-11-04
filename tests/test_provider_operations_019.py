@@ -11,7 +11,6 @@ from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.domain.outbound import SenderPolicy
 from mailforge.domain.provider import (
     AuthenticationMethod,
-    ExternalOperationGrant,
     ProviderDiagnostic,
     ProviderDiagnosticStatus,
     ProviderKind,
@@ -53,7 +52,6 @@ def _grant(
     *,
     operation=ProviderOperation.CONTROLLED_TEST_SEND,
 ):
-    account = service.account(ref)
     proof_hash = None
     if operation is ProviderOperation.CONTROLLED_TEST_SEND:
         studio = MessageStudioService(service.store)
@@ -64,21 +62,33 @@ def _grant(
             sender=SenderPolicy(ref="test", provider="synthetic", email="sender@example.com"),
             recipient="owned@example.com",
         )["proof_hash"]
-    return ExternalOperationGrant(
-        account_ref=ref,
-        operation=operation,
-        host=account["host"],
-        port=account["port"],
-        purpose="owner-controlled local qualification fixture",
+    purpose = "owner-controlled local qualification fixture"
+    expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    issued = service.issue_grant(
+        ref,
+        operation,
+        purpose=purpose,
         sender="sender@example.com"
         if operation is ProviderOperation.CONTROLLED_TEST_SEND
         else None,
         recipient="owned@example.com"
         if operation is ProviderOperation.CONTROLLED_TEST_SEND
         else None,
-        max_submissions=1 if operation is ProviderOperation.CONTROLLED_TEST_SEND else 0,
-        expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
-        authorization_ref="owner-auth-019",
+        expires_at=expires_at,
+        proof_hash=proof_hash,
+    )
+    return service.grant_for_authorization(
+        ref,
+        operation,
+        authorization_ref=issued["authorization_ref"],
+        purpose=purpose,
+        sender="sender@example.com"
+        if operation is ProviderOperation.CONTROLLED_TEST_SEND
+        else None,
+        recipient="owned@example.com"
+        if operation is ProviderOperation.CONTROLLED_TEST_SEND
+        else None,
+        expires_at=expires_at,
         proof_hash=proof_hash,
     )
 
@@ -118,7 +128,7 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
         max_concurrency=2,
     )
 
-    assert store.schema_version() == 25
+    assert store.schema_version() == 26
     assert account["display_name"] == "Local fixture"
     assert account["inbound_enabled"] is True
     assert any(item["key"] == "google_workspace" for item in service.capabilities())

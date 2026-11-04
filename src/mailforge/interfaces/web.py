@@ -370,6 +370,7 @@ class ProviderInput(BaseModel):
     credential_ref: str
     tls_mode: TLSMode
     auth_method: AuthenticationMethod = AuthenticationMethod.PASSWORD
+    ca_file: str | None = None
     mailbox: str = "INBOX"
     sender_policy_ref: str | None = None
     display_name: str | None = Field(default=None, max_length=160)
@@ -868,6 +869,7 @@ class WebRuntime:
         )
         self.list_processing = ListProcessingService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
+        self.store.reconcile_abandoned_provider_test_submissions()
         self._recover_running_campaigns()
 
     def _recover_running_campaigns(self) -> None:

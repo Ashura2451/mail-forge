@@ -21,15 +21,6 @@ from pathlib import Path
 
 import pytest
 
-from mailforge.application.message_studio import MessageStudioService
-from mailforge.application.provider_operations import ProviderOperationsService
-from mailforge.domain.provider import (
-    CAPTURE_ONLY_SANDBOX_KEY,
-    AuthenticationMethod,
-    ProviderKind,
-    ProviderProfile,
-    TLSMode,
-)
 from mailforge.infrastructure.campaign_store import CampaignStore
 from tests.test_provider_interoperability import _certificate, _ServerContext, _SMTPServer
 
@@ -165,6 +156,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.get_by_text("configuration_validated", exact=True).wait_for()
             page.get_by_role("button", name="Open operations").click()
             page.get_by_label("Owner-controlled recipient").fill("owned@example.com")
+            page.get_by_label("Published message revision").select_option(index=1)
             page.locator("details").filter(has_text="Advanced authorization").locator(
                 "summary"
             ).click()
@@ -238,30 +230,9 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
     cert, key = _certificate(tmp_path, common_name="127.0.0.1", san="IP:127.0.0.1")
     smtp = _SMTPServer(cert, key, implicit_tls=True)
     database = tmp_path / "browser-sandbox.sqlite3"
-    store = CampaignStore(database)
-    operations = ProviderOperationsService(store)
     sender = "sender@sandbox.example.com"
     recipient = "recipient@sandbox.example.com"
-    operations.register(
-        ProviderProfile(
-            ref="capture",
-            kind=ProviderKind.SMTP,
-            host="127.0.0.1",
-            port=smtp.server_address[1],
-            username=sender,
-            credential_ref="env:MAILFORGE_CAPTURE_PASSWORD",
-            tls_mode=TLSMode.IMPLICIT,
-            auth_method=AuthenticationMethod.PASSWORD,
-            ca_file=str(cert),
-            metadata={"sandbox": {"key": CAPTURE_ONLY_SANDBOX_KEY, "mode": "capture_only"}},
-        ),
-        display_name="Trusted local capture",
-        sender_email=sender,
-    )
-    studio = MessageStudioService(store)
-    document = studio.create_document("Browser sandbox message")
-    revision = studio.publish(document["id"], expected_revision_id=document["draft"]["id"])
-    published_revision_id = revision["published"]["id"]
+    store = CampaignStore(database)
     with _ServerContext(smtp):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -292,11 +263,33 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
             with playwright.sync_playwright() as sync:
                 browser = sync.chromium.launch(headless=True, executable_path=executable)
                 page = browser.new_page(viewport={"width": 1440, "height": 1100})
-                page.goto(f"http://127.0.0.1:{port}/providers", wait_until="networkidle")
-                row = page.locator("table tbody tr").filter(has_text="Trusted local capture")
-                row.get_by_text("credential reference only").wait_for()
+                page.goto(f"http://127.0.0.1:{port}/message-studio", wait_until="networkidle")
+                for subject in ("Browser sandbox message one", "Browser sandbox message two"):
+                    page.get_by_role("button", name="+ New message").click()
+                    page.get_by_role("heading", name="Compose message").wait_for()
+                    page.get_by_label("Subject").fill(subject)
+                    page.get_by_label("Paragraph").fill(f"{subject} body")
+                    page.get_by_role("button", name="Save draft").click()
+                    page.get_by_text("Message draft saved").wait_for()
+                    page.get_by_role("button", name="Publish revision").click()
+                    page.get_by_text("Message revision published").wait_for()
+                page.get_by_role("button", name="Providers").click()
+                page.get_by_label("Provider profile").select_option("local_capture_only_smtp")
+                page.get_by_label("Account reference").fill("capture")
+                page.get_by_label("Port").fill(str(smtp.server_address[1]))
+                page.get_by_label("Username or sender identity").fill(sender)
+                page.get_by_label("Credential reference").fill("env:MAILFORGE_CAPTURE_PASSWORD")
+                page.get_by_label("CA file reference").fill(str(cert))
+                page.get_by_label("TLS mode").select_option("implicit_tls")
+                page.get_by_role("button", name="Save account configuration").click()
+                page.get_by_text("Provider account saved without a network connection").wait_for()
+                row = page.locator("table tbody tr").filter(has_text="capture")
+                row.get_by_text("Sandbox: active").wait_for()
                 row.get_by_role("button", name="Open operations").click()
                 page.get_by_label("Owner-controlled recipient").fill(recipient)
+                revision_selector = page.get_by_label("Published message revision")
+                revision_selector.select_option(index=2)
+                selected_revision = revision_selector.input_value()
                 page.locator("details").filter(has_text="Advanced authorization").locator(
                     "summary"
                 ).click()
@@ -306,7 +299,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 ).click()
                 page.get_by_role("button", name="Prepare server authorization").click()
                 page.get_by_text("Server-issued one-submission authorization prepared").wait_for()
-                assert page.get_by_text(f"Published revision {published_revision_id}").is_visible()
+                assert page.get_by_text(f"Published revision {selected_revision}").is_visible()
                 page.get_by_role("button", name="Submit one controlled test").click()
                 page.get_by_text("Controlled test result recorded").wait_for()
                 page.get_by_text("provider_accepted").wait_for()
@@ -354,7 +347,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 browser = sync.chromium.launch(headless=True, executable_path=executable)
                 page = browser.new_page(viewport={"width": 1440, "height": 1100})
                 page.goto(f"http://127.0.0.1:{port}/providers", wait_until="networkidle")
-                page.locator("table tbody tr").filter(has_text="Trusted local capture").get_by_role(
+                page.locator("table tbody tr").filter(has_text="capture").get_by_role(
                     "button", name="Open operations"
                 ).click()
                 page.get_by_text("provider_accepted").wait_for()

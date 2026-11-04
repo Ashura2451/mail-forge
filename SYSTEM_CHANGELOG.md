@@ -1,5 +1,18 @@
 # System changelog
 
+## 2026-11-04 — Controlled provider sandbox 035 remediation
+
+- Rejected caller-invented grants: controlled transport now resolves an
+  existing durable server-issued grant before provider contact.
+- Enforced sandbox purpose and synthetic sender/recipient restrictions for
+  sandbox-classified accounts, including direct service and CLI paths.
+- Bound grants to a secret-free provider configuration fingerprint and
+  reconciled restart-abandoned reservations to durable, non-retryable ambiguity.
+- Added browser configuration for the approved local account, visible sandbox
+  readiness, CA trust reference, and explicit published-revision selection.
+- No external provider was contacted; the local non-forwarding fixture remains
+  the only transport evidence.
+
 ## 2026-11-01 — Controlled provider sandbox 035 local qualification
 
 - Added an allowlisted `local_capture_only_smtp` provider capability backed by
