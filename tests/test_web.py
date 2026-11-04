@@ -537,6 +537,44 @@ def test_provider_grant_http_boundary_rejects_changed_request_before_transport(
     assert transport_calls == []
 
 
+def test_capture_only_sandbox_grant_rejects_non_synthetic_recipient(
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
+    monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
+    client, headers = _client(tmp_path, request)
+    account = client.post(
+        "/api/v1/providers",
+        headers=headers,
+        json={
+            "ref": "capture-provider",
+            "kind": "smtp",
+            "host": "127.0.0.1",
+            "port": 2525,
+            "username": "sender@sandbox.example.com",
+            "credential_ref": "test:provider",
+            "tls_mode": "implicit_tls",
+            "auth_method": "password",
+            "sender_email": "sender@sandbox.example.com",
+            "sandbox_key": "local_capture_only",
+        },
+    )
+    assert account.status_code == 200
+    response = client.post(
+        "/api/v1/providers/capture-provider/grants",
+        headers=headers,
+        json={
+            "purpose": "sandbox_qualification",
+            "sender": "sender@sandbox.example.com",
+            "recipient": "recipient@example.com",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            "proof_hash": "not-a-proof",
+        },
+    )
+    assert response.status_code == 400
+    assert "synthetic recipient" in response.json()["error"]["message"]
+
+
 def test_campaign_preview_outcomes_and_resume_are_versioned(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:

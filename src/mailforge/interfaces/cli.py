@@ -599,6 +599,11 @@ def build_parser() -> argparse.ArgumentParser:
     provider_register.add_argument("--timeout", type=float, default=30.0)
     provider_register.add_argument("--max-message-bytes", type=int, default=10 * 1024 * 1024)
     provider_register.add_argument("--ca-file", type=str)
+    provider_register.add_argument(
+        "--sandbox-key",
+        choices=["local_capture_only"],
+        help="mark a loopback SMTP profile as the approved capture-only sandbox",
+    )
     provider_validate = provider_commands.add_parser(
         "validate", help="validate without network access"
     )
@@ -1688,6 +1693,11 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.timeout,
                     max_message_bytes=args.max_message_bytes,
                     ca_file=args.ca_file,
+                    metadata=(
+                        {"sandbox": {"key": args.sandbox_key, "mode": "capture_only"}}
+                        if args.sandbox_key
+                        else None
+                    ),
                 )
             )
             print(json.dumps({"registered": args.ref}))

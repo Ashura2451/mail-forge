@@ -2470,9 +2470,11 @@ class CampaignStore:
         _assert_safe_reference(profile.sender_policy_ref, "provider_profile.sender_policy_ref")
         _assert_safe_reference(profile.ca_file, "provider_profile.ca_file")
         if profile.metadata:
-            raise ValueError(
-                "provider profile metadata is not persisted; use explicit secret-free fields"
-            )
+            sandbox = profile.metadata.get("sandbox")
+            if set(profile.metadata) != {"sandbox"} or not isinstance(sandbox, dict):
+                raise ValueError(
+                    "provider profile metadata is not persisted unless it is an approved sandbox"
+                )
         now = utc_now()
         with self.transaction(immediate=True) as connection:
             connection.execute(
@@ -2570,7 +2572,7 @@ class CampaignStore:
             row = connection.execute(
                 "SELECT a.*, p.kind, p.host, p.port, p.username, p.credential_ref, p.tls_mode, "
                 "p.auth_method, p.mailbox, p.sender_policy_ref, p.timeout_seconds, "
-                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled "
+                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled, p.metadata_json "
                 "FROM provider_accounts a JOIN provider_profiles p ON p.ref = a.ref WHERE a.ref = ?",
                 (ref,),
             ).fetchone()
@@ -2580,6 +2582,9 @@ class CampaignStore:
                 "SELECT * FROM provider_inbound_settings WHERE account_ref = ?", (ref,)
             ).fetchone()
         result = dict(row)
+        result["metadata"] = json.loads(result.pop("metadata_json") or "{}")
+        sandbox = result["metadata"].get("sandbox")
+        result["sandbox"] = dict(sandbox) if isinstance(sandbox, dict) else None
         if inbound is not None:
             result["inbound"] = dict(inbound)
             for key in ("read_only", "sync_enabled", "mutation_enabled"):

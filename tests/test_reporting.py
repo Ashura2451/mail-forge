@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -75,11 +75,17 @@ def test_range_and_pagination_are_bounded(tmp_path) -> None:
 def test_campaign_export_escapes_spreadsheet_formulas(tmp_path) -> None:
     store, service = _service(tmp_path)
     list_id = store.create_list("reporting audience")
-    CampaignService(store).create_campaign('=HYPERLINK("https://unsafe.invalid")', list_id)
-
-    content, media_type, filename = service.export(
-        "campaigns", ReportFilters(preset="last_30_days"), format="csv"
+    campaign_id = CampaignService(store).create_campaign(
+        '=HYPERLINK("https://unsafe.invalid")', list_id
     )
+    created_at = datetime.fromisoformat(store.get_campaign(campaign_id)["created_at"])
+    filters = ReportFilters(
+        preset="custom",
+        start=(created_at - timedelta(days=1)).date().isoformat(),
+        end=(created_at + timedelta(days=1)).date().isoformat(),
+    )
+
+    content, media_type, filename = service.export("campaigns", filters, format="csv")
 
     assert media_type.startswith("text/csv")
     assert filename == "mailforge-campaigns.csv"
