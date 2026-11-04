@@ -1,5 +1,37 @@
 # System changelog
 
+## 2026-11-04 — Controlled provider sandbox 035 remediation
+
+- Rejected caller-invented grants: controlled transport now resolves an
+  existing durable server-issued grant before provider contact.
+- Enforced sandbox purpose and synthetic sender/recipient restrictions for
+  sandbox-classified accounts, including direct service and CLI paths.
+- Bound grants to a secret-free provider configuration fingerprint and
+  reconciled restart-abandoned reservations to durable, non-retryable ambiguity.
+- Added browser configuration for the approved local account, visible sandbox
+  readiness, CA trust reference, and explicit published-revision selection.
+- No external provider was contacted; the local non-forwarding fixture remains
+  the only transport evidence.
+
+## 2026-11-01 — Controlled provider sandbox 035 local qualification
+
+- Added an allowlisted `local_capture_only_smtp` provider capability backed by
+  the existing provider profile metadata boundary. Capture-only classification
+  requires explicit `MAILFORGE_ENABLE_LOCAL_FIXTURES=1`, a loopback IP-literal
+  SMTP endpoint, and an exact trusted-harness `MAILFORGE_LOCAL_CAPTURE_ENDPOINT`
+  registration; it cannot be established by a display name or arbitrary host
+  label.
+- Bound `sandbox_qualification` grants to synthetic recipients, published
+  canonical proof, exact sender/recipient identity, expiry, and one submission.
+  Existing provider transport, idempotency, outcome, and ambiguity authorities
+  remain canonical.
+- Added API, CLI, browser capability selection, and focused local tests for
+  sandbox classification, recipient rejection, proof-bound submission, and
+  duplicate UI/API submission behavior.
+- No external provider, credential, recipient, or network operation was used.
+  External qualification, inbox delivery, and unrestricted campaigns remain
+  blocked pending separate Business Owner authorization.
+
 ## 2026-10-30 — Operational assurance 032 qualification closure work
 
 - Added explicit operational source-failure observations so failed job/count,

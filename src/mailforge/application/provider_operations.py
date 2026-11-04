@@ -6,6 +6,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import os
 import secrets
 import ssl
 import urllib.parse
@@ -17,6 +18,8 @@ from typing import Any
 from mailforge.application.outbound_proof import OutboundMessageProof, verify_proof
 from mailforge.application.providers import ProviderService
 from mailforge.domain.provider import (
+    CAPTURE_ONLY_SANDBOX_KEY,
+    SANDBOX_QUALIFICATION_PURPOSE,
     AuthenticationMethod,
     ExternalOperationGrant,
     ProviderCapability,
@@ -26,6 +29,8 @@ from mailforge.domain.provider import (
     ProviderOperation,
     ProviderProfile,
     TLSMode,
+    is_loopback_ip_literal,
+    is_synthetic_identity,
 )
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.infrastructure.credentials import (
@@ -54,6 +59,30 @@ def _loopback(host: str) -> bool:
         return False
 
 
+def _trusted_capture_endpoint(host: str, port: int) -> bool:
+    """Match the endpoint registered by the trusted local fixture harness."""
+
+    configured = os.environ.get("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "").strip()
+    if not configured:
+        return False
+    if configured.startswith("[") and "]" in configured:
+        configured_host, separator, configured_port = configured[1:].partition("]:")
+        if not separator:
+            return False
+    else:
+        configured_host, separator, configured_port = configured.rpartition(":")
+    try:
+        configured_port_number = int(configured_port)
+    except ValueError:
+        return False
+    return (
+        configured_port_number == port
+        and is_loopback_ip_literal(host)
+        and is_loopback_ip_literal(configured_host)
+        and ipaddress.ip_address(host.strip()) == ipaddress.ip_address(configured_host.strip())
+    )
+
+
 def _sanitize_detail(value: object) -> str:
     detail = str(value)
     lowered = detail.lower()
@@ -64,6 +93,17 @@ def _sanitize_detail(value: object) -> str:
 
 def provider_capabilities() -> tuple[ProviderCapability, ...]:
     return (
+        ProviderCapability(
+            "local_capture_only_smtp",
+            "Local capture-only SMTP sandbox",
+            (ProviderKind.SMTP,),
+            (AuthenticationMethod.PASSWORD,),
+            (TLSMode.IMPLICIT, TLSMode.STARTTLS),
+            (("host", "127.0.0.1"), ("port", 2525)),
+            restrictions=(
+                "Loopback only; accepts synthetic recipients and never qualifies inbox delivery.",
+            ),
+        ),
         ProviderCapability(
             "generic_smtp",
             "Custom SMTP",
@@ -279,8 +319,62 @@ class ProviderOperationsService:
     def account(self, ref: str) -> dict[str, Any]:
         return self.store.get_provider_account(ref)
 
+    @staticmethod
+    def _profile_fingerprint(profile: ProviderProfile) -> str:
+        material = {
+            "kind": profile.kind.value,
+            "host": profile.host,
+            "port": profile.port,
+            "username": profile.username,
+            "credential_ref": profile.credential_ref,
+            "tls_mode": profile.tls_mode.value,
+            "auth_method": profile.auth_method.value,
+            "mailbox": profile.mailbox,
+            "sender_policy_ref": profile.sender_policy_ref,
+            "timeout": profile.timeout,
+            "max_message_bytes": profile.max_message_bytes,
+            "ca_file": profile.ca_file,
+            "metadata": profile.metadata or {},
+        }
+        return hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
     def accounts(self) -> list[dict[str, Any]]:
-        return self.store.list_provider_accounts()
+        return [
+            self._account_with_sandbox_state(item) for item in self.store.list_provider_accounts()
+        ]
+
+    def _account_with_sandbox_state(self, account: dict[str, Any]) -> dict[str, Any]:
+        sandbox = account.get("sandbox")
+        requested = isinstance(sandbox, dict) and sandbox.get("key") == CAPTURE_ONLY_SANDBOX_KEY
+        active = self.is_capture_only_sandbox(account["ref"]) if requested else False
+        state = "active" if active else ("unavailable" if requested else "not_requested")
+        result = dict(account)
+        result["sandbox_state"] = state
+        result["sandbox_fixture_ready"] = active
+        return result
+
+    def is_capture_only_sandbox(self, ref: str) -> bool:
+        account = self.account(ref)
+        sandbox = account.get("sandbox")
+        return (
+            os.environ.get("MAILFORGE_ENABLE_LOCAL_FIXTURES") == "1"
+            and account.get("kind") == ProviderKind.SMTP.value
+            and is_loopback_ip_literal(account.get("host", ""))
+            and _trusted_capture_endpoint(account.get("host", ""), int(account.get("port", 0)))
+            and isinstance(sandbox, dict)
+            and sandbox.get("key") == CAPTURE_ONLY_SANDBOX_KEY
+            and sandbox.get("mode") == "capture_only"
+        )
+
+    def is_sandbox_classified(self, ref: str) -> bool:
+        sandbox = self.account(ref).get("sandbox")
+        return (
+            isinstance(sandbox, dict)
+            and sandbox.get("key") == CAPTURE_ONLY_SANDBOX_KEY
+            and sandbox.get("mode") == "capture_only"
+        )
 
     def register(self, profile: ProviderProfile, **account_options: object) -> dict[str, Any]:
         self.store.register_provider_profile(profile)
@@ -306,6 +400,27 @@ class ProviderOperationsService:
     ) -> dict[str, object]:
         """Issue a server-owned, persisted grant for one bounded operation."""
         profile = self.providers.profile(ref)
+        sandbox_classified = self.is_sandbox_classified(ref)
+        if sandbox_classified:
+            if not self.is_capture_only_sandbox(ref):
+                raise PermissionError("sandbox qualification fixture is unavailable")
+            if purpose != SANDBOX_QUALIFICATION_PURPOSE:
+                raise PermissionError(
+                    "capture-only sandbox operations require sandbox_qualification"
+                )
+            if (
+                not sender
+                or not recipient
+                or not is_synthetic_identity(sender)
+                or not is_synthetic_identity(recipient)
+            ):
+                raise PermissionError(
+                    "sandbox qualification requires a synthetic sender and synthetic recipient"
+                )
+        elif purpose == SANDBOX_QUALIFICATION_PURPOSE:
+            raise PermissionError(
+                "sandbox qualification requires an approved capture-only endpoint"
+            )
         authorization_ref = f"grant-{secrets.token_urlsafe(24)}"
         grant = ExternalOperationGrant(
             account_ref=ref,
@@ -319,6 +434,7 @@ class ProviderOperationsService:
             expires_at=expires_at,
             authorization_ref=authorization_ref,
             proof_hash=proof_hash,
+            profile_fingerprint=self._profile_fingerprint(profile),
         )
         grant.validate()
         if operation is ProviderOperation.CONTROLLED_TEST_SEND:
@@ -339,6 +455,7 @@ class ProviderOperationsService:
             expires_at=grant.expires_at,
             authorization_ref=grant.authorization_ref,
             proof_hash=grant.proof_hash,
+            profile_fingerprint=grant.profile_fingerprint,
         )
         return {
             "authorization_ref": authorization_ref,
@@ -383,6 +500,7 @@ class ProviderOperationsService:
             expires_at=row["expires_at"],
             authorization_ref=row["authorization_ref"],
             proof_hash=row.get("proof_hash"),
+            profile_fingerprint=row.get("profile_fingerprint"),
         )
         grant.validate()
         if (
@@ -409,19 +527,7 @@ class ProviderOperationsService:
             raise PermissionError("operation authorization endpoint does not match the account")
         stored = self.store.get_provider_operation_grant(grant.authorization_ref, account_ref=ref)
         if stored is None:
-            self.store.record_provider_operation_grant(
-                account_ref=grant.account_ref,
-                operation=grant.operation.value,
-                host=grant.host,
-                port=grant.port,
-                purpose=grant.purpose,
-                sender=grant.sender,
-                recipient=grant.recipient,
-                max_submissions=grant.max_submissions,
-                expires_at=grant.expires_at,
-                authorization_ref=grant.authorization_ref,
-                proof_hash=grant.proof_hash,
-            )
+            raise PermissionError("operation authorization was not issued by Mailforge")
         elif (
             stored["operation"] != grant.operation.value
             or stored["host"] != grant.host
@@ -431,9 +537,20 @@ class ProviderOperationsService:
             or stored["recipient"] != grant.recipient
             or stored["expires_at"] != grant.expires_at
             or stored.get("proof_hash") != grant.proof_hash
+            or stored.get("profile_fingerprint") != self._profile_fingerprint(profile)
         ):
             raise PermissionError("operation authorization does not match its stored grant")
-        return grant
+        canonical = self.grant_for_authorization(
+            ref,
+            operation,
+            authorization_ref=stored["authorization_ref"],
+            purpose=stored["purpose"],
+            sender=stored["sender"],
+            recipient=stored["recipient"],
+            expires_at=stored["expires_at"],
+            proof_hash=stored.get("proof_hash"),
+        )
+        return canonical
 
     def diagnostic(
         self,
@@ -597,6 +714,21 @@ class ProviderOperationsService:
     ) -> dict[str, Any]:
         self._require_grant(ref, ProviderOperation.CONTROLLED_TEST_SEND, grant)
         account = self.account(ref)
+        if self.is_sandbox_classified(ref):
+            if not self.is_capture_only_sandbox(ref):
+                raise PermissionError("sandbox qualification fixture is unavailable")
+            if grant.purpose != SANDBOX_QUALIFICATION_PURPOSE:
+                raise PermissionError(
+                    "capture-only sandbox operations require sandbox_qualification"
+                )
+            if not is_synthetic_identity(sender) or not is_synthetic_identity(recipient):
+                raise PermissionError(
+                    "sandbox qualification requires a synthetic sender and synthetic recipient"
+                )
+        elif grant.purpose == SANDBOX_QUALIFICATION_PURPOSE:
+            raise PermissionError(
+                "sandbox qualification requires an approved capture-only endpoint"
+            )
         if not account["profile_enabled"] or not account["outbound_enabled"]:
             raise PermissionError("provider account is disabled for outbound operations")
         if account.get("sender_email") and sender.lower() != account["sender_email"].lower():

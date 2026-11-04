@@ -370,6 +370,7 @@ class ProviderInput(BaseModel):
     credential_ref: str
     tls_mode: TLSMode
     auth_method: AuthenticationMethod = AuthenticationMethod.PASSWORD
+    ca_file: str | None = None
     mailbox: str = "INBOX"
     sender_policy_ref: str | None = None
     display_name: str | None = Field(default=None, max_length=160)
@@ -377,6 +378,7 @@ class ProviderInput(BaseModel):
     pacing_per_minute: int = Field(default=60, ge=1, le=100_000)
     max_concurrency: int = Field(default=1, ge=1, le=100)
     inbound_enabled: bool = False
+    sandbox_key: str | None = Field(default=None, max_length=80)
 
 
 class ProviderAccountUpdateInput(BaseModel):
@@ -867,6 +869,7 @@ class WebRuntime:
         )
         self.list_processing = ListProcessingService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
+        self.store.reconcile_abandoned_provider_test_submissions()
         self._recover_running_campaigns()
 
     def _recover_running_campaigns(self) -> None:
@@ -3787,6 +3790,7 @@ def create_app(
     async def register_provider(payload: ProviderInput):
         try:
             values = payload.model_dump()
+            sandbox_key = values.pop("sandbox_key")
             account_options = {
                 "display_name": values.pop("display_name"),
                 "sender_email": values.pop("sender_email"),
@@ -3794,6 +3798,10 @@ def create_app(
                 "max_concurrency": values.pop("max_concurrency"),
                 "inbound_enabled": values.pop("inbound_enabled"),
             }
+            if sandbox_key is not None:
+                if sandbox_key != "local_capture_only":
+                    return _error(400, "provider_sandbox_invalid", "sandbox is not approved")
+                values["metadata"] = {"sandbox": {"key": sandbox_key, "mode": "capture_only"}}
             profile = ProviderProfile(**values)
             profile.validate()
             return {

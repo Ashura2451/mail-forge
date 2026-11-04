@@ -77,6 +77,11 @@ class ProviderService:
                 "mailbox": row["mailbox"],
                 "sender_policy_ref": row["sender_policy_ref"],
                 "enabled": bool(row["enabled"]),
+                "sandbox": (
+                    json.loads(row["metadata_json"]).get("sandbox")
+                    if row["metadata_json"]
+                    else None
+                ),
             }
             for row in self.store.list_provider_profiles(kind=kind.value if kind else None)
         ]

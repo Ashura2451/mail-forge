@@ -21,6 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from mailforge.infrastructure.campaign_store import CampaignStore
+from tests.test_provider_interoperability import _certificate, _ServerContext, _SMTPServer
+
 playwright = pytest.importorskip("playwright.sync_api")
 
 
@@ -153,6 +156,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.get_by_text("configuration_validated", exact=True).wait_for()
             page.get_by_role("button", name="Open operations").click()
             page.get_by_label("Owner-controlled recipient").fill("owned@example.com")
+            page.get_by_label("Published message revision").select_option(index=1)
             page.locator("details").filter(has_text="Advanced authorization").locator(
                 "summary"
             ).click()
@@ -216,6 +220,141 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
     finally:
         server.terminate()
         server.wait(timeout=5)
+
+
+def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    cert, key = _certificate(tmp_path, common_name="127.0.0.1", san="IP:127.0.0.1")
+    smtp = _SMTPServer(cert, key, implicit_tls=True)
+    database = tmp_path / "browser-sandbox.sqlite3"
+    sender = "sender@sandbox.example.com"
+    recipient = "recipient@sandbox.example.com"
+    store = CampaignStore(database)
+    with _ServerContext(smtp):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        frontend = repo / "src" / "mailforge" / "web_assets"
+        code = (
+            "import uvicorn; "
+            "from mailforge.interfaces.web import create_app; "
+            f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+            f"host='127.0.0.1', port={port}, log_level='error')"
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PYTHONPATH": str(repo / "src"),
+                "MAILFORGE_ENABLE_LOCAL_FIXTURES": "1",
+                "MAILFORGE_LOCAL_CAPTURE_ENDPOINT": f"127.0.0.1:{smtp.server_address[1]}",
+                "MAILFORGE_CAPTURE_PASSWORD": "synthetic-capture-password",
+            }
+        )
+
+        def start_server():
+            return subprocess.Popen([sys.executable, "-c", code], env=environment)
+
+        server = start_server()
+        try:
+            _wait_for_server(port)
+            with playwright.sync_playwright() as sync:
+                browser = sync.chromium.launch(headless=True, executable_path=executable)
+                page = browser.new_page(viewport={"width": 1440, "height": 1100})
+                page.goto(f"http://127.0.0.1:{port}/message-studio", wait_until="networkidle")
+                for subject in ("Browser sandbox message one", "Browser sandbox message two"):
+                    page.get_by_role("button", name="+ New message").click()
+                    page.get_by_role("heading", name="Compose message").wait_for()
+                    page.get_by_label("Subject").fill(subject)
+                    page.get_by_label("Paragraph").fill(f"{subject} body")
+                    page.get_by_role("button", name="Save draft").click()
+                    page.get_by_text("Message draft saved").wait_for()
+                    page.get_by_role("button", name="Publish revision").click()
+                    page.get_by_text("Message revision published").wait_for()
+                page.get_by_role("button", name="Providers").click()
+                page.get_by_label("Provider profile").select_option("local_capture_only_smtp")
+                page.get_by_label("Account reference").fill("capture")
+                page.get_by_label("Port").fill(str(smtp.server_address[1]))
+                page.get_by_label("Username or sender identity").fill(sender)
+                page.get_by_label("Credential reference").fill("env:MAILFORGE_CAPTURE_PASSWORD")
+                page.get_by_label("CA file reference").fill(str(cert))
+                page.get_by_label("TLS mode").select_option("implicit_tls")
+                page.get_by_role("button", name="Save account configuration").click()
+                page.get_by_text("Provider account saved without a network connection").wait_for()
+                row = page.locator("table tbody tr").filter(has_text="capture")
+                row.get_by_text("Sandbox: active").wait_for()
+                row.get_by_role("button", name="Open operations").click()
+                page.get_by_label("Owner-controlled recipient").fill(recipient)
+                revision_selector = page.get_by_label("Published message revision")
+                revision_selector.select_option(index=2)
+                selected_revision = revision_selector.input_value()
+                page.locator("details").filter(has_text="Advanced authorization").locator(
+                    "summary"
+                ).click()
+                page.get_by_label("Purpose").fill("sandbox_qualification")
+                page.get_by_text(
+                    "I confirm this exact sender, recipient, message, and one-submission scope."
+                ).click()
+                page.get_by_role("button", name="Prepare server authorization").click()
+                page.get_by_text("Server-issued one-submission authorization prepared").wait_for()
+                assert page.get_by_text(f"Published revision {selected_revision}").is_visible()
+                page.get_by_role("button", name="Submit one controlled test").click()
+                page.get_by_text("Controlled test result recorded").wait_for()
+                page.get_by_text("provider_accepted").wait_for()
+                assert len(smtp.received_messages) == 1
+                outcome = store.list_provider_tests("capture")[0]
+                proof = store.get_outbound_proof(outcome["proof_id"])
+                assert smtp.received_messages[0] == bytes(proof["mime_bytes"])
+                duplicate = page.request.post(
+                    f"http://127.0.0.1:{port}/api/v1/providers/capture/test-send",
+                    headers={
+                        "content-type": "application/json",
+                        "x-mailforge-csrf": page.request.get(
+                            f"http://127.0.0.1:{port}/api/v1/session"
+                        ).json()["csrf_token"],
+                    },
+                    data=json.dumps(
+                        {
+                            "sender": sender,
+                            "recipient": recipient,
+                            "idempotency_key": page.get_by_label(
+                                "Application-generated idempotency key"
+                            ).input_value()
+                            + "-replay",
+                            "authorization_ref": page.get_by_label(
+                                "Authorization reference"
+                            ).input_value(),
+                            "purpose": "sandbox_qualification",
+                            "expires_at": page.get_by_label("Authorization expiry").input_value(),
+                            "proof_id": proof["id"],
+                            "proof_hash": proof["proof_hash"],
+                        }
+                    ),
+                )
+                assert duplicate.status == 400
+                assert len(smtp.received_messages) == 1
+                browser.close()
+        finally:
+            server.terminate()
+            server.wait(timeout=5)
+
+        server = start_server()
+        try:
+            _wait_for_server(port)
+            with playwright.sync_playwright() as sync:
+                browser = sync.chromium.launch(headless=True, executable_path=executable)
+                page = browser.new_page(viewport={"width": 1440, "height": 1100})
+                page.goto(f"http://127.0.0.1:{port}/providers", wait_until="networkidle")
+                page.locator("table tbody tr").filter(has_text="capture").get_by_role(
+                    "button", name="Open operations"
+                ).click()
+                page.get_by_text("provider_accepted").wait_for()
+                browser.close()
+        finally:
+            server.terminate()
+            server.wait(timeout=5)
 
 
 def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -> None:
@@ -392,6 +531,14 @@ def test_direct_providers_route_bootstraps_capabilities(tmp_path: Path) -> None:
             page.get_by_label("Provider profile").locator("option[value='generic_smtp']").wait_for(
                 state="attached"
             )
+            assert (
+                page.get_by_label("Provider profile")
+                .locator("option[value='local_capture_only_smtp']")
+                .count()
+                == 1
+            )
+            page.get_by_label("Provider profile").select_option("local_capture_only_smtp")
+            assert page.get_by_label("Host").input_value() == "127.0.0.1"
             assert page.get_by_label("Provider profile").locator("option").count() >= 4
             assert not page_errors
             browser.close()

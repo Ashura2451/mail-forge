@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -973,6 +973,7 @@ CREATE TABLE IF NOT EXISTS provider_operation_grants (
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     authorization_ref TEXT NOT NULL
+    ,profile_fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_provider_grants_account
 ON provider_operation_grants(account_ref, expires_at DESC);
@@ -1902,6 +1903,13 @@ class CampaignStore:
                     (25, utc_now()),
                 )
                 current = 25
+            if current < 26:
+                self._apply_migration_26(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (26, utc_now()),
+                )
+                current = 26
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2337,6 +2345,17 @@ class CampaignStore:
             "ON outbound_message_proofs(message_revision_id, created_at DESC)"
         )
 
+    @staticmethod
+    def _apply_migration_26(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_operation_grants)")
+        }
+        if "profile_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_operation_grants ADD COLUMN profile_fingerprint TEXT"
+            )
+
     def schema_version(self) -> int:
         with self.connect() as connection:
             row = connection.execute(
@@ -2470,9 +2489,11 @@ class CampaignStore:
         _assert_safe_reference(profile.sender_policy_ref, "provider_profile.sender_policy_ref")
         _assert_safe_reference(profile.ca_file, "provider_profile.ca_file")
         if profile.metadata:
-            raise ValueError(
-                "provider profile metadata is not persisted; use explicit secret-free fields"
-            )
+            sandbox = profile.metadata.get("sandbox")
+            if set(profile.metadata) != {"sandbox"} or not isinstance(sandbox, dict):
+                raise ValueError(
+                    "provider profile metadata is not persisted unless it is an approved sandbox"
+                )
         now = utc_now()
         with self.transaction(immediate=True) as connection:
             connection.execute(
@@ -2570,7 +2591,7 @@ class CampaignStore:
             row = connection.execute(
                 "SELECT a.*, p.kind, p.host, p.port, p.username, p.credential_ref, p.tls_mode, "
                 "p.auth_method, p.mailbox, p.sender_policy_ref, p.timeout_seconds, "
-                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled "
+                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled, p.metadata_json "
                 "FROM provider_accounts a JOIN provider_profiles p ON p.ref = a.ref WHERE a.ref = ?",
                 (ref,),
             ).fetchone()
@@ -2580,6 +2601,9 @@ class CampaignStore:
                 "SELECT * FROM provider_inbound_settings WHERE account_ref = ?", (ref,)
             ).fetchone()
         result = dict(row)
+        result["metadata"] = json.loads(result.pop("metadata_json") or "{}")
+        sandbox = result["metadata"].get("sandbox")
+        result["sandbox"] = dict(sandbox) if isinstance(sandbox, dict) else None
         if inbound is not None:
             result["inbound"] = dict(inbound)
             for key in ("read_only", "sync_enabled", "mutation_enabled"):
@@ -2726,6 +2750,7 @@ class CampaignStore:
         expires_at: str,
         authorization_ref: str,
         proof_hash: str | None = None,
+        profile_fingerprint: str | None = None,
     ) -> str:
         _assert_safe_reference(account_ref, "provider_grant.account_ref")
         _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
@@ -2744,8 +2769,8 @@ class CampaignStore:
             connection.execute(
                 "INSERT INTO provider_operation_grants "
                 "(id, account_ref, operation, host, port, purpose, sender, recipient, "
-                "max_submissions, expires_at, created_at, authorization_ref, proof_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "max_submissions, expires_at, created_at, authorization_ref, proof_hash, profile_fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     grant_id,
                     account_ref,
@@ -2760,6 +2785,7 @@ class CampaignStore:
                     utc_now(),
                     authorization_ref,
                     proof_hash,
+                    profile_fingerprint,
                 ),
             )
         return grant_id
@@ -2945,6 +2971,41 @@ class CampaignStore:
         if row is None:
             raise KeyError(f"provider test submission not found: {idempotency_key}")
         return dict(row)
+
+    def reconcile_abandoned_provider_test_submissions(self) -> list[dict[str, Any]]:
+        """Resolve reservations left by a terminated single-process runtime.
+
+        The launcher holds the database process lock, so any reserved row found
+        at startup belongs to an execution that no longer exists. Its transport
+        effect is unknowable and must never be replayed automatically.
+        """
+        recovered: list[dict[str, Any]] = []
+        with self.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE status = 'reserved' "
+                "ORDER BY created_at, id"
+            ).fetchall()
+            now = utc_now()
+            detail = (
+                "Application execution ended before the provider outcome was durable; "
+                "transport effect is unresolved and this authorization cannot be replayed."
+            )
+            for row in rows:
+                connection.execute(
+                    "UPDATE provider_test_submissions SET status = 'ambiguous', "
+                    "phase = 'ambiguous', detail = ?, updated_at = ? WHERE id = ? "
+                    "AND status = 'reserved'",
+                    (detail, now, row["id"]),
+                )
+                self.record_event(
+                    connection,
+                    "provider_test_submission",
+                    row["id"],
+                    "provider_test_recovered_ambiguous",
+                    {"authorization_ref": row["authorization_ref"]},
+                )
+                recovered.append(dict(row))
+        return recovered
 
     def get_provider_profile(self, ref: str) -> sqlite3.Row:
         _assert_safe_reference(ref, "provider_profile.ref")
