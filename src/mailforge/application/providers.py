@@ -137,8 +137,11 @@ class ProviderService:
         resolver: CredentialResolver,
         *,
         gate: LiveSendGate,
+        profile: ProviderProfile | None = None,
     ) -> SMTPConnectionPool:
-        profile = self.profile(ref)
+        profile = profile or self.profile(ref)
+        if profile.ref != ref:
+            raise ValueError(f"provider profile snapshot does not match account: {ref}")
         if profile.kind is not ProviderKind.SMTP:
             raise ValueError(f"provider profile is not SMTP: {ref}")
         if not profile.enabled:
@@ -169,8 +172,11 @@ class ProviderService:
         *,
         mailbox: str | None = None,
         source_ref: str | None = None,
+        profile: ProviderProfile | None = None,
     ) -> ImapSource:
-        profile = self.profile(ref)
+        profile = profile or self.profile(ref)
+        if profile.ref != ref:
+            raise ValueError(f"provider profile snapshot does not match account: {ref}")
         if profile.kind is not ProviderKind.IMAP:
             raise ValueError(f"provider profile is not IMAP: {ref}")
         if not profile.enabled:
@@ -210,7 +216,9 @@ class ProviderService:
         pool: SMTPConnectionPool | None = None
         try:
             if profile.kind is ProviderKind.SMTP:
-                pool = self.smtp_pool(ref, resolver, gate=LiveSendGate(enabled=True))
+                pool = self.smtp_pool(
+                    ref, resolver, gate=LiveSendGate(enabled=True), profile=profile
+                )
                 health = pool.health_check()
                 if not all(health.values()):
                     raise ConnectionError("loopback SMTP health check failed")
@@ -223,7 +231,7 @@ class ProviderService:
                     capabilities,
                 )
             else:
-                source = self.imap_source(ref, resolver)
+                source = self.imap_source(ref, resolver, profile=profile)
                 list(source.messages(limit=0))
                 diagnostic = ProviderDiagnostic(
                     ref,

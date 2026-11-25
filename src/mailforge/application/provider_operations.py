@@ -600,7 +600,10 @@ class ProviderOperationsService:
                 )
                 if not external
                 else self._external_diagnostic(
-                    ref, resolver or EnvironmentCredentialResolver(), operation
+                    ref,
+                    resolver or EnvironmentCredentialResolver(),
+                    operation,
+                    grant=grant,
                 )
             )
             return result
@@ -611,59 +614,70 @@ class ProviderOperationsService:
         self, ref: str, resolver: CredentialResolver, *, grant: ExternalOperationGrant | None = None
     ):
         """Return the canonical read-only IMAP source after an explicit grant."""
-        profile = self.providers.profile(ref)
-        if profile.kind is not ProviderKind.IMAP:
-            raise ValueError("inbound acquisition requires an IMAP account")
-        if not _loopback(profile.host):
-            self._require_grant(ref, ProviderOperation.INBOUND_READINESS, grant)
-        return self.providers.imap_source(ref, resolver)
+        with self.store.provider_operation_lock():
+            profile = self.providers.profile(ref)
+            if profile.kind is not ProviderKind.IMAP:
+                raise ValueError("inbound acquisition requires an IMAP account")
+            if not _loopback(profile.host):
+                self._require_grant(ref, ProviderOperation.INBOUND_READINESS, grant)
+            return self.providers.imap_source(ref, resolver, profile=profile)
 
     def _external_diagnostic(
-        self, ref: str, resolver: CredentialResolver, operation: ProviderOperation
+        self,
+        ref: str,
+        resolver: CredentialResolver,
+        operation: ProviderOperation,
+        *,
+        grant: ExternalOperationGrant | None = None,
     ) -> dict[str, object]:
-        profile = self.providers.profile(ref)
-        try:
-            if profile.kind is ProviderKind.SMTP:
-                pool = self.providers.smtp_pool(ref, resolver, gate=LiveSendGate(enabled=True))
-                try:
-                    health = pool.health_check()
-                    caps = pool.last_transaction.capabilities
-                    passed = all(health.values())
-                finally:
-                    pool.close()
-            else:
-                source = self.providers.imap_source(ref, resolver)
-                list(source.messages(limit=0))
-                caps = source.last_capabilities
-                passed = True
-            status = (
-                ProviderDiagnosticStatus.AUTHENTICATION_VERIFIED
-                if passed
-                else ProviderDiagnosticStatus.CONNECTION_FAILED
-            )
-            detail = (
-                "explicit provider connection and authentication check passed"
-                if passed
-                else "provider connection health check failed"
-            )
-        except ssl.SSLError:
-            status, detail, caps = (
-                ProviderDiagnosticStatus.TLS_FAILED,
-                "provider TLS verification failed",
-                (),
-            )
-        except CredentialError:
-            status, detail, caps = (
-                ProviderDiagnosticStatus.CREDENTIAL_MISSING,
-                "provider credential is unavailable or expired",
-                (),
-            )
-        except Exception as error:
-            status, detail, caps = (
-                ProviderDiagnosticStatus.CONNECTION_FAILED,
-                _sanitize_detail(type(error).__name__),
-                (),
-            )
+        with self.store.provider_operation_lock():
+            profile = self.providers.profile(ref)
+            if grant is not None:
+                self._require_grant(ref, operation, grant)
+            try:
+                if profile.kind is ProviderKind.SMTP:
+                    pool = self.providers.smtp_pool(
+                        ref, resolver, gate=LiveSendGate(enabled=True), profile=profile
+                    )
+                    try:
+                        health = pool.health_check()
+                        caps = pool.last_transaction.capabilities
+                        passed = all(health.values())
+                    finally:
+                        pool.close()
+                else:
+                    source = self.providers.imap_source(ref, resolver, profile=profile)
+                    list(source.messages(limit=0))
+                    caps = source.last_capabilities
+                    passed = True
+                status = (
+                    ProviderDiagnosticStatus.AUTHENTICATION_VERIFIED
+                    if passed
+                    else ProviderDiagnosticStatus.CONNECTION_FAILED
+                )
+                detail = (
+                    "explicit provider connection and authentication check passed"
+                    if passed
+                    else "provider connection health check failed"
+                )
+            except ssl.SSLError:
+                status, detail, caps = (
+                    ProviderDiagnosticStatus.TLS_FAILED,
+                    "provider TLS verification failed",
+                    (),
+                )
+            except CredentialError:
+                status, detail, caps = (
+                    ProviderDiagnosticStatus.CREDENTIAL_MISSING,
+                    "provider credential is unavailable or expired",
+                    (),
+                )
+            except Exception as error:
+                status, detail, caps = (
+                    ProviderDiagnosticStatus.CONNECTION_FAILED,
+                    _sanitize_detail(type(error).__name__),
+                    (),
+                )
         diagnostic = ProviderDiagnostic(
             ref,
             status,
@@ -713,78 +727,97 @@ class ProviderOperationsService:
         proof_id: str | None = None,
         proof_hash: str | None = None,
     ) -> dict[str, Any]:
-        self._require_grant(ref, ProviderOperation.CONTROLLED_TEST_SEND, grant)
-        account = self.account(ref)
-        if self.is_sandbox_classified(ref):
-            if not self.is_capture_only_sandbox(ref):
-                raise PermissionError("sandbox qualification fixture is unavailable")
-            if grant.purpose != SANDBOX_QUALIFICATION_PURPOSE:
-                raise PermissionError(
-                    "capture-only sandbox operations require sandbox_qualification"
-                )
-            if not is_synthetic_identity(sender) or not is_synthetic_identity(recipient):
-                raise PermissionError(
-                    "sandbox qualification requires a synthetic sender and synthetic recipient"
-                )
-        elif grant.purpose == SANDBOX_QUALIFICATION_PURPOSE:
-            raise PermissionError(
-                "sandbox qualification requires an approved capture-only endpoint"
-            )
-        if not account["profile_enabled"] or not account["outbound_enabled"]:
-            raise PermissionError("provider account is disabled for outbound operations")
-        if account.get("sender_email") and sender.lower() != account["sender_email"].lower():
-            raise PermissionError("sender does not match the selected provider account")
-        if grant.sender and sender.lower() != grant.sender.lower():
-            raise PermissionError("sender does not match the operation authorization")
-        if grant.recipient and recipient.lower() != grant.recipient.lower():
-            raise PermissionError("recipient does not match the operation authorization")
-        if not grant.proof_hash or (proof_hash and proof_hash != grant.proof_hash):
-            raise PermissionError("controlled test send requires the proof bound to its grant")
-        proof_row = self.store.get_outbound_proof(proof_id) if proof_id else None
-        if proof_row is None:
-            proof_row = self.store.get_outbound_proof_by_hash(grant.proof_hash)
-        if proof_row is None or proof_row["proof_hash"] != grant.proof_hash:
-            raise PermissionError("controlled test proof is missing or does not match its grant")
-        if proof_row["mime_bytes"] is None:
-            raise PermissionError("controlled test proof has no canonical MIME artifact")
-        proof = OutboundMessageProof(
-            proof_id=proof_row["id"],
-            proof_hash=proof_row["proof_hash"],
-            content_hash=proof_row["content_hash"],
-            payload=proof_row["proof"],
-        )
-        verify_proof(proof, bytes(proof_row["mime_bytes"]))
-        if proof.sender != sender or proof.recipient != recipient:
-            raise PermissionError("send addresses do not match the canonical proof")
-        if message is not None and message.encode() != bytes(proof_row["mime_bytes"]):
-            raise PermissionError("caller-supplied content does not match the canonical proof")
-        if message_revision_id is not None and message_revision_id != proof.message_revision_id:
-            raise PermissionError("message revision does not match the canonical proof")
-        message_bytes = bytes(proof_row["mime_bytes"])
-        reservation, owns_reservation = self.store.reserve_provider_test_submission(
-            account_ref=ref,
-            authorization_ref=grant.authorization_ref,
-            idempotency_key=idempotency_key,
-            sender=sender,
-            recipient=recipient,
-            message_digest=hashlib.sha256(message_bytes).hexdigest(),
-            message_revision_id=proof.message_revision_id,
-            proof_id=proof.proof_id,
-            sender_scope_ref=account.get("sender_policy_ref") or "",
-            communication_purpose="transactional",
-        )
-        if not owns_reservation:
-            return reservation
-        self.store.mark_provider_test_transport_started(
-            account_ref=ref,
-            authorization_ref=grant.authorization_ref,
-            idempotency_key=idempotency_key,
-        )
         pool = None
-        try:
-            pool = self.providers.smtp_pool(
-                ref, resolver or EnvironmentCredentialResolver(), gate=LiveSendGate(enabled=True)
+        with self.store.provider_operation_lock():
+            self._require_grant(ref, ProviderOperation.CONTROLLED_TEST_SEND, grant)
+            profile = self.providers.profile(ref)
+            account = self.account(ref)
+            if self.is_sandbox_classified(ref):
+                if not self.is_capture_only_sandbox(ref):
+                    raise PermissionError("sandbox qualification fixture is unavailable")
+                if grant.purpose != SANDBOX_QUALIFICATION_PURPOSE:
+                    raise PermissionError(
+                        "capture-only sandbox operations require sandbox_qualification"
+                    )
+                if not is_synthetic_identity(sender) or not is_synthetic_identity(recipient):
+                    raise PermissionError(
+                        "sandbox qualification requires a synthetic sender and synthetic recipient"
+                    )
+            elif grant.purpose == SANDBOX_QUALIFICATION_PURPOSE:
+                raise PermissionError(
+                    "sandbox qualification requires an approved capture-only endpoint"
+                )
+            if not account["profile_enabled"] or not account["outbound_enabled"]:
+                raise PermissionError("provider account is disabled for outbound operations")
+            if account.get("sender_email") and sender.lower() != account["sender_email"].lower():
+                raise PermissionError("sender does not match the selected provider account")
+            if grant.sender and sender.lower() != grant.sender.lower():
+                raise PermissionError("sender does not match the operation authorization")
+            if grant.recipient and recipient.lower() != grant.recipient.lower():
+                raise PermissionError("recipient does not match the operation authorization")
+            if not grant.proof_hash or (proof_hash and proof_hash != grant.proof_hash):
+                raise PermissionError("controlled test send requires the proof bound to its grant")
+            proof_row = self.store.get_outbound_proof(proof_id) if proof_id else None
+            if proof_row is None:
+                proof_row = self.store.get_outbound_proof_by_hash(grant.proof_hash)
+            if proof_row is None or proof_row["proof_hash"] != grant.proof_hash:
+                raise PermissionError(
+                    "controlled test proof is missing or does not match its grant"
+                )
+            if proof_row["mime_bytes"] is None:
+                raise PermissionError("controlled test proof has no canonical MIME artifact")
+            proof = OutboundMessageProof(
+                proof_id=proof_row["id"],
+                proof_hash=proof_row["proof_hash"],
+                content_hash=proof_row["content_hash"],
+                payload=proof_row["proof"],
             )
+            verify_proof(proof, bytes(proof_row["mime_bytes"]))
+            if proof.sender != sender or proof.recipient != recipient:
+                raise PermissionError("send addresses do not match the canonical proof")
+            if message is not None and message.encode() != bytes(proof_row["mime_bytes"]):
+                raise PermissionError("caller-supplied content does not match the canonical proof")
+            if message_revision_id is not None and message_revision_id != proof.message_revision_id:
+                raise PermissionError("message revision does not match the canonical proof")
+            message_bytes = bytes(proof_row["mime_bytes"])
+            reservation, owns_reservation = self.store.reserve_provider_test_submission(
+                account_ref=ref,
+                authorization_ref=grant.authorization_ref,
+                idempotency_key=idempotency_key,
+                sender=sender,
+                recipient=recipient,
+                message_digest=hashlib.sha256(message_bytes).hexdigest(),
+                message_revision_id=proof.message_revision_id,
+                proof_id=proof.proof_id,
+                sender_scope_ref=account.get("sender_policy_ref") or "",
+                communication_purpose="transactional",
+            )
+            if not owns_reservation:
+                return reservation
+            self.store.mark_provider_test_transport_started(
+                account_ref=ref,
+                authorization_ref=grant.authorization_ref,
+                idempotency_key=idempotency_key,
+            )
+            try:
+                pool = self.providers.smtp_pool(
+                    ref,
+                    resolver or EnvironmentCredentialResolver(),
+                    gate=LiveSendGate(enabled=True),
+                    profile=profile,
+                )
+            except Exception as error:
+                self.store.finalize_provider_test_submission(
+                    account_ref=ref,
+                    authorization_ref=grant.authorization_ref,
+                    idempotency_key=idempotency_key,
+                    status="ambiguous",
+                    phase="transport_setup",
+                    detail=_sanitize_detail(error),
+                    response_code=None,
+                )
+                raise
+        try:
             result = deliver(
                 pool, sender, recipient, message_bytes, gate=LiveSendGate(enabled=True)
             )

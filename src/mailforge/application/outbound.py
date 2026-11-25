@@ -672,14 +672,17 @@ class OutboundService:
         """Execute through a durable provider profile and the canonical SMTP path."""
 
         provider_service = ProviderService(self.store)
-        profile = provider_service.profile(provider_ref)
-        campaign = self.store.get_campaign(campaign_id)
-        if profile.sender_policy_ref != campaign["sender_config_ref"]:
-            raise ValueError(
-                f"provider profile {provider_ref} is not associated with campaign sender "
-                f"policy {campaign['sender_config_ref']}"
+        with self.store.provider_operation_lock():
+            profile = provider_service.profile(provider_ref)
+            campaign = self.store.get_campaign(campaign_id)
+            if profile.sender_policy_ref != campaign["sender_config_ref"]:
+                raise ValueError(
+                    f"provider profile {provider_ref} is not associated with campaign sender "
+                    f"policy {campaign['sender_config_ref']}"
+                )
+            pool = provider_service.smtp_pool(
+                provider_ref, credential_resolver, gate=gate, profile=profile
             )
-        pool = provider_service.smtp_pool(provider_ref, credential_resolver, gate=gate)
         try:
             return self.execute_smtp(
                 campaign_id,

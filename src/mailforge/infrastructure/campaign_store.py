@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -1607,6 +1608,7 @@ class CampaignStore:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+        self._provider_operation_mutex = threading.RLock()
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
@@ -1640,6 +1642,28 @@ class CampaignStore:
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextlib.contextmanager
+    def provider_operation_lock(self) -> Iterator[None]:
+        """Serialize provider mutations with authorization and adapter setup.
+
+        The lock ends once an adapter has been built from the authorized
+        profile snapshot. A later configuration update therefore cannot
+        redirect an in-flight operation, while a new operation must authorize
+        against the updated profile.
+        """
+
+        with self._provider_operation_mutex:
+            if str(self.path) == ":memory:":
+                yield
+                return
+            lock_path = self.path.with_name(f".{self.path.name}.provider.lock")
+            with lock_path.open("a+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
@@ -2524,38 +2548,39 @@ class CampaignStore:
                     "provider profile metadata is not persisted unless it is an approved sandbox"
                 )
         now = utc_now()
-        with self.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO provider_profiles "
-                "(ref, kind, host, port, username, credential_ref, tls_mode, auth_method, mailbox, "
-                "sender_policy_ref, timeout_seconds, max_message_bytes, ca_file, enabled, "
-                "metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ref) DO UPDATE SET kind = excluded.kind, host = excluded.host, "
-                "port = excluded.port, username = excluded.username, credential_ref = excluded.credential_ref, "
-                "tls_mode = excluded.tls_mode, auth_method = excluded.auth_method, mailbox = excluded.mailbox, "
-                "sender_policy_ref = excluded.sender_policy_ref, timeout_seconds = excluded.timeout_seconds, "
-                "max_message_bytes = excluded.max_message_bytes, ca_file = excluded.ca_file, "
-                "enabled = excluded.enabled, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at",
-                (
-                    profile.ref,
-                    profile.kind.value,
-                    profile.host,
-                    profile.port,
-                    profile.username,
-                    profile.credential_ref,
-                    profile.tls_mode.value,
-                    profile.auth_method.value,
-                    profile.mailbox,
-                    profile.sender_policy_ref,
-                    profile.timeout,
-                    profile.max_message_bytes,
-                    profile.ca_file,
-                    int(profile.enabled),
-                    _json(profile.metadata or {}),
-                    now,
-                    now,
-                ),
-            )
+        with self.provider_operation_lock():
+            with self.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT INTO provider_profiles "
+                    "(ref, kind, host, port, username, credential_ref, tls_mode, auth_method, mailbox, "
+                    "sender_policy_ref, timeout_seconds, max_message_bytes, ca_file, enabled, "
+                    "metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(ref) DO UPDATE SET kind = excluded.kind, host = excluded.host, "
+                    "port = excluded.port, username = excluded.username, credential_ref = excluded.credential_ref, "
+                    "tls_mode = excluded.tls_mode, auth_method = excluded.auth_method, mailbox = excluded.mailbox, "
+                    "sender_policy_ref = excluded.sender_policy_ref, timeout_seconds = excluded.timeout_seconds, "
+                    "max_message_bytes = excluded.max_message_bytes, ca_file = excluded.ca_file, "
+                    "enabled = excluded.enabled, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at",
+                    (
+                        profile.ref,
+                        profile.kind.value,
+                        profile.host,
+                        profile.port,
+                        profile.username,
+                        profile.credential_ref,
+                        profile.tls_mode.value,
+                        profile.auth_method.value,
+                        profile.mailbox,
+                        profile.sender_policy_ref,
+                        profile.timeout,
+                        profile.max_message_bytes,
+                        profile.ca_file,
+                        int(profile.enabled),
+                        _json(profile.metadata or {}),
+                        now,
+                        now,
+                    ),
+                )
 
     def upsert_provider_account(
         self,
@@ -2577,41 +2602,42 @@ class CampaignStore:
         if pacing_per_minute <= 0 or max_concurrency <= 0:
             raise ValueError("provider account limits must be positive")
         now = utc_now()
-        with self.transaction(immediate=True) as connection:
-            if (
+        with self.provider_operation_lock():
+            with self.transaction(immediate=True) as connection:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM provider_profiles WHERE ref = ?", (ref,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise KeyError(f"provider profile not found: {ref}")
                 connection.execute(
-                    "SELECT 1 FROM provider_profiles WHERE ref = ?", (ref,)
-                ).fetchone()
-                is None
-            ):
-                raise KeyError(f"provider profile not found: {ref}")
-            connection.execute(
-                "INSERT INTO provider_accounts(ref, display_name, sender_email, status, pacing_per_minute, "
-                "max_concurrency, outbound_enabled, inbound_enabled, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ref) DO UPDATE SET display_name=excluded.display_name, "
-                "sender_email=excluded.sender_email, status=excluded.status, "
-                "pacing_per_minute=excluded.pacing_per_minute, max_concurrency=excluded.max_concurrency, "
-                "outbound_enabled=excluded.outbound_enabled, inbound_enabled=excluded.inbound_enabled, "
-                "updated_at=excluded.updated_at",
-                (
-                    ref,
-                    display_name.strip(),
-                    sender_email,
-                    status,
-                    pacing_per_minute,
-                    max_concurrency,
-                    int(outbound_enabled),
-                    int(inbound_enabled),
-                    now,
-                    now,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
-                "VALUES (?, 'INBOX', 1, 100, ?) ON CONFLICT(account_ref) DO NOTHING",
-                (ref, now),
-            )
+                    "INSERT INTO provider_accounts(ref, display_name, sender_email, status, pacing_per_minute, "
+                    "max_concurrency, outbound_enabled, inbound_enabled, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(ref) DO UPDATE SET display_name=excluded.display_name, "
+                    "sender_email=excluded.sender_email, status=excluded.status, "
+                    "pacing_per_minute=excluded.pacing_per_minute, max_concurrency=excluded.max_concurrency, "
+                    "outbound_enabled=excluded.outbound_enabled, inbound_enabled=excluded.inbound_enabled, "
+                    "updated_at=excluded.updated_at",
+                    (
+                        ref,
+                        display_name.strip(),
+                        sender_email,
+                        status,
+                        pacing_per_minute,
+                        max_concurrency,
+                        int(outbound_enabled),
+                        int(inbound_enabled),
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
+                    "VALUES (?, 'INBOX', 1, 100, ?) ON CONFLICT(account_ref) DO NOTHING",
+                    (ref, now),
+                )
         return self.get_provider_account(ref)
 
     def get_provider_account(self, ref: str) -> dict[str, Any]:
@@ -2657,23 +2683,24 @@ class CampaignStore:
         self, ref: str, status: str, *, enabled: bool | None = None
     ) -> dict[str, Any]:
         _assert_safe_reference(ref, "provider_account.ref")
-        with self.transaction(immediate=True) as connection:
-            if (
+        with self.provider_operation_lock():
+            with self.transaction(immediate=True) as connection:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM provider_accounts WHERE ref = ?", (ref,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise KeyError(f"provider account not found: {ref}")
                 connection.execute(
-                    "SELECT 1 FROM provider_accounts WHERE ref = ?", (ref,)
-                ).fetchone()
-                is None
-            ):
-                raise KeyError(f"provider account not found: {ref}")
-            connection.execute(
-                "UPDATE provider_accounts SET status = ?, updated_at = ? WHERE ref = ?",
-                (status, utc_now(), ref),
-            )
-            if enabled is not None:
-                connection.execute(
-                    "UPDATE provider_profiles SET enabled = ?, updated_at = ? WHERE ref = ?",
-                    (int(enabled), utc_now(), ref),
+                    "UPDATE provider_accounts SET status = ?, updated_at = ? WHERE ref = ?",
+                    (status, utc_now(), ref),
                 )
+                if enabled is not None:
+                    connection.execute(
+                        "UPDATE provider_profiles SET enabled = ?, updated_at = ? WHERE ref = ?",
+                        (int(enabled), utc_now(), ref),
+                    )
         return self.get_provider_account(ref)
 
     def upsert_provider_inbound_settings(

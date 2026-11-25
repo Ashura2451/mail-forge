@@ -4,8 +4,10 @@ import hashlib
 import os
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -313,6 +315,76 @@ def test_profile_security_configuration_drift_rejects_transport(tmp_path, monkey
             proof_hash=proof["proof_hash"],
         )
     assert not pool.messages
+
+
+def test_transport_uses_authorized_profile_snapshot_while_update_waits(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
+    monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
+    store = CampaignStore(tmp_path / "profile-snapshot.sqlite3")
+    service = ProviderOperationsService(store)
+    profile = _profile(sandbox=True)
+    service.register(profile, display_name="Capture", sender_email="sender@sandbox.example.com")
+    proof = _proof(service)
+    grant = _grant(service, proof)
+    pool = _CapturePool()
+    adapter_ready = Event()
+    release_adapter = Event()
+    update_finished = Event()
+    captured: dict[str, object] = {}
+
+    def build_pool(_ref, *_args, profile=None, **_kwargs):
+        assert profile is not None
+        captured.update(host=profile.host, port=profile.port, enabled=profile.enabled)
+        adapter_ready.set()
+        assert release_adapter.wait(timeout=5)
+        return pool
+
+    monkeypatch.setattr(service.providers, "smtp_pool", build_pool)
+    changed = profile.__class__(
+        **{
+            **profile.__dict__,
+            "host": "192.0.2.50",
+            "port": 465,
+            "enabled": False,
+            "metadata": None,
+        }
+    )
+
+    def update_profile():
+        service.register(changed, display_name="Changed", sender_email="sender@sandbox.example.com")
+        update_finished.set()
+
+    send_result: dict[str, object] = {}
+
+    def submit():
+        send_result.update(
+            service.controlled_test_send(
+                ref="capture",
+                sender="sender@sandbox.example.com",
+                recipient="recipient@sandbox.example.com",
+                message=None,
+                idempotency_key="profile-snapshot-key",
+                grant=grant,
+                proof_id=proof["proof_id"],
+                proof_hash=proof["proof_hash"],
+            )
+        )
+
+    sender_thread = threading.Thread(target=submit)
+    sender_thread.start()
+    assert adapter_ready.wait(timeout=5)
+    updater_thread = threading.Thread(target=update_profile)
+    updater_thread.start()
+    updater_thread.join(timeout=0.2)
+    assert not update_finished.is_set()
+    release_adapter.set()
+    sender_thread.join(timeout=5)
+    updater_thread.join(timeout=5)
+
+    assert send_result["status"] == "provider_accepted"
+    assert captured == {"host": "127.0.0.1", "port": 2525, "enabled": True}
+    assert update_finished.is_set()
+    assert service.providers.profile("capture").host == "192.0.2.50"
 
 
 def test_reserved_submission_is_reconciled_as_pre_transport_abandonment(tmp_path, monkeypatch):
