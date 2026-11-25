@@ -59,6 +59,10 @@ qualification remain blocked pending separate Business Owner authorization.
   any row with a recorded transport-start boundary becomes durable,
   non-retryable `ambiguous`. Both retain the consumed grant and attempt
   identity and neither is automatically replayed.
+- Migration of pre-boundary `reserved` rows must complete directly to final
+  `ambiguous` state rather than leaving an intermediate recovery-only state.
+- Grants bind profile enablement as well as endpoint, TLS, CA, credential
+  reference, and other security-relevant configuration.
 - Operators explicitly select a published revision; the browser does not
   silently choose the first available revision.
 

@@ -334,6 +334,7 @@ class ProviderOperationsService:
             "timeout": profile.timeout,
             "max_message_bytes": profile.max_message_bytes,
             "ca_file": profile.ca_file,
+            "enabled": profile.enabled,
             "metadata": profile.metadata or {},
         }
         return hashlib.sha256(

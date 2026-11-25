@@ -2375,10 +2375,12 @@ class CampaignStore:
                 "ALTER TABLE provider_test_submissions ADD COLUMN transport_started_at TEXT"
             )
         # Rows created before the durable boundary existed cannot be proven to
-        # have stopped before transport. Preserve the conservative ambiguity.
+        # have stopped before transport. Persist the conservative final
+        # ambiguity during migration; a later runtime startup must not be
+        # required to complete this data-integrity transition.
         connection.execute(
-            "UPDATE provider_test_submissions SET status = 'attempted', "
-            "phase = 'transport_started', transport_started_at = COALESCE(transport_started_at, updated_at), "
+            "UPDATE provider_test_submissions SET status = 'ambiguous', "
+            "phase = 'ambiguous', transport_started_at = COALESCE(transport_started_at, updated_at, created_at), "
             "detail = 'Legacy reservation has no recorded pre-transport boundary; outcome requires reconciliation.' "
             "WHERE status = 'reserved'"
         )

@@ -295,7 +295,9 @@ def test_profile_security_configuration_drift_rejects_transport(tmp_path, monkey
     proof = _proof(service)
     grant = _grant(service, proof)
     service.register(
-        profile.__class__(**{**profile.__dict__, "credential_ref": "test:changed"}),
+        profile.__class__(
+            **{**profile.__dict__, "credential_ref": "test:changed", "enabled": False}
+        ),
         display_name="Capture",
         sender_email="sender@sandbox.example.com",
     )
@@ -351,6 +353,43 @@ def test_reserved_submission_is_reconciled_as_pre_transport_abandonment(tmp_path
         ]
         == 1
     )
+
+
+def test_legacy_reserved_submission_migrates_to_final_ambiguity(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
+    monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
+    database = tmp_path / "legacy-recovery.sqlite3"
+    store = CampaignStore(database)
+    service = ProviderOperationsService(store)
+    service.register(
+        _profile(sandbox=True), display_name="Capture", sender_email="sender@sandbox.example.com"
+    )
+    proof = _proof(service)
+    grant = _grant(service, proof)
+    proof_row = store.get_outbound_proof(proof["proof_id"])
+    assert proof_row is not None
+    store.reserve_provider_test_submission(
+        account_ref="capture",
+        authorization_ref=grant.authorization_ref,
+        idempotency_key="legacy-key",
+        sender="sender@sandbox.example.com",
+        recipient="recipient@sandbox.example.com",
+        message_digest=hashlib.sha256(bytes(proof_row["mime_bytes"])).hexdigest(),
+        message_revision_id=proof_row["message_revision_id"],
+        proof_id=proof["proof_id"],
+    )
+    with store.transaction(immediate=True) as connection:
+        connection.execute("DELETE FROM schema_migrations WHERE version = 27")
+        connection.execute(
+            "UPDATE provider_test_submissions SET status = 'reserved', phase = 'reserved', "
+            "transport_started_at = NULL WHERE idempotency_key = 'legacy-key'"
+        )
+
+    assert store.migrate() == 27
+    row = store.get_provider_test_submission("legacy-key")
+    assert row["status"] == "ambiguous"
+    assert row["phase"] == "ambiguous"
+    assert row["transport_started_at"] is not None
 
 
 def _run_crashing_submission_child(
