@@ -229,7 +229,15 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
     repo = Path(__file__).parents[2]
     cert, key = _certificate(tmp_path, common_name="127.0.0.1", san="IP:127.0.0.1")
     smtp = _SMTPServer(cert, key, implicit_tls=True)
-    database = tmp_path / "browser-sandbox.sqlite3"
+    packaged_launcher = os.environ.get("MAILFORGE_PACKAGED_LAUNCHER")
+    data_dir = tmp_path / "packaged-data"
+    database = (
+        data_dir / "mailforge.sqlite3"
+        if packaged_launcher
+        else tmp_path / "browser-sandbox.sqlite3"
+    )
+    if packaged_launcher:
+        data_dir.mkdir(parents=True, exist_ok=True)
     sender = "sender@sandbox.example.com"
     recipient = "recipient@sandbox.example.com"
     store = CampaignStore(database)
@@ -255,7 +263,54 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
         )
 
         def start_server():
+            if packaged_launcher:
+                result = subprocess.run(
+                    [
+                        packaged_launcher,
+                        "--data-dir",
+                        str(data_dir),
+                        "--port",
+                        str(port),
+                    ],
+                    env={**environment, "BROWSER": "true"},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert result.returncode == 0, result.stderr or result.stdout
+                return result
             return subprocess.Popen([sys.executable, "-c", code], env=environment)
+
+        def stop_server(server):
+            if packaged_launcher:
+                contents = Path(packaged_launcher).resolve().parents[1]
+                package_environment = {
+                    **environment,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONHOME": str(contents / "Resources" / "python"),
+                    "PYTHONPATH": str(contents / "Resources" / "site-packages"),
+                }
+                result = subprocess.run(
+                    [
+                        str(contents / "Resources" / "python" / "bin" / "python3.15"),
+                        "-m",
+                        "mailforge",
+                        "app",
+                        "stop",
+                        "--data-dir",
+                        str(data_dir),
+                        "--port",
+                        str(port),
+                    ],
+                    env=package_environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert result.returncode == 0, result.stderr or result.stdout
+            else:
+                server.terminate()
+                server.wait(timeout=5)
 
         server = start_server()
         try:
@@ -337,8 +392,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 assert len(smtp.received_messages) == 1
                 browser.close()
         finally:
-            server.terminate()
-            server.wait(timeout=5)
+            stop_server(server)
 
         server = start_server()
         try:
@@ -353,8 +407,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 page.get_by_text("provider_accepted").wait_for()
                 browser.close()
         finally:
-            server.terminate()
-            server.wait(timeout=5)
+            stop_server(server)
 
 
 def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -> None:
@@ -399,7 +452,12 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
 
             rail = page.locator(".rail")
             main = page.locator(".main")
-            evidence = repo / ".orchestra" / "evidence" / "031" / "sidebar"
+            evidence = Path(
+                os.environ.get(
+                    "MAILFORGE_BROWSER_EVIDENCE_DIR",
+                    str(repo / ".orchestra" / "evidence" / "031" / "sidebar"),
+                )
+            )
             evidence.mkdir(parents=True, exist_ok=True)
             main.evaluate("e => e.scrollTo(0, 0)")
             page.screenshot(path=str(evidence / "providers-top.png"))
@@ -1024,9 +1082,14 @@ def test_custom_html_import_edit_export_and_safe_preview(tmp_path: Path) -> None
             page.get_by_text("Custom HTML revision saved").wait_for()
             page.get_by_role("button", name="Publish revision").click()
             page.get_by_text("Message revision published").wait_for()
-            page.screenshot(
-                path=str(repo / ".orchestra" / "evidence" / "034-custom-html-browser.png")
+            evidence_path = Path(
+                os.environ.get(
+                    "MAILFORGE_CUSTOM_HTML_EVIDENCE",
+                    str(repo / ".orchestra" / "evidence" / "034-custom-html-browser.png"),
+                )
             )
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(evidence_path))
             assert page.get_by_role("link", name="Export source + assets").is_visible()
             page.goto(f"http://127.0.0.1:{port}/message-studio", wait_until="networkidle")
             page.locator(".list-row").first.wait_for()

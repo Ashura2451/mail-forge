@@ -58,7 +58,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -991,6 +991,7 @@ CREATE TABLE IF NOT EXISTS provider_test_submissions (
     detail TEXT NOT NULL,
     response_code INTEGER,
     external_access INTEGER NOT NULL DEFAULT 0 CHECK(external_access IN (0, 1)),
+    transport_started_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -1910,6 +1911,13 @@ class CampaignStore:
                     (26, utc_now()),
                 )
                 current = 26
+            if current < 27:
+                self._apply_migration_27(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (27, utc_now()),
+                )
+                current = 27
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2355,6 +2363,25 @@ class CampaignStore:
             connection.execute(
                 "ALTER TABLE provider_operation_grants ADD COLUMN profile_fingerprint TEXT"
             )
+
+    @staticmethod
+    def _apply_migration_27(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_test_submissions)")
+        }
+        if "transport_started_at" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_test_submissions ADD COLUMN transport_started_at TEXT"
+            )
+        # Rows created before the durable boundary existed cannot be proven to
+        # have stopped before transport. Preserve the conservative ambiguity.
+        connection.execute(
+            "UPDATE provider_test_submissions SET status = 'attempted', "
+            "phase = 'transport_started', transport_started_at = COALESCE(transport_started_at, updated_at), "
+            "detail = 'Legacy reservation has no recorded pre-transport boundary; outcome requires reconciliation.' "
+            "WHERE status = 'reserved'"
+        )
 
     def schema_version(self) -> int:
         with self.connect() as connection:
@@ -2922,6 +2949,62 @@ class CampaignStore:
                 True,
             )
 
+    def mark_provider_test_transport_started(
+        self,
+        *,
+        account_ref: str,
+        authorization_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Durably cross the conservative transport-start boundary."""
+
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_test.authorization_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        now = utc_now()
+        with self.transaction(immediate=True) as connection:
+            updated = connection.execute(
+                "UPDATE provider_test_submissions SET status = 'attempted', "
+                "phase = 'transport_started', transport_started_at = ?, "
+                "detail = ?, updated_at = ? WHERE account_ref = ? "
+                "AND authorization_ref = ? AND idempotency_key = ? "
+                "AND status = 'reserved' AND transport_started_at IS NULL",
+                (
+                    now,
+                    "Transport-start boundary recorded before provider contact.",
+                    now,
+                    account_ref,
+                    authorization_ref,
+                    idempotency_key,
+                ),
+            )
+            if updated.rowcount == 1:
+                row = connection.execute(
+                    "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"provider test submission not found: {idempotency_key}")
+                self.record_event(
+                    connection,
+                    "provider_test_submission",
+                    row["id"],
+                    "provider_test_transport_started",
+                    {"authorization_ref": authorization_ref},
+                )
+                return dict(row)
+            row = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"provider test submission not found: {idempotency_key}")
+        if row["status"] != "attempted":
+            raise RuntimeError(
+                f"provider test submission cannot cross transport boundary from {row['status']}"
+            )
+        return dict(row)
+
     def finalize_provider_test_submission(
         self,
         *,
@@ -2940,17 +3023,20 @@ class CampaignStore:
         _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
         _assert_no_secrets({"detail": detail}, "provider_test")
         with self.transaction(immediate=True) as connection:
+            now = utc_now()
             result = connection.execute(
                 "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
-                "response_code = ?, updated_at = ? "
+                "response_code = ?, transport_started_at = COALESCE(transport_started_at, ?), "
+                "updated_at = ? "
                 "WHERE account_ref = ? AND authorization_ref = ? AND idempotency_key = ? "
-                "AND status = 'reserved'",
+                "AND status = 'attempted'",
                 (
                     status,
                     phase,
                     detail,
                     response_code,
-                    utc_now(),
+                    now,
+                    now,
                     account_ref,
                     authorization_ref,
                     idempotency_key,
@@ -2982,26 +3068,39 @@ class CampaignStore:
         recovered: list[dict[str, Any]] = []
         with self.transaction(immediate=True) as connection:
             rows = connection.execute(
-                "SELECT * FROM provider_test_submissions WHERE status = 'reserved' "
+                "SELECT * FROM provider_test_submissions WHERE status IN ('reserved', 'attempted') "
                 "ORDER BY created_at, id"
             ).fetchall()
             now = utc_now()
-            detail = (
-                "Application execution ended before the provider outcome was durable; "
-                "transport effect is unresolved and this authorization cannot be replayed."
-            )
             for row in rows:
+                pre_transport = row["status"] == "reserved" and not row["transport_started_at"]
+                if pre_transport:
+                    status = "abandoned_before_transport"
+                    phase = "not_started"
+                    event_type = "provider_test_recovered_pre_transport_abandoned"
+                    detail = (
+                        "Application execution ended before the transport-start boundary; "
+                        "no provider contact was initiated and this authorization cannot be replayed."
+                    )
+                else:
+                    status = "ambiguous"
+                    phase = "ambiguous"
+                    event_type = "provider_test_recovered_ambiguous"
+                    detail = (
+                        "Application execution ended after the transport-start boundary and "
+                        "before the provider outcome was durable; transport effect is unresolved "
+                        "and this authorization cannot be replayed."
+                    )
                 connection.execute(
-                    "UPDATE provider_test_submissions SET status = 'ambiguous', "
-                    "phase = 'ambiguous', detail = ?, updated_at = ? WHERE id = ? "
-                    "AND status = 'reserved'",
-                    (detail, now, row["id"]),
+                    "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
+                    "updated_at = ? WHERE id = ? AND status IN ('reserved', 'attempted')",
+                    (status, phase, detail, now, row["id"]),
                 )
                 self.record_event(
                     connection,
                     "provider_test_submission",
                     row["id"],
-                    "provider_test_recovered_ambiguous",
+                    event_type,
                     {"authorization_ref": row["authorization_ref"]},
                 )
                 recovered.append(dict(row))

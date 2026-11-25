@@ -128,7 +128,7 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
         max_concurrency=2,
     )
 
-    assert store.schema_version() == 26
+    assert store.schema_version() == 27
     assert account["display_name"] == "Local fixture"
     assert account["inbound_enabled"] is True
     assert any(item["key"] == "google_workspace" for item in service.capabilities())
@@ -381,7 +381,7 @@ def test_idempotency_reservation_ownership_is_proven_while_first_send_is_blocked
         assert entered.wait(timeout=5)
         duplicate = executor.submit(send_once)
         repeated = duplicate.result(timeout=5)
-        assert repeated["status"] == "reserved"
+        assert repeated["status"] == "attempted"
         release.set()
         result = first.result(timeout=5)
     assert result["status"] == "provider_accepted"

@@ -774,6 +774,11 @@ class ProviderOperationsService:
         )
         if not owns_reservation:
             return reservation
+        self.store.mark_provider_test_transport_started(
+            account_ref=ref,
+            authorization_ref=grant.authorization_ref,
+            idempotency_key=idempotency_key,
+        )
         pool = None
         try:
             pool = self.providers.smtp_pool(

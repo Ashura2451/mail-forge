@@ -1,5 +1,18 @@
 # System changelog
 
+## 2026-11-25 — Controlled provider sandbox 035 closure remediation
+
+- Added a durable transport-start boundary for controlled provider tests.
+  Restart recovery now records proven pre-transport abandonment separately from
+  post-boundary ambiguity; neither state replays or releases the consumed grant.
+- Added process-level fixture qualification for pre-transport, in-submission,
+  and post-acknowledgment interruption points.
+- Excluded runtime bytecode caches from package integrity manifests, disabled
+  package bytecode writes, recorded source-commit provenance, and qualified a
+  fresh arm64 candidate through the packaged browser journey.
+- Completed the browser suite using disposable ignored evidence paths; no
+  `.aios/**` or `.orchestra/**` files were changed.
+
 ## 2026-11-04 — Controlled provider sandbox 035 remediation
 
 - Rejected caller-invented grants: controlled transport now resolves an
@@ -7,7 +20,7 @@
 - Enforced sandbox purpose and synthetic sender/recipient restrictions for
   sandbox-classified accounts, including direct service and CLI paths.
 - Bound grants to a secret-free provider configuration fingerprint and
-  reconciled restart-abandoned reservations to durable, non-retryable ambiguity.
+  reconciled restart-abandoned reservations to durable, non-retryable outcomes.
 - Added browser configuration for the approved local account, visible sandbox
   readiness, CA trust reference, and explicit published-revision selection.
 - No external provider was contacted; the local non-forwarding fixture remains

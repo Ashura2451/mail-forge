@@ -1,7 +1,11 @@
 """Local-only acceptance for the controlled provider sandbox milestone."""
 
 import hashlib
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -311,7 +315,7 @@ def test_profile_security_configuration_drift_rejects_transport(tmp_path, monkey
     assert not pool.messages
 
 
-def test_reserved_submission_is_reconciled_as_ambiguous_without_replay(tmp_path, monkeypatch):
+def test_reserved_submission_is_reconciled_as_pre_transport_abandonment(tmp_path, monkeypatch):
     monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
     monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
     database = tmp_path / "recovery.sqlite3"
@@ -338,8 +342,141 @@ def test_reserved_submission_is_reconciled_as_ambiguous_without_replay(tmp_path,
     recovered = restarted.reconcile_abandoned_provider_test_submissions()
     row = restarted.get_provider_test_submission("crashed-key")
     assert len(recovered) == 1
-    assert row["status"] == "ambiguous"
-    assert row["phase"] == "ambiguous"
+    assert row["status"] == "abandoned_before_transport"
+    assert row["phase"] == "not_started"
+    assert row["transport_started_at"] is None
+    assert (
+        restarted.get_provider_operation_grant(grant.authorization_ref, account_ref="capture")[
+            "consumed_submissions"
+        ]
+        == 1
+    )
+
+
+def _run_crashing_submission_child(
+    database: Path,
+    authorization_ref: str,
+    proof_id: str,
+    proof_hash: str,
+    crash_point: str,
+) -> subprocess.CompletedProcess[str]:
+    source_root = Path(__file__).parents[1] / "src"
+    child = f"""
+import os
+import mailforge.application.provider_operations as provider_operations_module
+from mailforge.application.provider_operations import ProviderOperationsService
+from mailforge.domain.provider import ProviderOperation
+from mailforge.infrastructure.campaign_store import CampaignStore
+from mailforge.infrastructure.smtp import DeliveryStatus, SMTPPhase, SMTPTransaction, DeliveryResult
+
+database = {str(database)!r}
+store = CampaignStore(database)
+service = ProviderOperationsService(store)
+row = store.get_provider_operation_grant({authorization_ref!r}, account_ref="capture")
+grant = service.grant_for_authorization(
+    "capture",
+    ProviderOperation.CONTROLLED_TEST_SEND,
+    authorization_ref=row["authorization_ref"],
+    purpose=row["purpose"],
+    sender=row["sender"],
+    recipient=row["recipient"],
+    expires_at=row["expires_at"],
+    proof_hash=row["proof_hash"],
+)
+
+if {crash_point!r} == "before_transport":
+    service.store.mark_provider_test_transport_started = lambda **kwargs: os._exit(41)
+elif {crash_point!r} == "during_submission":
+    class CrashPool:
+        last_transaction = SMTPTransaction("capture-only", SMTPPhase.DATA_TRANSMISSION)
+        last_phase = SMTPPhase.DATA_TRANSMISSION.value
+        def sendmail(self, sender, recipient, message):
+            os._exit(42)
+        def close(self):
+            return None
+    service.providers.smtp_pool = lambda *args, **kwargs: CrashPool()
+elif {crash_point!r} == "after_ack_before_persistence":
+    class FakePool:
+        last_transaction = SMTPTransaction(
+            "capture-only", SMTPPhase.FINAL_DATA_RESPONSE, response_code=250
+        )
+        last_phase = SMTPPhase.FINAL_DATA_RESPONSE.value
+        def close(self):
+            return None
+    service.providers.smtp_pool = lambda *args, **kwargs: FakePool()
+    provider_operations_module.deliver = lambda *args, **kwargs: DeliveryResult(
+        DeliveryStatus.ACCEPTED,
+        "fixture accepted",
+        retryable=False,
+        phase=SMTPPhase.FINAL_DATA_RESPONSE,
+        response_code=250,
+    )
+    service.store.finalize_provider_test_submission = lambda **kwargs: os._exit(43)
+
+service.controlled_test_send(
+    ref="capture",
+    sender="sender@sandbox.example.com",
+    recipient="recipient@sandbox.example.com",
+    message=None,
+    idempotency_key="crash-{crash_point}",
+    grant=grant,
+    proof_id={proof_id!r},
+    proof_hash={proof_hash!r},
+)
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(source_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "MAILFORGE_ENABLE_LOCAL_FIXTURES": "1",
+            "MAILFORGE_LOCAL_CAPTURE_ENDPOINT": "127.0.0.1:2525",
+        }
+    )
+    return subprocess.run(
+        [sys.executable, "-c", child],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("crash_point", "expected_status", "expected_code"),
+    (
+        ("before_transport", "abandoned_before_transport", 41),
+        ("during_submission", "ambiguous", 42),
+        ("after_ack_before_persistence", "ambiguous", 43),
+    ),
+)
+def test_process_crash_recovery_respects_transport_boundary(
+    tmp_path, monkeypatch, crash_point, expected_status, expected_code
+):
+    monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
+    monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
+    database = tmp_path / f"{crash_point}.sqlite3"
+    store = CampaignStore(database)
+    service = ProviderOperationsService(store)
+    service.register(
+        _profile(sandbox=True), display_name="Capture", sender_email="sender@sandbox.example.com"
+    )
+    proof = _proof(service)
+    grant = _grant(service, proof)
+    result = _run_crashing_submission_child(
+        database, grant.authorization_ref, proof["proof_id"], proof["proof_hash"], crash_point
+    )
+    assert result.returncode == expected_code, result.stderr
+
+    restarted = CampaignStore(database)
+    recovered = restarted.reconcile_abandoned_provider_test_submissions()
+    row = restarted.get_provider_test_submission(f"crash-{crash_point}")
+    assert len(recovered) == 1
+    assert row["status"] == expected_status
+    if expected_status == "abandoned_before_transport":
+        assert row["transport_started_at"] is None
+    else:
+        assert row["transport_started_at"] is not None
     assert (
         restarted.get_provider_operation_grant(grant.authorization_ref, account_ref="capture")[
             "consumed_submissions"

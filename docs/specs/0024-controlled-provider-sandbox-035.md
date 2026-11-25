@@ -54,8 +54,11 @@ qualification remain blocked pending separate Business Owner authorization.
   provider configuration. Credential-reference, TLS, CA, endpoint, or related
   drift rejects transport before reservation.
 - The normal single-process database lock is the recovery authority. A
-  `reserved` provider-test row found after restart becomes durable, non-retryable
-  `ambiguous`, retaining its consumed grant and attempt identity.
+  `reserved` provider-test row with no durable transport-start boundary becomes
+  `abandoned_before_transport` with `not_started` phase; an `attempted` row or
+  any row with a recorded transport-start boundary becomes durable,
+  non-retryable `ambiguous`. Both retain the consumed grant and attempt
+  identity and neither is automatically replayed.
 - Operators explicitly select a published revision; the browser does not
   silently choose the first available revision.
 
@@ -69,9 +72,10 @@ Windows packaging, signing/notarization, and hosted multi-user execution.
 
 Local qualification must include focused unit/API tests, existing regression
 tests, browser evidence for the controlled journey, CLI/API parity, security
-tampering cases, restart/idempotency coverage, frontend build/lint, Ruff, and
-package smoke checks. Any external qualification is reported as `BLOCKED` unless
-separately authorized and actually exercised.
+tampering cases, process-level interruption and restart/idempotency coverage,
+frontend build/lint, Ruff, package integrity before and after normal operation,
+and a fresh packaged browser journey. Any external qualification is reported as
+`BLOCKED` unless separately authorized and actually exercised.
 
 The local trust assumption is limited to the Mailforge process, the registered
 fixture endpoint, the non-forwarding fixture implementation, and the local
