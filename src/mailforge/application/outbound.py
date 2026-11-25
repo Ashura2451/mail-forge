@@ -53,6 +53,7 @@ from mailforge.domain.outbound import (
     TemplateDefinition,
 )
 from mailforge.domain.policy import EligibilityStatus
+from mailforge.domain.provider import CAPTURE_ONLY_SANDBOX_KEY
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.infrastructure.smtp import (
     DeliveryStatus as SMTPDeliveryStatus,
@@ -640,6 +641,30 @@ class OutboundService:
         """
 
         pool.gate.require()
+        provider_service = ProviderService(self.store)
+        for config in getattr(pool, "configs", ()):
+            provider_ref = getattr(config, "provider_ref", None)
+            if not provider_ref:
+                continue
+            try:
+                profile = provider_service.profile(provider_ref)
+            except KeyError:
+                # Standalone SMTP pools used by compatibility callers may not
+                # have a durable provider profile; their existing gate remains
+                # the authority for that legacy path.
+                continue
+            if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
+                raise PermissionError(
+                    "capture-only sandbox accounts may only run the bounded "
+                    "controlled-test operation"
+                )
+            if (
+                profile.host != config.host
+                or profile.port != config.port
+                or profile.credential_ref != config.credential_ref
+                or profile.ca_file != config.ca_file
+            ):
+                raise PermissionError("provider configuration changed after pool construction")
         self.store.get_campaign(campaign_id)
         schedule = self._stored_schedule(campaign_id)
         if schedule is not None and not self.schedules.due(schedule, self.now_fn()):
@@ -672,14 +697,22 @@ class OutboundService:
         """Execute through a durable provider profile and the canonical SMTP path."""
 
         provider_service = ProviderService(self.store)
-        profile = provider_service.profile(provider_ref)
-        campaign = self.store.get_campaign(campaign_id)
-        if profile.sender_policy_ref != campaign["sender_config_ref"]:
-            raise ValueError(
-                f"provider profile {provider_ref} is not associated with campaign sender "
-                f"policy {campaign['sender_config_ref']}"
+        with self.store.provider_operation_lock():
+            profile = provider_service.profile(provider_ref)
+            campaign = self.store.get_campaign(campaign_id)
+            if profile.sender_policy_ref != campaign["sender_config_ref"]:
+                raise ValueError(
+                    f"provider profile {provider_ref} is not associated with campaign sender "
+                    f"policy {campaign['sender_config_ref']}"
+                )
+            if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
+                raise PermissionError(
+                    "capture-only sandbox accounts may only run the bounded "
+                    "controlled-test operation"
+                )
+            pool = provider_service.smtp_pool(
+                provider_ref, credential_resolver, gate=gate, profile=profile
             )
-        pool = provider_service.smtp_pool(provider_ref, credential_resolver, gate=gate)
         try:
             return self.execute_smtp(
                 campaign_id,

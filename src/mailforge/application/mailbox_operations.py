@@ -82,14 +82,45 @@ class MailboxOperationsService:
         account_ref: str,
         mailbox: str,
         resolver: CredentialResolver | None = None,
+        *,
+        profile=None,
+        expected_account: dict[str, Any] | None = None,
+        lock_held: bool = False,
     ):
-        self._fixture_account(account_ref)
-        return self.provider_operations.providers.imap_source(
-            account_ref,
-            resolver or EnvironmentCredentialResolver(),
-            mailbox=mailbox,
-            source_ref=self.source_ref(account_ref, mailbox),
-        )
+        def build_source():
+            current = self._fixture_account(account_ref)
+            security_fields = (
+                "kind",
+                "host",
+                "port",
+                "username",
+                "credential_ref",
+                "tls_mode",
+                "auth_method",
+                "ca_file",
+                "profile_enabled",
+                "metadata",
+            )
+            if expected_account is not None and any(
+                current.get(field) != expected_account.get(field) for field in security_fields
+            ):
+                raise MailboxOperationsError(
+                    "provider configuration changed during authorization",
+                    "configuration_changed",
+                )
+            selected_profile = profile or self.provider_operations.providers.profile(account_ref)
+            return self.provider_operations.providers.imap_source(
+                account_ref,
+                resolver or EnvironmentCredentialResolver(),
+                mailbox=mailbox,
+                source_ref=self.source_ref(account_ref, mailbox),
+                profile=selected_profile,
+            )
+
+        if lock_held:
+            return build_source()
+        with self.store.provider_operation_lock():
+            return build_source()
 
     def _grant(
         self, account: dict[str, Any], grant: ExternalOperationGrant, operation: ProviderOperation
@@ -120,13 +151,21 @@ class MailboxOperationsService:
         resolver: CredentialResolver | None = None,
         grant: ExternalOperationGrant | None = None,
     ) -> dict[str, Any]:
-        account = self._fixture_account(account_ref)
-        if grant is None:
-            raise MailboxOperationsError(
-                "folder discovery requires explicit authorization", "authorization_required"
+        with self.store.provider_operation_lock():
+            account = self._fixture_account(account_ref)
+            if grant is None:
+                raise MailboxOperationsError(
+                    "folder discovery requires explicit authorization", "authorization_required"
+                )
+            self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
+            source = self._source(
+                account_ref,
+                account["inbound"]["mailbox"],
+                resolver,
+                profile=self.provider_operations.providers.profile(account_ref),
+                expected_account=account,
+                lock_held=True,
             )
-        self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
-        source = self._source(account_ref, account["inbound"]["mailbox"], resolver)
         try:
             folders = source.discover_mailboxes()
             capabilities = tuple(source.last_capabilities)
@@ -172,19 +211,30 @@ class MailboxOperationsService:
         resolver: CredentialResolver | None = None,
         grant: ExternalOperationGrant | None = None,
     ):
-        account = self._fixture_account(account_ref)
-        if not account["inbound"].get("sync_enabled", True):
-            raise MailboxOperationsError(
-                "synchronization is disabled for this account", "sync_disabled"
+        with self.store.provider_operation_lock():
+            account = self._fixture_account(account_ref)
+            if not account["inbound"].get("sync_enabled", True):
+                raise MailboxOperationsError(
+                    "synchronization is disabled for this account", "sync_disabled"
+                )
+            if grant is None:
+                raise MailboxOperationsError(
+                    "mailbox synchronization requires explicit authorization",
+                    "authorization_required",
+                )
+            self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
+            if not 1 <= batch_limit <= 10_000:
+                raise MailboxOperationsError(
+                    "sync batch is outside the bounded limit", "batch_invalid"
+                )
+            source = self._source(
+                account_ref,
+                mailbox,
+                resolver,
+                profile=self.provider_operations.providers.profile(account_ref),
+                expected_account=account,
+                lock_held=True,
             )
-        if grant is None:
-            raise MailboxOperationsError(
-                "mailbox synchronization requires explicit authorization", "authorization_required"
-            )
-        self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
-        if not 1 <= batch_limit <= 10_000:
-            raise MailboxOperationsError("sync batch is outside the bounded limit", "batch_invalid")
-        source = self._source(account_ref, mailbox, resolver)
         source_ref = self.source_ref(account_ref, mailbox)
         self.store.register_inbound_source(
             source_ref,
@@ -386,7 +436,12 @@ class MailboxOperationsService:
             current = self.action(request["id"])
             return current
         self.store.transition_inbound_mailbox_action(request["id"], action_state="queued")
-        source = self._source(account_ref, row["folder"] or "INBOX", resolver)
+        source = self._source(
+            account_ref,
+            row["folder"] or "INBOX",
+            resolver,
+            expected_account=account,
+        )
         target_uidvalidity = None
         mutation_started = False
         try:
@@ -628,8 +683,13 @@ class MailboxOperationsService:
             )
         if not action.get("account_ref") or not action.get("mailbox"):
             raise MailboxOperationsError("action is missing mailbox identity", "identity_invalid")
-        self._fixture_account(action["account_ref"])
-        source = self._source(action["account_ref"], action["mailbox"], resolver)
+        account = self._fixture_account(action["account_ref"])
+        source = self._source(
+            action["account_ref"],
+            action["mailbox"],
+            resolver,
+            expected_account=account,
+        )
         state = source.mailbox_state(action["mailbox"])
         if str(state["uidvalidity"]) != str(action.get("uidvalidity")):
             raise MailboxOperationsError(

@@ -77,6 +77,11 @@ class ProviderService:
                 "mailbox": row["mailbox"],
                 "sender_policy_ref": row["sender_policy_ref"],
                 "enabled": bool(row["enabled"]),
+                "sandbox": (
+                    json.loads(row["metadata_json"]).get("sandbox")
+                    if row["metadata_json"]
+                    else None
+                ),
             }
             for row in self.store.list_provider_profiles(kind=kind.value if kind else None)
         ]
@@ -132,8 +137,14 @@ class ProviderService:
         resolver: CredentialResolver,
         *,
         gate: LiveSendGate,
+        profile: ProviderProfile | None = None,
     ) -> SMTPConnectionPool:
-        profile = self.profile(ref)
+        if profile is None:
+            profile = self.profile(ref)
+        elif self.profile(ref) != profile:
+            raise ValueError(f"provider profile snapshot is stale or not authoritative: {ref}")
+        if profile.ref != ref:
+            raise ValueError(f"provider profile snapshot does not match account: {ref}")
         if profile.kind is not ProviderKind.SMTP:
             raise ValueError(f"provider profile is not SMTP: {ref}")
         if not profile.enabled:
@@ -164,8 +175,14 @@ class ProviderService:
         *,
         mailbox: str | None = None,
         source_ref: str | None = None,
+        profile: ProviderProfile | None = None,
     ) -> ImapSource:
-        profile = self.profile(ref)
+        if profile is None:
+            profile = self.profile(ref)
+        elif self.profile(ref) != profile:
+            raise ValueError(f"provider profile snapshot is stale or not authoritative: {ref}")
+        if profile.ref != ref:
+            raise ValueError(f"provider profile snapshot does not match account: {ref}")
         if profile.kind is not ProviderKind.IMAP:
             raise ValueError(f"provider profile is not IMAP: {ref}")
         if not profile.enabled:
@@ -205,7 +222,9 @@ class ProviderService:
         pool: SMTPConnectionPool | None = None
         try:
             if profile.kind is ProviderKind.SMTP:
-                pool = self.smtp_pool(ref, resolver, gate=LiveSendGate(enabled=True))
+                pool = self.smtp_pool(
+                    ref, resolver, gate=LiveSendGate(enabled=True), profile=profile
+                )
                 health = pool.health_check()
                 if not all(health.values()):
                     raise ConnectionError("loopback SMTP health check failed")
@@ -218,7 +237,7 @@ class ProviderService:
                     capabilities,
                 )
             else:
-                source = self.imap_source(ref, resolver)
+                source = self.imap_source(ref, resolver, profile=profile)
                 list(source.messages(limit=0))
                 diagnostic = ProviderDiagnostic(
                     ref,

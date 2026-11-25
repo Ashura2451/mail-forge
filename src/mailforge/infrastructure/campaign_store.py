@@ -15,8 +15,11 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
+import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -58,7 +61,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 27
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -973,6 +976,7 @@ CREATE TABLE IF NOT EXISTS provider_operation_grants (
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     authorization_ref TEXT NOT NULL
+    ,profile_fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_provider_grants_account
 ON provider_operation_grants(account_ref, expires_at DESC);
@@ -990,6 +994,7 @@ CREATE TABLE IF NOT EXISTS provider_test_submissions (
     detail TEXT NOT NULL,
     response_code INTEGER,
     external_access INTEGER NOT NULL DEFAULT 0 CHECK(external_access IN (0, 1)),
+    transport_started_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -1604,7 +1609,9 @@ class CampaignStore:
     """Small explicit SQLite adapter with one schema version and safe defaults."""
 
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        raw_path = Path(path)
+        self.path = raw_path if str(raw_path) == ":memory:" else raw_path.expanduser().resolve()
+        self._provider_operation_mutex = threading.RLock()
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
@@ -1638,6 +1645,38 @@ class CampaignStore:
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextlib.contextmanager
+    def provider_operation_lock(self) -> Iterator[None]:
+        """Serialize provider mutations with authorization and adapter setup.
+
+        The lock ends once an adapter has been built from the authorized
+        profile snapshot. A later configuration update therefore cannot
+        redirect an in-flight operation, while a new operation must authorize
+        against the updated profile.
+        """
+
+        with self._provider_operation_mutex:
+            if str(self.path) == ":memory:":
+                yield
+                return
+            # Hash the database inode so symlink and hard-link aliases share
+            # one user-private sidecar without competing with SQLite's own
+            # locks on the database file.
+            identity = os.stat(self.path)
+            lock_root = Path(tempfile.gettempdir()).resolve() / "mailforge-provider-locks"
+            lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_root.chmod(0o700)
+            lock_name = hashlib.sha256(
+                f"{identity.st_dev}:{identity.st_ino}".encode("ascii")
+            ).hexdigest()
+            lock_path = lock_root / f"provider-{lock_name}.lock"
+            with lock_path.open("a+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
@@ -1902,6 +1941,20 @@ class CampaignStore:
                     (25, utc_now()),
                 )
                 current = 25
+            if current < 26:
+                self._apply_migration_26(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (26, utc_now()),
+                )
+                current = 26
+            if current < 27:
+                self._apply_migration_27(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (27, utc_now()),
+                )
+                current = 27
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2337,6 +2390,38 @@ class CampaignStore:
             "ON outbound_message_proofs(message_revision_id, created_at DESC)"
         )
 
+    @staticmethod
+    def _apply_migration_26(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_operation_grants)")
+        }
+        if "profile_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_operation_grants ADD COLUMN profile_fingerprint TEXT"
+            )
+
+    @staticmethod
+    def _apply_migration_27(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(provider_test_submissions)")
+        }
+        if "transport_started_at" not in columns:
+            connection.execute(
+                "ALTER TABLE provider_test_submissions ADD COLUMN transport_started_at TEXT"
+            )
+        # Rows created before the durable boundary existed cannot be proven to
+        # have stopped before transport. Persist the conservative final
+        # ambiguity during migration; a later runtime startup must not be
+        # required to complete this data-integrity transition.
+        connection.execute(
+            "UPDATE provider_test_submissions SET status = 'ambiguous', "
+            "phase = 'ambiguous', transport_started_at = COALESCE(transport_started_at, updated_at, created_at), "
+            "detail = 'Legacy reservation has no recorded pre-transport boundary; outcome is permanently ambiguous and this authorization cannot be replayed.' "
+            "WHERE status = 'reserved'"
+        )
+
     def schema_version(self) -> int:
         with self.connect() as connection:
             row = connection.execute(
@@ -2470,42 +2555,45 @@ class CampaignStore:
         _assert_safe_reference(profile.sender_policy_ref, "provider_profile.sender_policy_ref")
         _assert_safe_reference(profile.ca_file, "provider_profile.ca_file")
         if profile.metadata:
-            raise ValueError(
-                "provider profile metadata is not persisted; use explicit secret-free fields"
-            )
+            sandbox = profile.metadata.get("sandbox")
+            if set(profile.metadata) != {"sandbox"} or not isinstance(sandbox, dict):
+                raise ValueError(
+                    "provider profile metadata is not persisted unless it is an approved sandbox"
+                )
         now = utc_now()
-        with self.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO provider_profiles "
-                "(ref, kind, host, port, username, credential_ref, tls_mode, auth_method, mailbox, "
-                "sender_policy_ref, timeout_seconds, max_message_bytes, ca_file, enabled, "
-                "metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ref) DO UPDATE SET kind = excluded.kind, host = excluded.host, "
-                "port = excluded.port, username = excluded.username, credential_ref = excluded.credential_ref, "
-                "tls_mode = excluded.tls_mode, auth_method = excluded.auth_method, mailbox = excluded.mailbox, "
-                "sender_policy_ref = excluded.sender_policy_ref, timeout_seconds = excluded.timeout_seconds, "
-                "max_message_bytes = excluded.max_message_bytes, ca_file = excluded.ca_file, "
-                "enabled = excluded.enabled, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at",
-                (
-                    profile.ref,
-                    profile.kind.value,
-                    profile.host,
-                    profile.port,
-                    profile.username,
-                    profile.credential_ref,
-                    profile.tls_mode.value,
-                    profile.auth_method.value,
-                    profile.mailbox,
-                    profile.sender_policy_ref,
-                    profile.timeout,
-                    profile.max_message_bytes,
-                    profile.ca_file,
-                    int(profile.enabled),
-                    _json(profile.metadata or {}),
-                    now,
-                    now,
-                ),
-            )
+        with self.provider_operation_lock():
+            with self.transaction(immediate=True) as connection:
+                connection.execute(
+                    "INSERT INTO provider_profiles "
+                    "(ref, kind, host, port, username, credential_ref, tls_mode, auth_method, mailbox, "
+                    "sender_policy_ref, timeout_seconds, max_message_bytes, ca_file, enabled, "
+                    "metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(ref) DO UPDATE SET kind = excluded.kind, host = excluded.host, "
+                    "port = excluded.port, username = excluded.username, credential_ref = excluded.credential_ref, "
+                    "tls_mode = excluded.tls_mode, auth_method = excluded.auth_method, mailbox = excluded.mailbox, "
+                    "sender_policy_ref = excluded.sender_policy_ref, timeout_seconds = excluded.timeout_seconds, "
+                    "max_message_bytes = excluded.max_message_bytes, ca_file = excluded.ca_file, "
+                    "enabled = excluded.enabled, metadata_json = excluded.metadata_json, updated_at = excluded.updated_at",
+                    (
+                        profile.ref,
+                        profile.kind.value,
+                        profile.host,
+                        profile.port,
+                        profile.username,
+                        profile.credential_ref,
+                        profile.tls_mode.value,
+                        profile.auth_method.value,
+                        profile.mailbox,
+                        profile.sender_policy_ref,
+                        profile.timeout,
+                        profile.max_message_bytes,
+                        profile.ca_file,
+                        int(profile.enabled),
+                        _json(profile.metadata or {}),
+                        now,
+                        now,
+                    ),
+                )
 
     def upsert_provider_account(
         self,
@@ -2527,41 +2615,42 @@ class CampaignStore:
         if pacing_per_minute <= 0 or max_concurrency <= 0:
             raise ValueError("provider account limits must be positive")
         now = utc_now()
-        with self.transaction(immediate=True) as connection:
-            if (
+        with self.provider_operation_lock():
+            with self.transaction(immediate=True) as connection:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM provider_profiles WHERE ref = ?", (ref,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise KeyError(f"provider profile not found: {ref}")
                 connection.execute(
-                    "SELECT 1 FROM provider_profiles WHERE ref = ?", (ref,)
-                ).fetchone()
-                is None
-            ):
-                raise KeyError(f"provider profile not found: {ref}")
-            connection.execute(
-                "INSERT INTO provider_accounts(ref, display_name, sender_email, status, pacing_per_minute, "
-                "max_concurrency, outbound_enabled, inbound_enabled, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ref) DO UPDATE SET display_name=excluded.display_name, "
-                "sender_email=excluded.sender_email, status=excluded.status, "
-                "pacing_per_minute=excluded.pacing_per_minute, max_concurrency=excluded.max_concurrency, "
-                "outbound_enabled=excluded.outbound_enabled, inbound_enabled=excluded.inbound_enabled, "
-                "updated_at=excluded.updated_at",
-                (
-                    ref,
-                    display_name.strip(),
-                    sender_email,
-                    status,
-                    pacing_per_minute,
-                    max_concurrency,
-                    int(outbound_enabled),
-                    int(inbound_enabled),
-                    now,
-                    now,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
-                "VALUES (?, 'INBOX', 1, 100, ?) ON CONFLICT(account_ref) DO NOTHING",
-                (ref, now),
-            )
+                    "INSERT INTO provider_accounts(ref, display_name, sender_email, status, pacing_per_minute, "
+                    "max_concurrency, outbound_enabled, inbound_enabled, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(ref) DO UPDATE SET display_name=excluded.display_name, "
+                    "sender_email=excluded.sender_email, status=excluded.status, "
+                    "pacing_per_minute=excluded.pacing_per_minute, max_concurrency=excluded.max_concurrency, "
+                    "outbound_enabled=excluded.outbound_enabled, inbound_enabled=excluded.inbound_enabled, "
+                    "updated_at=excluded.updated_at",
+                    (
+                        ref,
+                        display_name.strip(),
+                        sender_email,
+                        status,
+                        pacing_per_minute,
+                        max_concurrency,
+                        int(outbound_enabled),
+                        int(inbound_enabled),
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO provider_inbound_settings(account_ref, mailbox, read_only, max_fetch, updated_at) "
+                    "VALUES (?, 'INBOX', 1, 100, ?) ON CONFLICT(account_ref) DO NOTHING",
+                    (ref, now),
+                )
         return self.get_provider_account(ref)
 
     def get_provider_account(self, ref: str) -> dict[str, Any]:
@@ -2570,7 +2659,7 @@ class CampaignStore:
             row = connection.execute(
                 "SELECT a.*, p.kind, p.host, p.port, p.username, p.credential_ref, p.tls_mode, "
                 "p.auth_method, p.mailbox, p.sender_policy_ref, p.timeout_seconds, "
-                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled "
+                "p.max_message_bytes, p.ca_file, p.enabled AS profile_enabled, p.metadata_json "
                 "FROM provider_accounts a JOIN provider_profiles p ON p.ref = a.ref WHERE a.ref = ?",
                 (ref,),
             ).fetchone()
@@ -2580,6 +2669,9 @@ class CampaignStore:
                 "SELECT * FROM provider_inbound_settings WHERE account_ref = ?", (ref,)
             ).fetchone()
         result = dict(row)
+        result["metadata"] = json.loads(result.pop("metadata_json") or "{}")
+        sandbox = result["metadata"].get("sandbox")
+        result["sandbox"] = dict(sandbox) if isinstance(sandbox, dict) else None
         if inbound is not None:
             result["inbound"] = dict(inbound)
             for key in ("read_only", "sync_enabled", "mutation_enabled"):
@@ -2604,23 +2696,24 @@ class CampaignStore:
         self, ref: str, status: str, *, enabled: bool | None = None
     ) -> dict[str, Any]:
         _assert_safe_reference(ref, "provider_account.ref")
-        with self.transaction(immediate=True) as connection:
-            if (
+        with self.provider_operation_lock():
+            with self.transaction(immediate=True) as connection:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM provider_accounts WHERE ref = ?", (ref,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise KeyError(f"provider account not found: {ref}")
                 connection.execute(
-                    "SELECT 1 FROM provider_accounts WHERE ref = ?", (ref,)
-                ).fetchone()
-                is None
-            ):
-                raise KeyError(f"provider account not found: {ref}")
-            connection.execute(
-                "UPDATE provider_accounts SET status = ?, updated_at = ? WHERE ref = ?",
-                (status, utc_now(), ref),
-            )
-            if enabled is not None:
-                connection.execute(
-                    "UPDATE provider_profiles SET enabled = ?, updated_at = ? WHERE ref = ?",
-                    (int(enabled), utc_now(), ref),
+                    "UPDATE provider_accounts SET status = ?, updated_at = ? WHERE ref = ?",
+                    (status, utc_now(), ref),
                 )
+                if enabled is not None:
+                    connection.execute(
+                        "UPDATE provider_profiles SET enabled = ?, updated_at = ? WHERE ref = ?",
+                        (int(enabled), utc_now(), ref),
+                    )
         return self.get_provider_account(ref)
 
     def upsert_provider_inbound_settings(
@@ -2726,6 +2819,7 @@ class CampaignStore:
         expires_at: str,
         authorization_ref: str,
         proof_hash: str | None = None,
+        profile_fingerprint: str | None = None,
     ) -> str:
         _assert_safe_reference(account_ref, "provider_grant.account_ref")
         _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
@@ -2744,8 +2838,8 @@ class CampaignStore:
             connection.execute(
                 "INSERT INTO provider_operation_grants "
                 "(id, account_ref, operation, host, port, purpose, sender, recipient, "
-                "max_submissions, expires_at, created_at, authorization_ref, proof_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "max_submissions, expires_at, created_at, authorization_ref, proof_hash, profile_fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     grant_id,
                     account_ref,
@@ -2760,6 +2854,7 @@ class CampaignStore:
                     utc_now(),
                     authorization_ref,
                     proof_hash,
+                    profile_fingerprint,
                 ),
             )
         return grant_id
@@ -2896,6 +2991,62 @@ class CampaignStore:
                 True,
             )
 
+    def mark_provider_test_transport_started(
+        self,
+        *,
+        account_ref: str,
+        authorization_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Durably cross the conservative transport-start boundary."""
+
+        _assert_safe_reference(account_ref, "provider_test.account_ref")
+        _assert_safe_reference(authorization_ref, "provider_test.authorization_ref")
+        _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
+        now = utc_now()
+        with self.transaction(immediate=True) as connection:
+            updated = connection.execute(
+                "UPDATE provider_test_submissions SET status = 'attempted', "
+                "phase = 'transport_started', transport_started_at = ?, "
+                "detail = ?, updated_at = ? WHERE account_ref = ? "
+                "AND authorization_ref = ? AND idempotency_key = ? "
+                "AND status = 'reserved' AND transport_started_at IS NULL",
+                (
+                    now,
+                    "Transport-start boundary recorded before provider contact.",
+                    now,
+                    account_ref,
+                    authorization_ref,
+                    idempotency_key,
+                ),
+            )
+            if updated.rowcount == 1:
+                row = connection.execute(
+                    "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"provider test submission not found: {idempotency_key}")
+                self.record_event(
+                    connection,
+                    "provider_test_submission",
+                    row["id"],
+                    "provider_test_transport_started",
+                    {"authorization_ref": authorization_ref},
+                )
+                return dict(row)
+            row = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"provider test submission not found: {idempotency_key}")
+        if row["status"] != "attempted":
+            raise RuntimeError(
+                f"provider test submission cannot cross transport boundary from {row['status']}"
+            )
+        return dict(row)
+
     def finalize_provider_test_submission(
         self,
         *,
@@ -2914,17 +3065,20 @@ class CampaignStore:
         _assert_safe_reference(idempotency_key, "provider_test.idempotency_key")
         _assert_no_secrets({"detail": detail}, "provider_test")
         with self.transaction(immediate=True) as connection:
+            now = utc_now()
             result = connection.execute(
                 "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
-                "response_code = ?, updated_at = ? "
+                "response_code = ?, transport_started_at = COALESCE(transport_started_at, ?), "
+                "updated_at = ? "
                 "WHERE account_ref = ? AND authorization_ref = ? AND idempotency_key = ? "
-                "AND status = 'reserved'",
+                "AND status = 'attempted'",
                 (
                     status,
                     phase,
                     detail,
                     response_code,
-                    utc_now(),
+                    now,
+                    now,
                     account_ref,
                     authorization_ref,
                     idempotency_key,
@@ -2945,6 +3099,54 @@ class CampaignStore:
         if row is None:
             raise KeyError(f"provider test submission not found: {idempotency_key}")
         return dict(row)
+
+    def reconcile_abandoned_provider_test_submissions(self) -> list[dict[str, Any]]:
+        """Resolve reservations left by a terminated single-process runtime.
+
+        The launcher holds the database process lock, so any reserved row found
+        at startup belongs to an execution that no longer exists. Its transport
+        effect is unknowable and must never be replayed automatically.
+        """
+        recovered: list[dict[str, Any]] = []
+        with self.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM provider_test_submissions WHERE status IN ('reserved', 'attempted') "
+                "ORDER BY created_at, id"
+            ).fetchall()
+            now = utc_now()
+            for row in rows:
+                pre_transport = row["status"] == "reserved" and not row["transport_started_at"]
+                if pre_transport:
+                    status = "abandoned_before_transport"
+                    phase = "not_started"
+                    event_type = "provider_test_recovered_pre_transport_abandoned"
+                    detail = (
+                        "Application execution ended before the transport-start boundary; "
+                        "no provider contact was initiated and this authorization cannot be replayed."
+                    )
+                else:
+                    status = "ambiguous"
+                    phase = "ambiguous"
+                    event_type = "provider_test_recovered_ambiguous"
+                    detail = (
+                        "Application execution ended after the transport-start boundary and "
+                        "before the provider outcome was durable; transport effect is unresolved "
+                        "and this authorization cannot be replayed."
+                    )
+                connection.execute(
+                    "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
+                    "external_access = ?, updated_at = ? WHERE id = ? AND status IN ('reserved', 'attempted')",
+                    (status, phase, detail, int(not pre_transport), now, row["id"]),
+                )
+                self.record_event(
+                    connection,
+                    "provider_test_submission",
+                    row["id"],
+                    event_type,
+                    {"authorization_ref": row["authorization_ref"]},
+                )
+                recovered.append(dict(row))
+        return recovered
 
     def get_provider_profile(self, ref: str) -> sqlite3.Row:
         _assert_safe_reference(ref, "provider_profile.ref")

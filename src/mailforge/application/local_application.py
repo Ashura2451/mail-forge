@@ -590,6 +590,7 @@ class LocalApplication:
             stdin=__import__("subprocess").DEVNULL,
             stdout=log,
             stderr=__import__("subprocess").STDOUT,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             start_new_session=True,
             close_fds=True,
         )

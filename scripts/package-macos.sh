@@ -40,12 +40,15 @@ uv build --wheel --out-dir "$STAGE/wheels"
 WHEEL=$(find "$STAGE/wheels" -type f -name 'mailforge-*.whl' -print -quit)
 uv pip install --python "$STAGE/venv/bin/python" --no-deps "$WHEEL"
 
-cp -R "$BASE_PREFIX" "$RESOURCES/python"
+ditto --norsrc "$BASE_PREFIX" "$RESOURCES/python"
 mkdir -p "$RESOURCES/site-packages"
-cp -R "$STAGE/venv/lib/python3.15/site-packages/." "$RESOURCES/site-packages/"
+ditto --norsrc "$STAGE/venv/lib/python3.15/site-packages/." "$RESOURCES/site-packages/"
 # Local wheel installation metadata can contain the developer checkout path;
 # the application bundle must not depend on or disclose that path.
 find "$RESOURCES" \( -name direct_url.json -o -name '*.pth' \) -delete
+# Python bytecode caches are runtime-mutable and must not be part of the
+# immutable package integrity manifest.
+find "$RESOURCES" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 cat > "$OUTPUT/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -71,6 +74,7 @@ cat > "$OUTPUT/Contents/MacOS/Mailforge" <<'LAUNCHER'
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 RESOURCES="$HERE/Resources"
+export PYTHONDONTWRITEBYTECODE=1
 export PYTHONHOME="$RESOURCES/python"
 export PYTHONPATH="$RESOURCES/site-packages"
 exec "$RESOURCES/python/bin/python3.15" -m mailforge app open "$@"
@@ -78,8 +82,10 @@ LAUNCHER
 chmod 755 "$OUTPUT/Contents/MacOS/Mailforge"
 
 VERSION=$(PYTHONPATH=src uv run --locked python -c 'from mailforge import __version__; print(__version__)')
+SOURCE_COMMIT=$(git rev-parse HEAD)
+ARTIFACT=$(basename "$OUTPUT")
 CHECKSUM=$(shasum -a 256 "$OUTPUT/Contents/MacOS/Mailforge" | awk '{print $1}')
-printf '%s\n' "Mailforge macOS arm64 bundle" "version=$VERSION" "artifact=Mailforge.app" "launcher_sha256=$CHECKSUM" > "$OUTPUT/Contents/Resources/BUILD-METADATA.txt"
+printf '%s\n' "Mailforge macOS arm64 bundle" "version=$VERSION" "source_commit=$SOURCE_COMMIT" "artifact=$ARTIFACT" "launcher_sha256=$CHECKSUM" > "$OUTPUT/Contents/Resources/BUILD-METADATA.txt"
 (cd "$OUTPUT/Contents" && find . -type f ! -name BUILD-METADATA.sha256 -print | sort | while IFS= read -r file; do shasum -a 256 "$file"; done) > "$OUTPUT/Contents/Resources/BUILD-METADATA.sha256"
 
 rm -rf "$STAGE"

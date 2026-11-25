@@ -3,8 +3,32 @@
 from __future__ import annotations
 
 import enum
+import ipaddress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+CAPTURE_ONLY_SANDBOX_KEY = "local_capture_only"
+SANDBOX_QUALIFICATION_PURPOSE = "sandbox_qualification"
+
+
+def is_loopback_ip_literal(value: str) -> bool:
+    """Return whether a host is an unambiguous loopback IP literal."""
+
+    try:
+        return ipaddress.ip_address(value.strip()).is_loopback
+    except ValueError:
+        return False
+
+
+def is_synthetic_identity(value: str) -> bool:
+    """Return whether an address is reserved for non-delivery qualification."""
+
+    normalized = value.strip().lower()
+    return (
+        normalized.endswith("@sandbox.example.com")
+        or normalized.endswith("@example.test")
+        or normalized.endswith("@example.invalid")
+    )
 
 
 class ProviderKind(enum.StrEnum):
@@ -93,6 +117,7 @@ class ExternalOperationGrant:
     expires_at: str = ""
     authorization_ref: str = ""
     proof_hash: str | None = None
+    profile_fingerprint: str | None = None
 
     def validate(self, *, now: datetime | None = None) -> None:
         if (
@@ -173,6 +198,20 @@ class ProviderProfile:
             raise ValueError("IMAP STARTTLS is not implemented; use implicit_tls")
         if self.kind is ProviderKind.IMAP and not self.mailbox.strip():
             raise ValueError("IMAP mailbox must not be empty")
+        sandbox = (self.metadata or {}).get("sandbox")
+        if sandbox is not None:
+            if (
+                not isinstance(sandbox, dict)
+                or set(sandbox) != {"key", "mode"}
+                or sandbox.get("key") != CAPTURE_ONLY_SANDBOX_KEY
+            ):
+                raise ValueError("provider sandbox classification is not approved")
+            if sandbox.get("mode") != "capture_only":
+                raise ValueError("provider sandbox must be capture_only")
+            if self.kind is not ProviderKind.SMTP:
+                raise ValueError("capture-only sandbox qualification requires SMTP")
+            if not is_loopback_ip_literal(self.host):
+                raise ValueError("capture-only sandbox endpoints must be loopback IP literals")
 
 
 @dataclass(frozen=True)
