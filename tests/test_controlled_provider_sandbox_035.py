@@ -295,9 +295,7 @@ def test_profile_security_configuration_drift_rejects_transport(tmp_path, monkey
     proof = _proof(service)
     grant = _grant(service, proof)
     service.register(
-        profile.__class__(
-            **{**profile.__dict__, "credential_ref": "test:changed", "enabled": False}
-        ),
+        profile.__class__(**{**profile.__dict__, "enabled": False}),
         display_name="Capture",
         sender_email="sender@sandbox.example.com",
     )

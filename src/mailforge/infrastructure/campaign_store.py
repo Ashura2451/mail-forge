@@ -2381,7 +2381,7 @@ class CampaignStore:
         connection.execute(
             "UPDATE provider_test_submissions SET status = 'ambiguous', "
             "phase = 'ambiguous', transport_started_at = COALESCE(transport_started_at, updated_at, created_at), "
-            "detail = 'Legacy reservation has no recorded pre-transport boundary; outcome requires reconciliation.' "
+            "detail = 'Legacy reservation has no recorded pre-transport boundary; outcome is permanently ambiguous and this authorization cannot be replayed.' "
             "WHERE status = 'reserved'"
         )
 
