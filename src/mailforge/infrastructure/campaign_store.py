@@ -2636,10 +2636,30 @@ class CampaignStore:
                     "display_name": after.get("display_name", ""),
                     "metadata_json": after.get("metadata_json", "{}"),
                 }
+                row_skipped = False
                 if record["created_contact"] and untouched:
                     connection.execute(
                         "UPDATE contacts SET lifecycle_status='deactivated', deactivated_at=?, updated_at=? WHERE id=? AND lifecycle_status='active'",
                         (utc_now(), utc_now(), record["contact_id"]),
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO lifecycle_records(id,contact_id,action,status,reason,retention_conflict,requested_at,actor,idempotency_key,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            str(uuid.uuid5(uuid.NAMESPACE_URL, f"mailforge:import-reversal:{batch_id}:{record['row_number']}")),
+                            record["contact_id"], "import_reversal", "applied", reason, 0, utc_now(), actor,
+                            f"import-reversal:{batch_id}:{record['row_number']}", _json({"batch_id": batch_id}),
+                        ),
+                    )
+                elif untouched and not record["created_contact"]:
+                    before = record["before_contact"]
+                    connection.execute(
+                        "UPDATE contacts SET display_name=?, metadata_json=?, updated_at=? WHERE id=?",
+                        (
+                            before.get("display_name", ""),
+                            before.get("metadata_json", "{}"),
+                            utc_now(),
+                            record["contact_id"],
+                        ),
                     )
                     connection.execute(
                         "INSERT OR IGNORE INTO lifecycle_records(id,contact_id,action,status,reason,retention_conflict,requested_at,actor,idempotency_key,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -2666,6 +2686,7 @@ class CampaignStore:
                     current_value = current_attr[change["value_column"]]
                     if current_value != change.get("after"):
                         skipped_count += 1
+                        row_skipped = True
                         continue
                     before = change.get("before")
                     if before is None:
@@ -2692,9 +2713,13 @@ class CampaignStore:
                             "DELETE FROM list_memberships WHERE list_id=? AND contact_id=?",
                             (batch["list_id"], record["contact_id"]),
                         )
+                    elif membership is not None:
+                        skipped_count += 1
+                        row_skipped = True
+                row_status = "partially_reversed" if row_skipped else "reversed"
                 connection.execute(
-                    "UPDATE import_batch_records SET reverse_status='reversed', reverse_reason=?, reversed_at=? WHERE batch_id=? AND row_number=?",
-                    (reason, utc_now(), batch_id, record["row_number"]),
+                    "UPDATE import_batch_records SET reverse_status=?, reverse_reason=?, reversed_at=? WHERE batch_id=? AND row_number=?",
+                    (row_status, reason if not row_skipped else "some imported changes were newer", utc_now(), batch_id, record["row_number"]),
                 )
                 reversed_count += 1
             status = "reversed" if skipped_count == 0 else "partially_reversed"

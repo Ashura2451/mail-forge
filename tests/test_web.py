@@ -278,6 +278,46 @@ def test_structured_import_batch_reversal_preserves_newer_contact_changes(
     assert batch["records"][0]["reverse_status"] == "skipped"
 
 
+def test_structured_import_batch_reversal_restores_untouched_existing_contact(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
+    list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Existing"}).json()["id"]
+    upload = {"file": ("existing.txt", b"existing@example.com\n", "text/plain")}
+    assert client.post(f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload).status_code == 200
+    field_id = client.post(
+        "/api/v1/fields",
+        headers=headers,
+        json={"machine_key": "plan", "label": "Plan", "field_type": "TEXT"},
+    ).json()["id"]
+    imported = client.post(
+        "/api/v1/imports/structured",
+        headers=headers,
+        json={
+            "list_id": list_id,
+            "source_ref": "existing-update-036",
+            "rows": [{"email": "existing@example.com", "display_name": "Imported name", "plan": "pro"}],
+            "mappings": {"email": "contact.email", "plan": field_id},
+        },
+    )
+    assert imported.status_code == 200
+    batch_id = imported.json()["batch_id"]
+    contact = client.get(f"/api/v1/contacts?list_id={list_id}").json()["items"][0]
+    assert contact["display_name"] == "Imported name"
+
+    reversed_batch = client.post(
+        f"/api/v1/imports/batches/{batch_id}/reverse",
+        headers=headers,
+        json={"reason": "restore existing import"},
+    )
+    assert reversed_batch.status_code == 200
+    assert reversed_batch.json()["status"] == "reversed"
+    restored = client.get(f"/api/v1/contacts/{contact['id']}").json()
+    assert restored["contact"]["display_name"] == ""
+    batch = client.get(f"/api/v1/imports/batches/{batch_id}").json()
+    assert batch["records"][0]["reverse_status"] == "reversed"
+
+
 def test_interrupted_import_batches_are_fenced_on_restart(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:

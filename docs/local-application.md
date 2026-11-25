@@ -81,7 +81,10 @@ runtime and wheel. It keeps the backend authoritative and avoids a second
 desktop stack, an embedded Node runtime, or a service installer. PyInstaller,
 Electron, and Tauri would add another compatibility and upgrade boundary before
 the product needs one; the bundle builder is easier to inspect and reproduce
-for the current macOS target.
+for the current macOS target. The builder copies the locked application
+dependencies separately from the CPython runtime, omits the runtime bootstrap
+site-packages tree, and excludes host provenance/ACL metadata from bundle
+copies so macOS does not reject a duplicate dependency tree during assembly.
 
 The script must be rerun for a new build identity. It does not claim Apple
 signing, notarization, automatic updates, Intel/Windows/Linux qualification,

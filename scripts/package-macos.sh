@@ -40,9 +40,15 @@ uv build --wheel --out-dir "$STAGE/wheels"
 WHEEL=$(find "$STAGE/wheels" -type f -name 'mailforge-*.whl' -print -quit)
 uv pip install --python "$STAGE/venv/bin/python" --no-deps "$WHEEL"
 
-ditto --norsrc "$BASE_PREFIX" "$RESOURCES/python"
+RUNTIME_STAGE="$STAGE/python"
+ditto --norsrc --noextattr --noqtn --noacl "$BASE_PREFIX" "$RUNTIME_STAGE"
+# The locked application dependencies are copied separately below. Keeping the
+# runtime's bootstrap site-packages out of the bundle avoids duplicate package
+# trees and a macOS bundle-copy restriction when both trees carry provenance.
+rm -rf "$RUNTIME_STAGE/lib/python3.15/site-packages"
+ditto --norsrc --noextattr --noqtn --noacl "$RUNTIME_STAGE" "$RESOURCES/python"
 mkdir -p "$RESOURCES/site-packages"
-ditto --norsrc "$STAGE/venv/lib/python3.15/site-packages/." "$RESOURCES/site-packages/"
+ditto --norsrc --noextattr --noqtn --noacl "$STAGE/venv/lib/python3.15/site-packages/." "$RESOURCES/site-packages/"
 # Local wheel installation metadata can contain the developer checkout path;
 # the application bundle must not depend on or disclose that path.
 find "$RESOURCES" \( -name direct_url.json -o -name '*.pth' \) -delete
