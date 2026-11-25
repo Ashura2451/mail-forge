@@ -392,6 +392,12 @@ def test_local_api_supports_typed_segments_and_recurring_snapshots(
     )
     assert segment.status_code == 200
     segment_body = segment.json()
+    readiness = client.get(
+        f"/api/v1/audiences/readiness?segment_id={segment_body['id']}&purpose=marketing"
+    )
+    assert readiness.status_code == 200
+    assert readiness.json()["total"] == 1
+    assert readiness.json()["counts"]["authorization_unknown"] == 1
     campaign = client.post(
         "/api/v1/campaigns",
         headers=headers,

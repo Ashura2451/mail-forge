@@ -2331,6 +2331,63 @@ def create_app(
         except SegmentationError as error:
             return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
 
+    @app.get(f"{API_PREFIX}/audiences/readiness")
+    async def audience_readiness(
+        list_id: str | None = None,
+        segment_id: str | None = None,
+        revision_id: str | None = None,
+        purpose: str = "marketing",
+    ):
+        if bool(list_id) == bool(segment_id):
+            return _error(400, "audience_required", "choose exactly one list or segment")
+        try:
+            if list_id:
+                _require_list(runtime.store, list_id)
+                contacts = runtime.store.list_contacts(list_id)
+                source = {"type": "list", "id": list_id, "revision_id": None}
+            else:
+                segment = runtime.segmentation.get_segment(segment_id or "", revision_id)
+                compiled = runtime.segmentation.compile(segment["definition"], canonical_numbers=True)
+                with runtime.store.connect() as connection:
+                    contacts = list(
+                        connection.execute(
+                            f"SELECT c.* FROM contacts c WHERE {compiled.sql} ORDER BY normalized_email LIMIT 100001",
+                            compiled.parameters,
+                        )
+                    )
+                if len(contacts) > 100_000:
+                    return _error(413, "audience_limit", "readiness is limited to 100,000 contacts")
+                source = {"type": "segment", "id": segment["id"], "revision_id": segment["revision"]["id"]}
+            campaign = {
+                "configuration_json": json.dumps({"communication_purpose": purpose}),
+                "audience_list_id": list_id or "__readiness_preview__",
+                "id": "__readiness_preview__",
+                "sender_config_ref": "__readiness_preview__",
+                "authorization": "unauthorized",
+            }
+            rows = []
+            for contact in contacts:
+                decision = runtime.campaigns._eligibility.evaluate_contact(contact, campaign=campaign)
+                rows.append({"contact_id": contact["id"], "email": contact["normalized_email"], **decision.to_dict()})
+            by_status: dict[str, int] = {}
+            reason_counts: dict[str, int] = {}
+            for row in rows:
+                by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+                for reason in row["reasons"]:
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            return {
+                "source": source,
+                "purpose": purpose,
+                "total": len(rows),
+                "counts": by_status,
+                "reason_counts": reason_counts,
+                "items": rows[:100],
+                "truncated": len(rows) > 100,
+                "explanation": "Current policy readiness is a preview; campaign preparation and dispatch recheck canonical eligibility.",
+            }
+        except (KeyError, SegmentationError) as error:
+            return _error(404 if getattr(error, "code", "") in {"segment_not_found", "list_not_found"} else 400, getattr(error, "code", "audience_invalid"), str(error))
+
     @app.post(f"{API_PREFIX}/segments/{{segment_id}}/archive")
     async def archive_segment(segment_id: str):
         try:
