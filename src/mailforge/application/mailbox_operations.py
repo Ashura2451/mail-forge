@@ -89,10 +89,20 @@ class MailboxOperationsService:
     ):
         def build_source():
             current = self._fixture_account(account_ref)
-            if expected_account is not None and (
-                current["host"] != expected_account["host"]
-                or current["port"] != expected_account["port"]
-                or current["kind"] != expected_account["kind"]
+            security_fields = (
+                "kind",
+                "host",
+                "port",
+                "username",
+                "credential_ref",
+                "tls_mode",
+                "auth_method",
+                "ca_file",
+                "profile_enabled",
+                "metadata",
+            )
+            if expected_account is not None and any(
+                current.get(field) != expected_account.get(field) for field in security_fields
             ):
                 raise MailboxOperationsError(
                     "provider configuration changed during authorization",

@@ -299,6 +299,39 @@ def test_in_progress_idempotency_requires_reconciliation(tmp_path):
     assert result["status"] == "ambiguous"
 
 
+def test_mailbox_source_rejects_same_endpoint_security_drift(tmp_path):
+    store = CampaignStore(tmp_path / "mailbox-drift.sqlite3")
+    inbound = InboundService(store)
+    operations = InboundOperations(store)
+    provider_operations = ProviderOperationsService(store)
+    profile = ProviderProfile(
+        ref="loopback-imap",
+        kind=ProviderKind.IMAP,
+        host="localhost",
+        port=993,
+        username="user",
+        credential_ref="env:MAILFORGE_TEST_IMAP",
+        tls_mode=TLSMode.IMPLICIT,
+    )
+    provider_operations.register(profile)
+    mailbox = MailboxOperationsService(
+        store,
+        inbound=inbound,
+        inbound_operations=operations,
+        provider_operations=provider_operations,
+    )
+    expected = provider_operations.account("loopback-imap")
+    provider_operations.register(
+        ProviderProfile(**{**profile.__dict__, "credential_ref": "env:MAILFORGE_OTHER_IMAP"})
+    )
+    try:
+        mailbox._source("loopback-imap", "INBOX", expected_account=expected)
+    except MailboxOperationsError as error:
+        assert error.code == "configuration_changed"
+    else:
+        raise AssertionError("same-endpoint credential drift must be refused")
+
+
 def test_mailbox_claim_and_interrupted_sync_recovery_are_atomic(tmp_path):
     store = CampaignStore(tmp_path / "mailbox-recovery.sqlite3")
     inbound = InboundService(store)
