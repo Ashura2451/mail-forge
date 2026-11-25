@@ -287,6 +287,13 @@ def test_browser_audience_management_policy_journey(tmp_path: Path) -> None:
             page.get_by_text("Segment revision saved").wait_for()
             page.get_by_role("button", name="Preview →").click()
             page.get_by_text("1 matching contacts").wait_for()
+            page.get_by_role("button", name="Campaigns").click()
+            page.get_by_label("Or dynamic segment").select_option(label="Audience 036 segment")
+            page.get_by_label("Campaign name").fill("Audience 036 readiness campaign")
+            page.get_by_role("button", name="Create draft").click()
+            page.get_by_text("Campaign draft created").wait_for()
+            page.get_by_role("button", name="Prepare snapshots").click()
+            page.get_by_text("Campaign prepared").wait_for()
             browser.close()
     finally:
         server.terminate()
