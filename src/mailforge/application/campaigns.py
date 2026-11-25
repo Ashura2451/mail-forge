@@ -166,11 +166,16 @@ class CampaignService:
         )
 
     def import_candidates(
-        self, candidates: Iterable[ContactCandidate], list_id: str
+        self, candidates: Iterable[ContactCandidate], list_id: str, *, batch_id: str | None = None, actor: str = "local-operator"
     ) -> dict[str, int]:
         imported = 0
         unique_contacts: set[str] = set()
         for candidate in candidates:
+            existing = self.store.contact_by_email(candidate.normalized_email)
+            before_contact = {
+                "display_name": existing["display_name"],
+                "metadata_json": existing["metadata_json"],
+            } if existing else {}
             contact_id = self.store.upsert_contact(
                 candidate.normalized_email,
                 metadata=candidate.metadata,
@@ -178,9 +183,21 @@ class CampaignService:
                 source_record_position=candidate.source_record_position,
                 original_input=candidate.original_input,
             )
-            self.store.add_to_list(list_id, contact_id)
+            membership_changed = self.store.add_to_list(list_id, contact_id)
             imported += 1
             unique_contacts.add(contact_id)
+            if batch_id:
+                after = self.store.get_contact(contact_id)
+                self.store.record_import_batch_row(
+                    batch_id,
+                    row_number=candidate.source_record_position,
+                    contact_id=contact_id,
+                    created_contact=existing is None,
+                    membership_added=bool(membership_changed),
+                    before_contact=before_contact,
+                    after_contact={"display_name": after["display_name"], "metadata_json": after["metadata_json"]},
+                    attribute_changes=[],
+                )
         return {"records_imported": imported, "unique_contacts": len(unique_contacts)}
 
     def import_sort_results(self, processing_jsonl: str | Path, list_id: str) -> dict[str, int]:

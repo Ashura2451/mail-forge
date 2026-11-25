@@ -2692,8 +2692,18 @@ def create_app(
         try:
             candidates, preview = _upload_preview(file)
             _require_list(runtime.store, list_id)
-            result = runtime.campaigns.import_candidates(candidates, list_id)
-            return {**result, "preview": preview}
+            batch_id = runtime.store.create_import_batch(
+                list_id=list_id,
+                source_ref=file.filename or "file-import",
+                total_rows=len(candidates),
+            )
+            try:
+                result = runtime.campaigns.import_candidates(candidates, list_id, batch_id=batch_id)
+                runtime.store.finish_import_batch(batch_id, status="completed")
+            except Exception as error:
+                runtime.store.finish_import_batch(batch_id, status="failed", error_message=str(error))
+                raise
+            return {**result, "preview": preview, "batch_id": batch_id}
         except KeyError:
             return _error(404, "list_not_found", "target list was not found")
         except (OSError, ValueError) as error:

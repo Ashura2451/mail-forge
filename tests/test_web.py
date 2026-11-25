@@ -99,6 +99,7 @@ def test_local_api_runs_contact_campaign_lifecycle(
     imported = client.post(f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload)
     assert imported.status_code == 200
     assert imported.json()["unique_contacts"] == 2
+    assert client.get(f"/api/v1/imports/batches/{imported.json()['batch_id']}").json()["status"] == "completed"
     exported = client.get(f"/api/v1/contacts/export?list_id={list_id}&format=csv")
     assert exported.status_code == 200
     assert "alice@example.com" in exported.text

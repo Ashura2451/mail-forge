@@ -3885,12 +3885,13 @@ class CampaignStore:
             )
         return list_id
 
-    def add_to_list(self, list_id: str, contact_id: str) -> None:
+    def add_to_list(self, list_id: str, contact_id: str) -> bool:
         with self.transaction(immediate=True) as connection:
-            connection.execute(
+            result = connection.execute(
                 "INSERT OR IGNORE INTO list_memberships(list_id, contact_id, added_at) VALUES (?, ?, ?)",
                 (list_id, contact_id, utc_now()),
             )
+        return result.rowcount == 1
 
     def list_contacts(self, list_id: str) -> list[sqlite3.Row]:
         with self.connect() as connection:
