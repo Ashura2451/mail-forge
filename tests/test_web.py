@@ -176,6 +176,18 @@ def test_contact_management_policy_and_bulk_membership_are_auditable(
     )
     assert bulk.status_code == 200
     assert bulk.json()["changed"] == 2
+    bulk_policy = client.post(
+        "/api/v1/contacts/bulk-policy",
+        headers=headers,
+        json={
+            "contact_ids": [item["id"] for item in contacts],
+            "operation": "preference",
+            "purpose": "marketing",
+            "preference_state": "disabled",
+        },
+    )
+    assert bulk_policy.status_code == 200
+    assert bulk_policy.json()["requested"] == 2
 
     evidence = client.post(
         f"/api/v1/contacts/{contact['id']}/evidence",

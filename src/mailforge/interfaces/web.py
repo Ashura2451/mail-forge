@@ -146,6 +146,17 @@ class BulkMembershipInput(BaseModel):
     reason: str = Field(default="operator bulk action", max_length=240)
 
 
+class BulkPolicyInput(BaseModel):
+    contact_ids: list[str] = Field(min_length=1, max_length=100)
+    purpose: str = Field(default="marketing", min_length=1, max_length=80)
+    operation: str = Field(pattern="^(preference|suppression|evidence)$")
+    preference_state: PreferenceState | None = None
+    suppression_reason: str | None = Field(default=None, max_length=500)
+    suppression_category: SuppressionCategory = SuppressionCategory.MANUAL
+    evidence_source: str | None = Field(default=None, max_length=240)
+    actor: str = Field(default="local-operator", min_length=1, max_length=120)
+
+
 class DataStudioRecipeInput(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=500)
@@ -2465,6 +2476,47 @@ def create_app(
             )
         items = [_row(item) if isinstance(item, sqlite3.Row) else item for item in rows]
         return {"items": items, "limit": safe_limit, "offset": safe_offset}
+
+    @app.post(f"{API_PREFIX}/contacts/bulk-policy")
+    async def bulk_contact_policy(payload: BulkPolicyInput):
+        results = []
+        try:
+            for contact_id in payload.contact_ids:
+                contact = runtime.store.get_contact(contact_id)
+                if payload.operation == "preference":
+                    if payload.preference_state is None:
+                        return _error(400, "preference_state_required", "preference state is required")
+                    value = runtime.campaigns.set_preference(
+                        contact["normalized_email"],
+                        purpose=payload.purpose,
+                        state=payload.preference_state,
+                        actor=payload.actor,
+                    )
+                    results.append({"contact_id": contact_id, "preference_id": value})
+                elif payload.operation == "suppression":
+                    if not payload.suppression_reason:
+                        return _error(400, "suppression_reason_required", "suppression reason is required")
+                    value = runtime.campaigns.add_suppression(
+                        contact["normalized_email"],
+                        payload.suppression_category,
+                        payload.suppression_reason,
+                        purpose=payload.purpose,
+                        actor=payload.actor,
+                    )
+                    results.append({"contact_id": contact_id, "suppression_id": value})
+                else:
+                    if not payload.evidence_source:
+                        return _error(400, "evidence_source_required", "evidence source is required")
+                    value = runtime.campaigns.record_authorization_evidence(
+                        contact["normalized_email"],
+                        purpose=payload.purpose,
+                        source=payload.evidence_source,
+                        actor=payload.actor,
+                    )
+                    results.append({"contact_id": contact_id, "evidence_id": value})
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+        return {"operation": payload.operation, "requested": len(results), "results": results}
 
     @app.get(f"{API_PREFIX}/contacts/export")
     async def export_contacts(list_id: str | None = None, q: str = "", format: str = "json"):
