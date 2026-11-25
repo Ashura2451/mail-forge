@@ -928,6 +928,7 @@ function Providers({ data, onRun, sessionReady, view }: { data: ApiRecord, onRun
   const [grantPreparing, setGrantPreparing] = useState(false)
   const grantRequest = useRef(0)
   const outcomeRequest = useRef(0)
+  const currentTestRef = useRef('')
   const [inboundRef, setInboundRef] = useState('')
   const [mailbox, setMailbox] = useState('INBOX')
   const [maxFetch, setMaxFetch] = useState('100')
@@ -992,10 +993,11 @@ function Providers({ data, onRun, sessionReady, view }: { data: ApiRecord, onRun
   }
   const changeKind = (nextKind: string) => { setKind(nextKind); applyPreset(preset, nextKind) }
   const create = () => onRun(() => api('/providers', { method: 'POST', body: JSON.stringify({ ref, kind, host, port: Number(port), username, credential_ref: credentialRef, tls_mode: tlsMode, auth_method: authMethod, ca_file: caFile || undefined, mailbox, display_name: ref, sender_email: username, inbound_enabled: kind === 'imap', sandbox_key: sandboxKey || undefined }) }), 'Provider account saved without a network connection')
-  const invalidateGrant = () => { grantRequest.current += 1; setGrantIssued(false) }
+  const invalidateGrant = () => { grantRequest.current += 1; setGrantIssued(false); setGrantPreparing(false) }
   const testRequestFingerprint = () => JSON.stringify({ testRef, testSender, testRecipient, testRevisionId, testPurpose, testExpiry, proof: testProof.proof_hash || null })
-  const selectTestAccount = (profile: ApiRecord) => { invalidateGrant(); setTestRef(profile.ref); setTestSender(profile.sender_email || profile.username || ''); setTestAuthorization(''); setAuthorizedRequest(''); setTestKey(newTestKey()) }
+  const selectTestAccount = (profile: ApiRecord) => { invalidateGrant(); currentTestRef.current = String(profile.ref || ''); setTestRef(profile.ref); setTestSender(profile.sender_email || profile.username || ''); setTestAuthorization(''); setAuthorizedRequest(''); setTestKey(newTestKey()) }
   const loadTestOutcomes = (accountRef: string) => { const requestId = ++outcomeRequest.current; void api<ApiRecord>(`/providers/${accountRef}/tests`).then(result => { if (requestId === outcomeRequest.current) setSelected(result.items?.[0] || null) }).catch(() => { if (requestId === outcomeRequest.current) setSelected(null) }) }
+  useEffect(() => { currentTestRef.current = testRef }, [testRef])
   useEffect(() => { if (testRef) loadTestOutcomes(testRef) }, [testRef])
   const issueGrant = () => {
     const requestId = ++grantRequest.current
@@ -1022,7 +1024,8 @@ function Providers({ data, onRun, sessionReady, view }: { data: ApiRecord, onRun
   }
   const runTest = () => {
     if (!testReady) return
-    return onRun(async () => { const result = await api<ApiRecord>(`/providers/${testRef}/test-send`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, idempotency_key: testKey, authorization_ref: testAuthorization, purpose: testPurpose, expires_at: testExpiry, message_revision_id: testRevisionId, proof_id: testProof.proof_id, proof_hash: testProof.proof_hash }) }); loadTestOutcomes(testRef); return result }, 'Controlled test result recorded')
+    const accountRef = testRef
+    return onRun(async () => { const result = await api<ApiRecord>(`/providers/${accountRef}/test-send`, { method: 'POST', body: JSON.stringify({ sender: testSender, recipient: testRecipient, idempotency_key: testKey, authorization_ref: testAuthorization, purpose: testPurpose, expires_at: testExpiry, message_revision_id: testRevisionId, proof_id: testProof.proof_id, proof_hash: testProof.proof_hash }) }); if (currentTestRef.current === accountRef) loadTestOutcomes(accountRef); return result }, 'Controlled test result recorded')
   }
   const testReady = grantIssued && Boolean(testAuthorization) && Boolean(testKey) && testConfirmed && authorizedRequest === testRequestFingerprint()
   const configureInbound = () => onRun(() => api(`/providers/${inboundRef}/inbound`, { method: 'POST', body: JSON.stringify({ mailbox, max_fetch: Number(maxFetch), sync_enabled: syncEnabled, mutation_enabled: mutationEnabled }) }), 'Inbound configuration saved')
