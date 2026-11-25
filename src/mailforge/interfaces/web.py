@@ -1027,6 +1027,12 @@ def _row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _contact_csv_safe(value: Any) -> Any:
+    if isinstance(value, str) and value[:1] in {"=", "+", "-", "@"}:
+        return "'" + value
+    return value
+
+
 def _query(store: CampaignStore, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with store.connect() as connection:
         return [_row(row) for row in connection.execute(sql, params).fetchall()]
@@ -2410,10 +2416,12 @@ def create_app(
         for item in items:
             writer.writerow(
                 [
-                    item["normalized_email"],
-                    item.get("display_name") or "",
-                    item.get("lifecycle_status") or "active",
-                    json.dumps(item.get("metadata") or {}, ensure_ascii=False, sort_keys=True),
+                    _contact_csv_safe(item["normalized_email"]),
+                    _contact_csv_safe(item.get("display_name") or ""),
+                    _contact_csv_safe(item.get("lifecycle_status") or "active"),
+                    _contact_csv_safe(
+                        json.dumps(item.get("metadata") or {}, ensure_ascii=False, sort_keys=True)
+                    ),
                 ]
             )
         return Response(
