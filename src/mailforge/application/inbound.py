@@ -50,7 +50,9 @@ class InboundService:
     ) -> InboundBatchReport:
         """Acquire through a durable IMAP profile and reuse this service's pipeline."""
 
-        source = ProviderService(self.store).imap_source(provider_ref, credential_resolver)
+        providers = ProviderService(self.store)
+        profile = providers.profile(provider_ref)
+        source = providers.imap_source(provider_ref, credential_resolver, profile=profile)
         return self.ingest(source, batch_limit=batch_limit, retain_raw=retain_raw)
 
     def register_source(

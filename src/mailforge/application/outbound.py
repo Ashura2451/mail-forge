@@ -53,6 +53,7 @@ from mailforge.domain.outbound import (
     TemplateDefinition,
 )
 from mailforge.domain.policy import EligibilityStatus
+from mailforge.domain.provider import CAPTURE_ONLY_SANDBOX_KEY
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.infrastructure.smtp import (
     DeliveryStatus as SMTPDeliveryStatus,
@@ -679,6 +680,11 @@ class OutboundService:
                 raise ValueError(
                     f"provider profile {provider_ref} is not associated with campaign sender "
                     f"policy {campaign['sender_config_ref']}"
+                )
+            if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
+                raise PermissionError(
+                    "capture-only sandbox accounts may only run the bounded "
+                    "controlled-test operation"
                 )
             pool = provider_service.smtp_pool(
                 provider_ref, credential_resolver, gate=gate, profile=profile

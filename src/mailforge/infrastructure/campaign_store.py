@@ -1607,7 +1607,8 @@ class CampaignStore:
     """Small explicit SQLite adapter with one schema version and safe defaults."""
 
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        raw_path = Path(path)
+        self.path = raw_path if str(raw_path) == ":memory:" else raw_path.expanduser().resolve()
         self._provider_operation_mutex = threading.RLock()
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -3122,8 +3123,8 @@ class CampaignStore:
                     )
                 connection.execute(
                     "UPDATE provider_test_submissions SET status = ?, phase = ?, detail = ?, "
-                    "updated_at = ? WHERE id = ? AND status IN ('reserved', 'attempted')",
-                    (status, phase, detail, now, row["id"]),
+                    "external_access = ?, updated_at = ? WHERE id = ? AND status IN ('reserved', 'attempted')",
+                    (status, phase, detail, int(not pre_transport), now, row["id"]),
                 )
                 self.record_event(
                     connection,

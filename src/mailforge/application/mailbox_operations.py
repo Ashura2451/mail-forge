@@ -82,13 +82,17 @@ class MailboxOperationsService:
         account_ref: str,
         mailbox: str,
         resolver: CredentialResolver | None = None,
+        *,
+        profile=None,
     ):
         self._fixture_account(account_ref)
+        profile = profile or self.provider_operations.providers.profile(account_ref)
         return self.provider_operations.providers.imap_source(
             account_ref,
             resolver or EnvironmentCredentialResolver(),
             mailbox=mailbox,
             source_ref=self.source_ref(account_ref, mailbox),
+            profile=profile,
         )
 
     def _grant(
@@ -120,13 +124,19 @@ class MailboxOperationsService:
         resolver: CredentialResolver | None = None,
         grant: ExternalOperationGrant | None = None,
     ) -> dict[str, Any]:
-        account = self._fixture_account(account_ref)
-        if grant is None:
-            raise MailboxOperationsError(
-                "folder discovery requires explicit authorization", "authorization_required"
+        with self.store.provider_operation_lock():
+            account = self._fixture_account(account_ref)
+            if grant is None:
+                raise MailboxOperationsError(
+                    "folder discovery requires explicit authorization", "authorization_required"
+                )
+            self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
+            source = self._source(
+                account_ref,
+                account["inbound"]["mailbox"],
+                resolver,
+                profile=self.provider_operations.providers.profile(account_ref),
             )
-        self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
-        source = self._source(account_ref, account["inbound"]["mailbox"], resolver)
         try:
             folders = source.discover_mailboxes()
             capabilities = tuple(source.last_capabilities)
@@ -172,19 +182,28 @@ class MailboxOperationsService:
         resolver: CredentialResolver | None = None,
         grant: ExternalOperationGrant | None = None,
     ):
-        account = self._fixture_account(account_ref)
-        if not account["inbound"].get("sync_enabled", True):
-            raise MailboxOperationsError(
-                "synchronization is disabled for this account", "sync_disabled"
+        with self.store.provider_operation_lock():
+            account = self._fixture_account(account_ref)
+            if not account["inbound"].get("sync_enabled", True):
+                raise MailboxOperationsError(
+                    "synchronization is disabled for this account", "sync_disabled"
+                )
+            if grant is None:
+                raise MailboxOperationsError(
+                    "mailbox synchronization requires explicit authorization",
+                    "authorization_required",
+                )
+            self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
+            if not 1 <= batch_limit <= 10_000:
+                raise MailboxOperationsError(
+                    "sync batch is outside the bounded limit", "batch_invalid"
+                )
+            source = self._source(
+                account_ref,
+                mailbox,
+                resolver,
+                profile=self.provider_operations.providers.profile(account_ref),
             )
-        if grant is None:
-            raise MailboxOperationsError(
-                "mailbox synchronization requires explicit authorization", "authorization_required"
-            )
-        self._grant(account, grant, ProviderOperation.INBOUND_SYNC)
-        if not 1 <= batch_limit <= 10_000:
-            raise MailboxOperationsError("sync batch is outside the bounded limit", "batch_invalid")
-        source = self._source(account_ref, mailbox, resolver)
         source_ref = self.source_ref(account_ref, mailbox)
         self.store.register_inbound_source(
             source_ref,

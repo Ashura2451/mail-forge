@@ -11,9 +11,12 @@ from threading import Event
 
 import pytest
 
+from mailforge.application.campaigns import CampaignService
 from mailforge.application.message_studio import MessageStudioService
+from mailforge.application.outbound import OutboundService
 from mailforge.application.provider_operations import ProviderOperationsService
-from mailforge.domain.outbound import SenderPolicy
+from mailforge.domain.campaign import ContactCandidate
+from mailforge.domain.outbound import SenderPolicy, TemplateDefinition
 from mailforge.domain.provider import (
     CAPTURE_ONLY_SANDBOX_KEY,
     SANDBOX_QUALIFICATION_PURPOSE,
@@ -25,7 +28,8 @@ from mailforge.domain.provider import (
     TLSMode,
 )
 from mailforge.infrastructure.campaign_store import CampaignStore
-from mailforge.infrastructure.smtp import SMTPPhase, SMTPTransaction
+from mailforge.infrastructure.credentials import MappingCredentialResolver
+from mailforge.infrastructure.smtp import LiveSendGate, SMTPPhase, SMTPTransaction
 
 
 class _CapturePool:
@@ -126,6 +130,19 @@ def test_capture_only_classification_requires_allowlisted_loopback(tmp_path, mon
             expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
             proof_hash="not-a-proof",
         )
+
+
+def test_provider_operation_lock_canonicalizes_database_alias(tmp_path):
+    database = tmp_path / "canonical.sqlite3"
+    alias = tmp_path / "database-alias.sqlite3"
+    CampaignStore(database)
+    alias.symlink_to(database)
+    canonical = CampaignStore(database)
+    aliased = CampaignStore(alias)
+    assert canonical.path == aliased.path
+    assert canonical.path.with_name(f".{canonical.path.name}.provider.lock") == (
+        aliased.path.with_name(f".{aliased.path.name}.provider.lock")
+    )
 
 
 def test_capture_only_classification_requires_process_fixture_authority(tmp_path, monkeypatch):
@@ -387,6 +404,64 @@ def test_transport_uses_authorized_profile_snapshot_while_update_waits(tmp_path,
     assert service.providers.profile("capture").host == "192.0.2.50"
 
 
+def test_campaign_execution_rejects_capture_only_accounts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
+    monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
+    store = CampaignStore(tmp_path / "sandbox-campaign.sqlite3")
+    campaigns = CampaignService(store)
+    outbound = OutboundService(store)
+    sender = SenderPolicy(
+        ref="sandbox-policy",
+        provider="synthetic",
+        email="sender@sandbox.example.com",
+        max_per_minute=10,
+        max_per_hour=10,
+        max_per_day=10,
+    )
+    outbound.register_sender_policy(sender)
+    list_id = store.create_list("sandbox-campaign-audience")
+    campaigns.import_candidates(
+        [
+            ContactCandidate(
+                "recipient@sandbox.example.com",
+                "recipient@sandbox.example.com",
+                "synthetic",
+                1,
+                {},
+            )
+        ],
+        list_id,
+    )
+    campaign_id = campaigns.create_campaign(
+        "sandbox-campaign",
+        list_id,
+        template_ref="sandbox-template",
+        sender_config_ref=sender.ref,
+        configuration={"communication_purpose": "transactional"},
+    )
+    sandbox_profile = _profile(sandbox=True)
+    profile = sandbox_profile.__class__(
+        **{**sandbox_profile.__dict__, "sender_policy_ref": sender.ref}
+    )
+    ProviderOperationsService(store).register(
+        profile,
+        display_name="Capture",
+        sender_email="sender@sandbox.example.com",
+    )
+    outbound.prepare_campaign(
+        campaign_id,
+        template=TemplateDefinition("sandbox-template", "1", "Sandbox", "Hello {{ email }}"),
+        sender=sender,
+    )
+    with pytest.raises(PermissionError, match="capture-only sandbox"):
+        outbound.execute_provider(
+            campaign_id,
+            "capture",
+            MappingCredentialResolver({"test:capture": "synthetic-password"}),
+            gate=LiveSendGate(enabled=True),
+        )
+
+
 def test_reserved_submission_is_reconciled_as_pre_transport_abandonment(tmp_path, monkeypatch):
     monkeypatch.setenv("MAILFORGE_ENABLE_LOCAL_FIXTURES", "1")
     monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", "127.0.0.1:2525")
@@ -417,6 +492,7 @@ def test_reserved_submission_is_reconciled_as_pre_transport_abandonment(tmp_path
     assert row["status"] == "abandoned_before_transport"
     assert row["phase"] == "not_started"
     assert row["transport_started_at"] is None
+    assert row["external_access"] == 0
     assert (
         restarted.get_provider_operation_grant(grant.authorization_ref, account_ref="capture")[
             "consumed_submissions"
