@@ -574,6 +574,11 @@ class StructuredImportInput(BaseModel):
     source_ref: str = Field(default="browser-structured-import", max_length=200)
 
 
+class ImportReversalInput(BaseModel):
+    reason: str = Field(default="operator import reversal", min_length=1, max_length=500)
+    actor: str = Field(default="local-operator", min_length=1, max_length=120)
+
+
 class LocalSession:
     def __init__(self, allowed_hosts: set[str]):
         self.session_id = secrets.token_urlsafe(32)
@@ -2262,6 +2267,22 @@ def create_app(
             )
         except SegmentationError as error:
             return _error(400, error.code, str(error))
+
+    @app.get(f"{API_PREFIX}/imports/batches/{{batch_id}}")
+    async def import_batch(batch_id: str):
+        try:
+            return runtime.store.get_import_batch(batch_id)
+        except KeyError:
+            return _error(404, "import_batch_not_found", "import batch was not found")
+
+    @app.post(f"{API_PREFIX}/imports/batches/{{batch_id}}/reverse")
+    async def reverse_import_batch(batch_id: str, payload: ImportReversalInput):
+        try:
+            return runtime.store.reverse_import_batch(
+                batch_id, actor=payload.actor, reason=payload.reason
+            )
+        except KeyError:
+            return _error(404, "import_batch_not_found", "import batch was not found")
 
     @app.get(f"{API_PREFIX}/segments")
     async def segments(include_archived: bool = False):

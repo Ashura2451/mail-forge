@@ -554,7 +554,7 @@ def test_legacy_reserved_submission_migrates_to_final_ambiguity(tmp_path, monkey
             "transport_started_at = NULL WHERE idempotency_key = 'legacy-key'"
         )
 
-    assert store.migrate() == 27
+    assert store.migrate() == 28
     row = store.get_provider_test_submission("legacy-key")
     assert row["status"] == "ambiguous"
     assert row["phase"] == "ambiguous"

@@ -588,6 +588,22 @@ class SegmentationService:
                 raise SegmentationError(
                     "segment changed; reload before saving", "revision_conflict"
                 )
+            current_revision = connection.execute(
+                "SELECT definition_hash FROM segment_revisions WHERE id = ?",
+                (expected_revision_id,),
+            ).fetchone()
+            if current_revision is not None and current_revision["definition_hash"] == definition_hash:
+                connection.execute(
+                    "UPDATE segments SET description = COALESCE(?, description), updated_at = ?, updated_by = ? WHERE id = ?",
+                    (description, now, actor, segment_id),
+                )
+                result = _row_dict(segment)
+                result["description"] = description if description is not None else segment["description"]
+                result["updated_at"] = now
+                result["revision"] = _row_dict(current_revision)
+                result["revisions"] = [_row_dict(current_revision)]
+                result["definition"] = canonical
+                return result
             number = connection.execute(
                 "SELECT COALESCE(MAX(revision_number), 0) + 1 AS next_number FROM segment_revisions WHERE segment_id = ?",
                 (segment_id,),
@@ -956,6 +972,7 @@ class SegmentationService:
         source_ref: str = "structured-import",
         overwrite: bool = False,
         actor: str = "local-operator",
+        batch_id: str | None = None,
     ) -> dict[str, Any]:
         if len(rows) > 10_000:
             raise SegmentationError("structured imports are limited to 10,000 rows", "import_limit")
@@ -965,15 +982,6 @@ class SegmentationService:
                 is None
             ):
                 raise SegmentationError("list was not found", "list_not_found")
-        if not rows:
-            return {
-                "records": 0,
-                "created": 0,
-                "filled": 0,
-                "preserved": 0,
-                "conflicts": [],
-                "invalid": [],
-            }
         with self.store.connect() as connection:
             fields = {
                 row["id"]: _row_dict(row)
@@ -989,169 +997,139 @@ class SegmentationService:
             if field_id not in fields:
                 raise SegmentationError(f"mapping for {source_key} references an unknown field")
             mapped_fields[source_key] = fields[field_id]
+        batch_id = batch_id or self.store.create_import_batch(
+            list_id=list_id, source_ref=source_ref, total_rows=len(rows), actor=actor
+        )
+        if not rows:
+            self.store.finish_import_batch(batch_id, status="completed")
+            return {
+                "records": 0,
+                "created": 0,
+                "filled": 0,
+                "preserved": 0,
+                "conflicts": [],
+                "invalid": [],
+                "batch_id": batch_id,
+            }
         conflicts: list[dict[str, Any]] = []
         invalid: list[dict[str, Any]] = []
         counts = {"records": 0, "created": 0, "filled": 0, "preserved": 0}
-        for position, row in enumerate(rows, start=1):
-            counts["records"] += 1
-            email_key = next(
-                (key for key, field_id in mappings.items() if field_id == "contact.email"), "email"
-            )
-            email = row.get(email_key) or row.get("email")
-            if not isinstance(email, str):
-                invalid.append(
-                    {"row": position, "field": email_key, "reason": "valid email is required"}
+        try:
+            for position, row in enumerate(rows, start=1):
+                counts["records"] += 1
+                email_key = next(
+                    (key for key, field_id in mappings.items() if field_id == "contact.email"), "email"
                 )
-                continue
-            normalized = normalize_email(email)
-            if not validate_email(normalized).valid:
-                invalid.append(
-                    {"row": position, "field": email_key, "reason": "valid email is required"}
-                )
-                continue
-            contact = self.store.contact_by_email(normalized)
-            contact_id = self.store.upsert_contact(
-                normalized,
-                display_name=str(row.get("display_name", "")),
-                source_file=source_ref,
-                source_record_position=position,
-                original_input=email,
-            )
-            if contact is None:
-                counts["created"] += 1
-            self.set_membership(
-                list_id,
-                contact_id,
-                "add",
-                source=source_ref,
-                actor=actor,
-                reason="structured import",
-                idempotency_key=f"{source_ref}:{position}:{contact_id}",
-            )
-            for source_key, field in mapped_fields.items():
-                if field["id"] == "contact.email":
-                    continue
-                raw = row.get(source_key)
-                try:
-                    value = _parse_value(field["field_type"], raw, f"row {position} {source_key}")
-                    if field["controlled_values_json"] and value not in json.loads(
-                        field["controlled_values_json"]
-                    ):
-                        raise SegmentationError(
-                            f"row {position} {source_key} is not an allowed value"
-                        )
-                except SegmentationError as error:
-                    invalid.append({"row": position, "field": source_key, "reason": str(error)})
-                    continue
-                columns = _value_columns(field["field_type"], value)
-                with self.store.transaction(immediate=True) as connection:
-                    prior_conflict = connection.execute(
-                        "SELECT id, disposition FROM contact_attribute_conflicts "
-                        "WHERE source_ref = ? AND source_record_position = ? "
-                        "AND contact_id = ? AND field_id = ?",
-                        (source_ref, position, contact_id, field["id"]),
-                    ).fetchone()
-                    if prior_conflict is not None and not overwrite:
-                        conflicts.append(
-                            {
-                                "id": prior_conflict["id"],
-                                "row": position,
-                                "field": field["machine_key"],
-                                "disposition": prior_conflict["disposition"],
-                            }
-                        )
-                        continue
-                    existing = connection.execute(
-                        "SELECT * FROM contact_attribute_values WHERE contact_id = ? AND field_id = ?",
-                        (contact_id, field["id"]),
-                    ).fetchone()
-                    old_value = (
-                        self._stored_value(existing, field["field_type"]) if existing else None
+                email = row.get(email_key) or row.get("email")
+                if not isinstance(email, str):
+                    invalid.append(
+                        {"row": position, "field": email_key, "reason": "valid email is required"}
                     )
-                    if existing and old_value != value:
-                        disposition = "overwritten" if overwrite else "preserved"
-                        conflict_id = (
-                            prior_conflict["id"]
-                            if prior_conflict is not None
-                            else str(uuid.uuid4())
-                        )
-                        if prior_conflict is None:
-                            connection.execute(
-                                "INSERT INTO contact_attribute_conflicts(id, contact_id, field_id, source_kind, source_ref, source_record_position, existing_summary, incoming_summary, disposition, reason, actor, created_at) "
-                                "VALUES (?, ?, ?, 'structured', ?, ?, ?, ?, ?, ?, ?, ?)",
-                                (
-                                    conflict_id,
-                                    contact_id,
-                                    field["id"],
-                                    source_ref,
-                                    position,
-                                    str(old_value)[:MAX_COMPARISON],
-                                    str(value)[:MAX_COMPARISON],
-                                    disposition,
-                                    "explicit overwrite"
-                                    if overwrite
-                                    else "populated value preserved",
-                                    actor,
-                                    utc_now(),
-                                ),
+                    self.store.record_import_batch_row(batch_id, row_number=position, contact_id="", created_contact=False, membership_added=False, before_contact={}, after_contact={}, attribute_changes=[])
+                    continue
+                normalized = normalize_email(email)
+                if not validate_email(normalized).valid:
+                    invalid.append(
+                        {"row": position, "field": email_key, "reason": "valid email is required"}
+                    )
+                    self.store.record_import_batch_row(batch_id, row_number=position, contact_id="", created_contact=False, membership_added=False, before_contact={}, after_contact={}, attribute_changes=[])
+                    continue
+                contact = self.store.contact_by_email(normalized)
+                before_contact = {
+                    "display_name": contact["display_name"],
+                    "metadata_json": contact["metadata_json"],
+                } if contact else {}
+                contact_id = self.store.upsert_contact(
+                    normalized,
+                    display_name=str(row.get("display_name", "")),
+                    source_file=source_ref,
+                    source_record_position=position,
+                    original_input=email,
+                )
+                if contact is None:
+                    counts["created"] += 1
+                membership_result = self.set_membership(
+                    list_id,
+                    contact_id,
+                    "add",
+                    source=source_ref,
+                    actor=actor,
+                    reason="structured import",
+                    idempotency_key=f"{source_ref}:{position}:{contact_id}",
+                )
+                attribute_changes: list[dict[str, Any]] = []
+                for source_key, field in mapped_fields.items():
+                    if field["id"] == "contact.email":
+                        continue
+                    raw = row.get(source_key)
+                    try:
+                        value = _parse_value(field["field_type"], raw, f"row {position} {source_key}")
+                        if field["controlled_values_json"] and value not in json.loads(
+                            field["controlled_values_json"]
+                        ):
+                            raise SegmentationError(
+                                f"row {position} {source_key} is not an allowed value"
                             )
-                        else:
-                            connection.execute(
-                                "UPDATE contact_attribute_conflicts SET disposition=?,reason=?,actor=? WHERE id=?",
-                                (disposition, "explicit overwrite", actor, conflict_id),
-                            )
-                        conflicts.append(
-                            {
-                                "id": conflict_id,
-                                "row": position,
-                                "field": field["machine_key"],
-                                "disposition": disposition,
-                            }
-                        )
-                        if not overwrite:
-                            counts["preserved"] += 1
+                    except SegmentationError as error:
+                        invalid.append({"row": position, "field": source_key, "reason": str(error)})
+                        continue
+                    columns = _value_columns(field["field_type"], value)
+                    value_column = next(key for key, column_value in columns.items() if column_value is not None)
+                    with self.store.transaction(immediate=True) as connection:
+                        prior_conflict = connection.execute(
+                            "SELECT id, disposition FROM contact_attribute_conflicts WHERE source_ref=? AND source_record_position=? AND contact_id=? AND field_id=?",
+                            (source_ref, position, contact_id, field["id"]),
+                        ).fetchone()
+                        if prior_conflict is not None and not overwrite:
+                            conflicts.append({"id": prior_conflict["id"], "row": position, "field": field["machine_key"], "disposition": prior_conflict["disposition"]})
                             continue
-                    if existing is not None and old_value != value and overwrite:
-                        connection.execute(
-                            "UPDATE contact_attribute_values SET value_type = ?, text_value = ?, number_value = ?, boolean_value = ?, date_value = ?, datetime_value = ?, source_kind = 'structured', source_ref = ?, source_record_position = ?, provenance_json = '{}', updated_at = ?, updated_by = ? WHERE contact_id = ? AND field_id = ?",
-                            (
-                                field["field_type"],
-                                columns["text_value"],
-                                columns["number_value"],
-                                columns["boolean_value"],
-                                columns["date_value"],
-                                columns["datetime_value"],
-                                source_ref,
-                                position,
-                                utc_now(),
-                                actor,
-                                contact_id,
-                                field["id"],
-                            ),
-                        )
-                    elif existing is None:
-                        connection.execute(
-                            "INSERT INTO contact_attribute_values(contact_id, field_id, value_type, text_value, number_value, boolean_value, date_value, datetime_value, source_kind, source_ref, source_record_position, provenance_json, created_at, updated_at, updated_by) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'structured', ?, ?, '{}', ?, ?, ?)",
-                            (
-                                contact_id,
-                                field["id"],
-                                field["field_type"],
-                                columns["text_value"],
-                                columns["number_value"],
-                                columns["boolean_value"],
-                                columns["date_value"],
-                                columns["datetime_value"],
-                                source_ref,
-                                position,
-                                utc_now(),
-                                utc_now(),
-                                actor,
-                            ),
-                        )
-                        if existing is None:
+                        existing = connection.execute(
+                            "SELECT * FROM contact_attribute_values WHERE contact_id=? AND field_id=?",
+                            (contact_id, field["id"]),
+                        ).fetchone()
+                        old_value = self._stored_value(existing, field["field_type"]) if existing else None
+                        if existing and old_value != value:
+                            disposition = "overwritten" if overwrite else "preserved"
+                            conflict_id = prior_conflict["id"] if prior_conflict is not None else str(uuid.uuid4())
+                            if prior_conflict is None:
+                                connection.execute(
+                                    "INSERT INTO contact_attribute_conflicts(id, contact_id, field_id, source_kind, source_ref, source_record_position, existing_summary, incoming_summary, disposition, reason, actor, created_at) VALUES (?, ?, ?, 'structured', ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    (conflict_id, contact_id, field["id"], source_ref, position, str(old_value)[:MAX_COMPARISON], str(value)[:MAX_COMPARISON], disposition, "explicit overwrite" if overwrite else "populated value preserved", actor, utc_now()),
+                                )
+                            else:
+                                connection.execute("UPDATE contact_attribute_conflicts SET disposition=?,reason=?,actor=? WHERE id=?", (disposition, "explicit overwrite", actor, conflict_id))
+                            conflicts.append({"id": conflict_id, "row": position, "field": field["machine_key"], "disposition": disposition})
+                            if not overwrite:
+                                counts["preserved"] += 1
+                                continue
+                        attribute_changes.append({"field_id": field["id"], "value_column": value_column, "before": old_value, "after": value})
+                        if existing is not None and old_value != value:
+                            connection.execute(
+                                "UPDATE contact_attribute_values SET value_type=?, text_value=?, number_value=?, boolean_value=?, date_value=?, datetime_value=?, source_kind='structured', source_ref=?, source_record_position=?, provenance_json='{}', updated_at=?, updated_by=? WHERE contact_id=? AND field_id=?",
+                                (field["field_type"], columns["text_value"], columns["number_value"], columns["boolean_value"], columns["date_value"], columns["datetime_value"], source_ref, position, utc_now(), actor, contact_id, field["id"]),
+                            )
+                        elif existing is None:
+                            connection.execute(
+                                "INSERT INTO contact_attribute_values(contact_id, field_id, value_type, text_value, number_value, boolean_value, date_value, datetime_value, source_kind, source_ref, source_record_position, provenance_json, created_at, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'structured', ?, ?, '{}', ?, ?, ?)",
+                                (contact_id, field["id"], field["field_type"], columns["text_value"], columns["number_value"], columns["boolean_value"], columns["date_value"], columns["datetime_value"], source_ref, position, utc_now(), utc_now(), actor),
+                            )
                             counts["filled"] += 1
-        return {**counts, "conflicts": conflicts, "invalid": invalid}
+                after_row = self.store.get_contact(contact_id)
+                self.store.record_import_batch_row(
+                    batch_id,
+                    row_number=position,
+                    contact_id=contact_id,
+                    created_contact=contact is None,
+                    membership_added=bool(membership_result["changed"]),
+                    before_contact=before_contact,
+                    after_contact={"display_name": after_row["display_name"], "metadata_json": after_row["metadata_json"]},
+                    attribute_changes=attribute_changes,
+                )
+            self.store.finish_import_batch(batch_id, status="completed")
+        except Exception as error:
+            self.store.finish_import_batch(batch_id, status="failed", error_message=str(error))
+            raise
+        return {**counts, "conflicts": conflicts, "invalid": invalid, "batch_id": batch_id}
 
     @staticmethod
     def _stored_value(row: sqlite3.Row, field_type: str) -> Any:

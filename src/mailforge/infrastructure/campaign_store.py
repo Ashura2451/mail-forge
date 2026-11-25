@@ -61,7 +61,7 @@ from mailforge.domain.policy import (
 from mailforge.domain.provider import ProviderDiagnostic, ProviderProfile
 from mailforge.infrastructure.credentials import validate_credential_reference
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 SENSITIVE_KEY = re.compile(
     r"(?:password|secret|token|api[_-]?key|private[_-]?key|credential)", re.I
 )
@@ -1615,6 +1615,7 @@ class CampaignStore:
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
+        self.reconcile_interrupted_imports()
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -1955,6 +1956,23 @@ class CampaignStore:
                     (27, utc_now()),
                 )
                 current = 27
+            if current < 28:
+                self._apply_migration_28(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (28, utc_now()),
+                )
+                current = 28
+            # Preserve the 035 invariant when the historical migration marker
+            # is missing from an otherwise newer database; current reservations
+            # must remain recoverable by the runtime boundary authority.
+            if connection.execute("SELECT 1 FROM schema_migrations WHERE version = 27").fetchone() is None:
+                connection.execute(
+                    "UPDATE provider_test_submissions SET status='ambiguous', phase='ambiguous', "
+                    "transport_started_at=COALESCE(transport_started_at, updated_at, created_at), "
+                    "detail='Legacy reservation has no recorded pre-transport boundary; outcome is permanently ambiguous and this authorization cannot be replayed.' "
+                    "WHERE status='reserved'"
+                )
             return SCHEMA_VERSION
 
     @staticmethod
@@ -2422,6 +2440,43 @@ class CampaignStore:
             "WHERE status = 'reserved'"
         )
 
+    @staticmethod
+    def _apply_migration_28(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS import_batches (
+                id TEXT PRIMARY KEY,
+                list_id TEXT NOT NULL REFERENCES lists(id),
+                source_ref TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('running','completed','failed','interrupted','reversed','partially_reversed')),
+                total_rows INTEGER NOT NULL,
+                processed_rows INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                error_message TEXT,
+                actor TEXT NOT NULL DEFAULT 'local-operator'
+            );
+            CREATE TABLE IF NOT EXISTS import_batch_records (
+                batch_id TEXT NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+                row_number INTEGER NOT NULL,
+                contact_id TEXT NOT NULL,
+                created_contact INTEGER NOT NULL DEFAULT 0,
+                membership_added INTEGER NOT NULL DEFAULT 0,
+                before_contact_json TEXT NOT NULL DEFAULT '{}',
+                after_contact_json TEXT NOT NULL DEFAULT '{}',
+                attribute_changes_json TEXT NOT NULL DEFAULT '[]',
+                reverse_status TEXT NOT NULL DEFAULT 'pending',
+                reverse_reason TEXT,
+                recorded_at TEXT NOT NULL,
+                reversed_at TEXT,
+                PRIMARY KEY(batch_id, row_number)
+            );
+            CREATE INDEX IF NOT EXISTS idx_import_batch_status ON import_batches(status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_import_batch_records_contact ON import_batch_records(contact_id);
+            """
+        )
+
     def schema_version(self) -> int:
         with self.connect() as connection:
             row = connection.execute(
@@ -2444,6 +2499,203 @@ class CampaignStore:
         if result != "ok":
             raise RuntimeError(f"SQLite integrity check failed: {result}")
         return True
+
+    def reconcile_interrupted_imports(self) -> list[str]:
+        """Fence imports left running by a terminated process without guessing changes."""
+
+        with self.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT id FROM import_batches WHERE status = 'running'"
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                connection.execute(
+                    "UPDATE import_batches SET status = 'interrupted', updated_at = ?, "
+                    "error_message = 'process ended before import completion; reversal is conservative' "
+                    "WHERE status = 'running'",
+                    (utc_now(),),
+                )
+        return ids
+
+    def create_import_batch(
+        self, *, list_id: str, source_ref: str, total_rows: int, actor: str = "local-operator"
+    ) -> str:
+        _assert_safe_reference(source_ref, "import_batch.source_ref")
+        batch_id = str(uuid.uuid4())
+        now = utc_now()
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO import_batches(id, list_id, source_ref, status, total_rows, created_at, updated_at, actor) "
+                "VALUES (?, ?, ?, 'running', ?, ?, ?, ?)",
+                (batch_id, list_id, source_ref, total_rows, now, now, actor),
+            )
+        return batch_id
+
+    def record_import_batch_row(
+        self,
+        batch_id: str,
+        *,
+        row_number: int,
+        contact_id: str,
+        created_contact: bool,
+        membership_added: bool,
+        before_contact: dict[str, Any],
+        after_contact: dict[str, Any],
+        attribute_changes: list[dict[str, Any]],
+    ) -> None:
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO import_batch_records "
+                "(batch_id,row_number,contact_id,created_contact,membership_added,before_contact_json,after_contact_json,attribute_changes_json,recorded_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    batch_id,
+                    row_number,
+                    contact_id,
+                    int(created_contact),
+                    int(membership_added),
+                    _json(before_contact),
+                    _json(after_contact),
+                    _json(attribute_changes),
+                    utc_now(),
+                ),
+            )
+            connection.execute(
+                "UPDATE import_batches SET processed_rows = processed_rows + 1, updated_at = ? WHERE id = ?",
+                (utc_now(), batch_id),
+            )
+
+    def finish_import_batch(
+        self, batch_id: str, *, status: str, error_message: str | None = None
+    ) -> None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("invalid import batch completion status")
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE import_batches SET status = ?, updated_at = ?, completed_at = ?, error_message = ? WHERE id = ?",
+                (status, utc_now(), utc_now(), error_message, batch_id),
+            )
+
+    def get_import_batch(self, batch_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            batch = connection.execute(
+                "SELECT * FROM import_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if batch is None:
+                raise KeyError(f"import batch not found: {batch_id}")
+            records = connection.execute(
+                "SELECT * FROM import_batch_records WHERE batch_id = ? ORDER BY row_number",
+                (batch_id,),
+            ).fetchall()
+        result = dict(batch)
+        result["records"] = [
+            {
+                **dict(row),
+                "before_contact": json.loads(row["before_contact_json"]),
+                "after_contact": json.loads(row["after_contact_json"]),
+                "attribute_changes": json.loads(row["attribute_changes_json"]),
+            }
+            for row in records
+        ]
+        return result
+
+    def reverse_import_batch(
+        self, batch_id: str, *, actor: str = "local-operator", reason: str = "operator reversal"
+    ) -> dict[str, Any]:
+        """Compensate only changes still equal to the batch's after-state."""
+
+        batch = self.get_import_batch(batch_id)
+        if batch["status"] == "reversed":
+            return {"batch_id": batch_id, "status": "reversed", "reversed": 0, "skipped": 0}
+        reversed_count = 0
+        skipped_count = 0
+        with self.transaction(immediate=True) as connection:
+            for record in batch["records"]:
+                if record["reverse_status"] != "pending":
+                    continue
+                contact = connection.execute(
+                    "SELECT * FROM contacts WHERE id = ?", (record["contact_id"],)
+                ).fetchone()
+                if contact is None:
+                    connection.execute(
+                        "UPDATE import_batch_records SET reverse_status='skipped', reverse_reason=?, reversed_at=? WHERE batch_id=? AND row_number=?",
+                        ("contact no longer exists", utc_now(), batch_id, record["row_number"]),
+                    )
+                    skipped_count += 1
+                    continue
+                after = record["after_contact"]
+                current = {"display_name": contact["display_name"], "metadata_json": contact["metadata_json"]}
+                untouched = current == {
+                    "display_name": after.get("display_name", ""),
+                    "metadata_json": after.get("metadata_json", "{}"),
+                }
+                if record["created_contact"] and untouched:
+                    connection.execute(
+                        "UPDATE contacts SET lifecycle_status='deactivated', deactivated_at=?, updated_at=? WHERE id=? AND lifecycle_status='active'",
+                        (utc_now(), utc_now(), record["contact_id"]),
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO lifecycle_records(id,contact_id,action,status,reason,retention_conflict,requested_at,actor,idempotency_key,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            str(uuid.uuid5(uuid.NAMESPACE_URL, f"mailforge:import-reversal:{batch_id}:{record['row_number']}")),
+                            record["contact_id"], "import_reversal", "applied", reason, 0, utc_now(), actor,
+                            f"import-reversal:{batch_id}:{record['row_number']}", _json({"batch_id": batch_id}),
+                        ),
+                    )
+                elif not untouched:
+                    skipped_count += 1
+                    connection.execute(
+                        "UPDATE import_batch_records SET reverse_status='skipped', reverse_reason=?, reversed_at=? WHERE batch_id=? AND row_number=?",
+                        ("contact changed after import", utc_now(), batch_id, record["row_number"]),
+                    )
+                    continue
+                for change in record["attribute_changes"]:
+                    current_attr = connection.execute(
+                        "SELECT * FROM contact_attribute_values WHERE contact_id=? AND field_id=?",
+                        (record["contact_id"], change["field_id"]),
+                    ).fetchone()
+                    if current_attr is None:
+                        continue
+                    current_value = current_attr[change["value_column"]]
+                    if current_value != change.get("after"):
+                        skipped_count += 1
+                        continue
+                    before = change.get("before")
+                    if before is None:
+                        connection.execute(
+                            "DELETE FROM contact_attribute_values WHERE contact_id=? AND field_id=?",
+                            (record["contact_id"], change["field_id"]),
+                        )
+                    else:
+                        connection.execute(
+                            f"UPDATE contact_attribute_values SET {change['value_column']}=?, updated_at=?, updated_by=? WHERE contact_id=? AND field_id=?",
+                            (before, utc_now(), actor, record["contact_id"], change["field_id"]),
+                        )
+                if record["membership_added"]:
+                    membership = connection.execute(
+                        "SELECT 1 FROM list_memberships WHERE list_id=? AND contact_id=?",
+                        (batch["list_id"], record["contact_id"]),
+                    ).fetchone()
+                    later = connection.execute(
+                        "SELECT 1 FROM list_membership_history WHERE list_id=? AND contact_id=? AND occurred_at > ? LIMIT 1",
+                        (batch["list_id"], record["contact_id"], batch["created_at"]),
+                    ).fetchone()
+                    if membership is not None and later is None:
+                        connection.execute(
+                            "DELETE FROM list_memberships WHERE list_id=? AND contact_id=?",
+                            (batch["list_id"], record["contact_id"]),
+                        )
+                connection.execute(
+                    "UPDATE import_batch_records SET reverse_status='reversed', reverse_reason=?, reversed_at=? WHERE batch_id=? AND row_number=?",
+                    (reason, utc_now(), batch_id, record["row_number"]),
+                )
+                reversed_count += 1
+            status = "reversed" if skipped_count == 0 else "partially_reversed"
+            connection.execute(
+                "UPDATE import_batches SET status=?, updated_at=?, completed_at=?, error_message=? WHERE id=?",
+                (status, utc_now(), utc_now(), None if skipped_count == 0 else "some changes were newer than the import", batch_id),
+            )
+        return {"batch_id": batch_id, "status": status, "reversed": reversed_count, "skipped": skipped_count}
 
     def backup_to(self, destination: str | Path) -> Path:
         destination = Path(destination)

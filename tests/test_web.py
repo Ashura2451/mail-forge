@@ -223,6 +223,64 @@ def test_contact_management_policy_and_bulk_membership_are_auditable(
     assert repeated_detail["lifecycle"][0]["reason"] == "privacy request"
 
 
+def test_structured_import_batch_reversal_preserves_newer_contact_changes(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
+    list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Reversible"}).json()["id"]
+    field_id = client.post(
+        "/api/v1/fields",
+        headers=headers,
+        json={"machine_key": "plan", "label": "Plan", "field_type": "TEXT"},
+    ).json()["id"]
+    imported = client.post(
+        "/api/v1/imports/structured",
+        headers=headers,
+        json={
+            "list_id": list_id,
+            "source_ref": "batch-036",
+            "rows": [{"email": "new@example.com", "plan": "pro"}],
+            "mappings": {"email": "contact.email", "plan": field_id},
+        },
+    )
+    assert imported.status_code == 200
+    batch_id = imported.json()["batch_id"]
+    contact = client.get(f"/api/v1/contacts?list_id={list_id}").json()["items"][0]
+    edited = client.patch(
+        f"/api/v1/contacts/{contact['id']}",
+        headers=headers,
+        json={"display_name": "Changed after import", "expected_updated_at": contact["updated_at"]},
+    )
+    assert edited.status_code == 200
+    reversed_batch = client.post(
+        f"/api/v1/imports/batches/{batch_id}/reverse",
+        headers=headers,
+        json={"reason": "rollback test"},
+    )
+    assert reversed_batch.status_code == 200
+    assert reversed_batch.json()["status"] == "partially_reversed"
+    detail = client.get(f"/api/v1/contacts/{contact['id']}").json()
+    assert detail["contact"]["display_name"] == "Changed after import"
+    batch = client.get(f"/api/v1/imports/batches/{batch_id}").json()
+    assert batch["records"][0]["reverse_status"] == "skipped"
+
+
+def test_interrupted_import_batches_are_fenced_on_restart(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, _headers = _client(tmp_path, request)
+    runtime = client.app.state.runtime
+    list_id = runtime.store.create_list("Interrupted")
+    batch_id = runtime.store.create_import_batch(
+        list_id=list_id, source_ref="restart-fixture", total_rows=3
+    )
+    recovered = runtime.store.reconcile_interrupted_imports()
+    assert batch_id in recovered
+    batch = runtime.store.get_import_batch(batch_id)
+    assert batch["status"] == "interrupted"
+    assert "reversal" in batch["error_message"]
+
+
 def test_local_api_data_connection_upload_preview_and_snapshot(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:

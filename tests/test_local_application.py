@@ -33,7 +33,7 @@ def test_local_data_directory_onboarding_and_full_backup_restore(tmp_path: Path)
     backup = create_backup(data)
     metadata = validate_backup(backup)
     assert metadata["valid"] is True
-    assert metadata["schema_version"] == 27
+    assert metadata["schema_version"] == 28
     restored = restore_backup(backup, tmp_path / "restored-data")
     assert (restored / "artifacts" / "synthetic.txt").read_text(
         encoding="utf-8"
