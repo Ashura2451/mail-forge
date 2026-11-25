@@ -1966,7 +1966,10 @@ class CampaignStore:
             # Preserve the 035 invariant when the historical migration marker
             # is missing from an otherwise newer database; current reservations
             # must remain recoverable by the runtime boundary authority.
-            if connection.execute("SELECT 1 FROM schema_migrations WHERE version = 27").fetchone() is None:
+            has_provider_submissions = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_test_submissions'"
+            ).fetchone() is not None
+            if has_provider_submissions and connection.execute("SELECT 1 FROM schema_migrations WHERE version = 27").fetchone() is None:
                 connection.execute(
                     "UPDATE provider_test_submissions SET status='ambiguous', phase='ambiguous', "
                     "transport_started_at=COALESCE(transport_started_at, updated_at, created_at), "
@@ -2504,6 +2507,10 @@ class CampaignStore:
         """Fence imports left running by a terminated process without guessing changes."""
 
         with self.transaction(immediate=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='import_batches'"
+            ).fetchone() is None:
+                return []
             rows = connection.execute(
                 "SELECT id FROM import_batches WHERE status = 'running'"
             ).fetchall()

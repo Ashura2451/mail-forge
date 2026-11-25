@@ -112,7 +112,7 @@ def test_newer_schema_fails_closed(tmp_path: Path) -> None:
         connection.execute(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
-        connection.execute("INSERT INTO schema_migrations VALUES (28, 'now')")
+        connection.execute("INSERT INTO schema_migrations VALUES (29, 'now')")
     with pytest.raises(RuntimeError, match="newer"):
         from mailforge.interfaces.web import WebRuntime
 
