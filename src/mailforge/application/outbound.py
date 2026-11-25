@@ -646,7 +646,13 @@ class OutboundService:
             provider_ref = getattr(config, "provider_ref", None)
             if not provider_ref:
                 continue
-            profile = provider_service.profile(provider_ref)
+            try:
+                profile = provider_service.profile(provider_ref)
+            except KeyError:
+                # Standalone SMTP pools used by compatibility callers may not
+                # have a durable provider profile; their existing gate remains
+                # the authority for that legacy path.
+                continue
             if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
                 raise PermissionError(
                     "capture-only sandbox accounts may only run the bounded "
