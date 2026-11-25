@@ -139,7 +139,10 @@ class ProviderService:
         gate: LiveSendGate,
         profile: ProviderProfile | None = None,
     ) -> SMTPConnectionPool:
-        profile = profile or self.profile(ref)
+        if profile is None:
+            profile = self.profile(ref)
+        elif self.profile(ref) != profile:
+            raise ValueError(f"provider profile snapshot is stale or not authoritative: {ref}")
         if profile.ref != ref:
             raise ValueError(f"provider profile snapshot does not match account: {ref}")
         if profile.kind is not ProviderKind.SMTP:
@@ -174,7 +177,10 @@ class ProviderService:
         source_ref: str | None = None,
         profile: ProviderProfile | None = None,
     ) -> ImapSource:
-        profile = profile or self.profile(ref)
+        if profile is None:
+            profile = self.profile(ref)
+        elif self.profile(ref) != profile:
+            raise ValueError(f"provider profile snapshot is stale or not authoritative: {ref}")
         if profile.ref != ref:
             raise ValueError(f"provider profile snapshot does not match account: {ref}")
         if profile.kind is not ProviderKind.IMAP:
