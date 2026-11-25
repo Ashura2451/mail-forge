@@ -1,7 +1,7 @@
 # 0024. Controlled provider sandbox qualification
 
 **Date:** 2026-11-01
-**Status:** In Progress
+**Status:** Accepted
 **Task:** `MAILFORGE-CONTROLLED-PROVIDER-SANDBOX-035`
 
 ## Summary
