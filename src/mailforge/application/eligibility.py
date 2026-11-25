@@ -65,13 +65,6 @@ class EligibilityService:
             communication_purpose=purpose,
             connection=connection,
         )
-        if matches:
-            return EligibilityDecision(
-                EligibilityStatus.EXCLUDED,
-                tuple(f"{row['category']}: {row['reason']}" for row in matches),
-                can_prepare=True,
-            )
-
         scopes = (
             ("purpose", purpose),
             ("list", campaign["audience_list_id"]),
@@ -96,6 +89,19 @@ class EligibilityService:
             contact["id"], purpose=purpose, scope_ids=scopes, connection=connection
         )
         evidence_status = EvidenceStatus(evidence["status"]) if evidence else EvidenceStatus.UNKNOWN
+
+        if matches:
+            reasons = [f"{row['category']}: {row['reason']}" for row in matches]
+            if preference_state is PreferenceState.DISABLED:
+                reasons.append(f"preference_disabled:{purpose}")
+            return EligibilityDecision(
+                EligibilityStatus.EXCLUDED,
+                tuple(reasons),
+                evidence_status=evidence_status,
+                preference_state=preference_state,
+                can_prepare=True,
+            )
+
         if evidence_status in {EvidenceStatus.CONFLICTED, EvidenceStatus.WITHDRAWN}:
             return EligibilityDecision(
                 EligibilityStatus.REQUIRES_REVIEW,

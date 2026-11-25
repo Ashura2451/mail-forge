@@ -222,6 +222,65 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
         server.wait(timeout=5)
 
 
+def test_browser_audience_management_policy_journey(tmp_path: Path) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "browser-audience.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        "from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1440, "height": 1100})
+            page.set_default_timeout(5000)
+            page.goto(f"http://127.0.0.1:{port}/contacts", wait_until="networkidle")
+            page.get_by_label("List name").fill("Audience 036")
+            page.get_by_role("button", name="+ New list").click()
+            page.get_by_text("Audience 036").wait_for()
+            page.get_by_role("button", name="Audience 036").click()
+            page.locator("input[type=file]").set_input_files(
+                {"name": "audience.csv", "mimeType": "text/csv", "buffer": b"alice@example.com\n"}
+            )
+            page.get_by_role("button", name="Preview consequences").click()
+            page.get_by_text("1 accepted").wait_for()
+            page.get_by_role("button", name="Import to selected list").click()
+            page.get_by_text("Contacts imported").wait_for()
+            page.get_by_role("button", name="Inspect").click()
+            page.get_by_label("Display name").fill("Alice Operator")
+            page.get_by_role("button", name="Save contact").click()
+            page.get_by_text("Contact saved").wait_for()
+            page.get_by_label("Evidence source").fill("synthetic owner review")
+            page.get_by_role("button", name="Establish evidence").click()
+            page.get_by_text("Authorization evidence recorded").wait_for()
+            page.get_by_label("Contact preference").select_option("disabled")
+            page.get_by_role("button", name="Record preference").click()
+            page.get_by_text("Preference recorded").wait_for()
+            page.get_by_label("Suppression reason").fill("operator review")
+            page.get_by_role("button", name="Add manual suppression").click()
+            page.get_by_text("Suppression recorded").wait_for()
+            assert page.get_by_text("excluded").is_visible()
+            page.get_by_role("button", name="Deactivate contact").click()
+            page.get_by_text("Contact deactivated").wait_for()
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
     executable = _chromium_executable()
     if executable is None:

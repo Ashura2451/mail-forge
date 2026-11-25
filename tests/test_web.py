@@ -99,6 +99,9 @@ def test_local_api_runs_contact_campaign_lifecycle(
     imported = client.post(f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload)
     assert imported.status_code == 200
     assert imported.json()["unique_contacts"] == 2
+    exported = client.get(f"/api/v1/contacts/export?list_id={list_id}&format=csv")
+    assert exported.status_code == 200
+    assert "alice@example.com" in exported.text
 
     campaign = client.post(
         "/api/v1/campaigns",
@@ -129,6 +132,95 @@ def test_local_api_runs_contact_campaign_lifecycle(
     assert progress["campaign_status"] == "completed"
     assert progress["counts"]["accepted"] == 2
     assert client.get("/api/v1/activity").json()["items"]
+
+
+def test_contact_management_policy_and_bulk_membership_are_auditable(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
+    first_list = client.post("/api/v1/lists", headers=headers, json={"name": "Primary"}).json()
+    second_list = client.post("/api/v1/lists", headers=headers, json={"name": "Review"}).json()
+    list_id = first_list["id"]
+    upload = {"file": ("audience.txt", b"alice@example.com\nbob@example.com\n", "text/plain")}
+    assert client.post(
+        f"/api/v1/imports?list_id={list_id}", headers=headers, files=upload
+    ).status_code == 200
+    contacts = client.get(f"/api/v1/contacts?list_id={list_id}").json()["items"]
+    contact = contacts[0]
+
+    detail = client.get(f"/api/v1/contacts/{contact['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["lists"][0]["id"] == list_id
+    updated = client.patch(
+        f"/api/v1/contacts/{contact['id']}",
+        headers=headers,
+        json={
+            "display_name": "Alice Operator",
+            "metadata": {"source_tag": "migration-036"},
+            "expected_updated_at": contact["updated_at"],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["contact"]["display_name"] == "Alice Operator"
+    stale = client.patch(
+        f"/api/v1/contacts/{contact['id']}",
+        headers=headers,
+        json={"display_name": "Stale", "expected_updated_at": contact["updated_at"]},
+    )
+    assert stale.status_code == 409
+
+    bulk = client.post(
+        f"/api/v1/lists/{second_list['id']}/bulk-members",
+        headers=headers,
+        json={"contact_ids": [item["id"] for item in contacts], "action": "add"},
+    )
+    assert bulk.status_code == 200
+    assert bulk.json()["changed"] == 2
+
+    evidence = client.post(
+        f"/api/v1/contacts/{contact['id']}/evidence",
+        headers=headers,
+        json={"purpose": "marketing", "source": "synthetic-review", "evidence_ref": "journey-036"},
+    )
+    assert evidence.status_code == 200
+    preference = client.post(
+        f"/api/v1/contacts/{contact['id']}/preference",
+        headers=headers,
+        json={"purpose": "marketing", "state": "disabled", "evidence_ref": "journey-036"},
+    )
+    assert preference.status_code == 200
+    suppression = client.post(
+        f"/api/v1/contacts/{contact['id']}/suppress",
+        headers=headers,
+        json={"category": "manual", "reason": "operator review", "list_id": list_id},
+    )
+    assert suppression.status_code == 200
+    policy = client.get(f"/api/v1/contacts/{contact['id']}/policy?purpose=marketing&list_id={list_id}")
+    assert policy.status_code == 200
+    assert policy.json()["decision"]["status"] == "excluded"
+    assert policy.json()["decision"]["preference_state"] == "disabled"
+
+    deactivated = client.post(
+        f"/api/v1/contacts/{contact['id']}/deactivate",
+        headers=headers,
+        json={"reason": "privacy request"},
+    )
+    assert deactivated.status_code == 200
+    after = client.get(f"/api/v1/contacts/{contact['id']}").json()
+    assert after["contact"]["lifecycle_status"] == "deactivated"
+    assert after["evidence"]
+    assert after["preferences"]
+    assert after["suppressions"]
+    assert after["lifecycle"]
+    repeated = client.post(
+        f"/api/v1/contacts/{contact['id']}/deactivate",
+        headers=headers,
+        json={"reason": "repeat request"},
+    )
+    assert repeated.status_code == 200
+    repeated_detail = client.get(f"/api/v1/contacts/{contact['id']}").json()
+    assert len(repeated_detail["lifecycle"]) == 1
+    assert repeated_detail["lifecycle"][0]["reason"] == "privacy request"
 
 
 def test_local_api_data_connection_upload_preview_and_snapshot(

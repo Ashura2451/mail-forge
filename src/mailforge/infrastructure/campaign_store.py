@@ -3666,15 +3666,19 @@ class CampaignStore:
         display_name: str | None = None,
         metadata: dict[str, Any] | None = None,
         actor: str = "local-operator",
-    ) -> None:
+        expected_updated_at: str | None = None,
+    ) -> sqlite3.Row:
         _assert_no_secrets({"display_name": display_name or "", "actor": actor}, "contact_update")
         _assert_no_secrets(metadata or {}, "contact_update.metadata")
         with self.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT display_name, metadata_json FROM contacts WHERE id = ?", (contact_id,)
+                "SELECT display_name, metadata_json, updated_at FROM contacts WHERE id = ?",
+                (contact_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"contact not found: {contact_id}")
+            if expected_updated_at is not None and row["updated_at"] != expected_updated_at:
+                raise ValueError("contact changed; reload before saving")
             merged = json.loads(row["metadata_json"])
             merged.update(metadata or {})
             connection.execute(
@@ -3682,7 +3686,7 @@ class CampaignStore:
                 (
                     display_name if display_name is not None else row["display_name"],
                     _json(merged),
-                    utc_now(),
+                    datetime.now(UTC).isoformat(),
                     contact_id,
                 ),
             )
@@ -3693,17 +3697,32 @@ class CampaignStore:
                 "contact_corrected",
                 {"actor": actor},
             )
+        return self.get_contact(contact_id)
 
     def deactivate_contact(self, contact_id: str, *, reason: str, actor: str) -> None:
         _assert_no_secrets({"reason": reason, "actor": actor}, "contact_deactivation")
         with self.transaction(immediate=True) as connection:
+            now = datetime.now(UTC).isoformat()
             updated = connection.execute(
                 "UPDATE contacts SET lifecycle_status = 'deactivated', deactivated_at = ?, updated_at = ? "
                 "WHERE id = ?",
-                (utc_now(), utc_now(), contact_id),
+                (now, now, contact_id),
             ).rowcount
             if updated != 1:
                 raise KeyError(f"contact not found: {contact_id}")
+            connection.execute(
+                "INSERT OR IGNORE INTO lifecycle_records "
+                "(id, contact_id, action, status, reason, retention_conflict, requested_at, actor, idempotency_key, metadata_json) "
+                "VALUES (?, ?, 'deactivate', 'applied', ?, 0, ?, ?, ?, '{}')",
+                (
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"mailforge:deactivate:{contact_id}")),
+                    contact_id,
+                    reason,
+                    now,
+                    actor,
+                    f"deactivate:{contact_id}",
+                ),
+            )
             self.record_event(
                 connection,
                 "contact",

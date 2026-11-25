@@ -69,7 +69,7 @@ from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
 from mailforge.application.reporting import ReportFilters, ReportingError, ReportingService
 from mailforge.application.segmentation import SegmentationError, SegmentationService
-from mailforge.domain.campaign import CampaignStatus, ContactCandidate
+from mailforge.domain.campaign import CampaignStatus, ContactCandidate, SuppressionCategory
 from mailforge.domain.email import extract_addresses, normalize_email, validate_email
 from mailforge.domain.outbound import (
     CatchUpPolicy,
@@ -86,6 +86,7 @@ from mailforge.domain.provider import (
     ProviderProfile,
     TLSMode,
 )
+from mailforge.domain.policy import EvidenceStatus, PreferenceState
 from mailforge.infrastructure.campaign_store import SCHEMA_VERSION, CampaignStore
 from mailforge.infrastructure.credentials import LocalCredentialResolver
 
@@ -98,6 +99,51 @@ CSRF_HEADER = "x-mailforge-csrf"
 class ListInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
+
+
+class ContactUpdateInput(BaseModel):
+    display_name: str | None = Field(default=None, max_length=240)
+    metadata: dict[str, Any] | None = None
+    expected_updated_at: str | None = None
+
+
+class ContactLifecycleInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    actor: str = Field(default="local-operator", min_length=1, max_length=120)
+
+
+class ContactEvidenceInput(BaseModel):
+    purpose: str = Field(default="marketing", min_length=1, max_length=80)
+    status: EvidenceStatus = EvidenceStatus.ESTABLISHED
+    source: str = Field(min_length=1, max_length=240)
+    actor: str = Field(default="local-operator", min_length=1, max_length=120)
+    evidence_ref: str | None = Field(default=None, max_length=240)
+    list_id: str | None = None
+    policy_version: str = Field(default="1", max_length=32)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContactPreferenceInput(BaseModel):
+    purpose: str = Field(default="marketing", min_length=1, max_length=80)
+    state: PreferenceState
+    actor: str = Field(default="local-operator", min_length=1, max_length=120)
+    evidence_ref: str | None = Field(default=None, max_length=240)
+    list_id: str | None = None
+    policy_version: str = Field(default="1", max_length=32)
+
+
+class ContactSuppressionInput(BaseModel):
+    category: SuppressionCategory = SuppressionCategory.MANUAL
+    reason: str = Field(min_length=1, max_length=500)
+    purpose: str | None = Field(default=None, max_length=80)
+    list_id: str | None = None
+    actor: str = Field(default="local-operator", min_length=1, max_length=120)
+
+
+class BulkMembershipInput(BaseModel):
+    contact_ids: list[str] = Field(min_length=1, max_length=100)
+    action: str = Field(pattern="^(add|remove)$")
+    reason: str = Field(default="operator bulk action", max_length=240)
 
 
 class DataStudioRecipeInput(BaseModel):
@@ -2291,6 +2337,29 @@ def create_app(
         except SegmentationError as error:
             return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
 
+    @app.post(f"{API_PREFIX}/lists/{{list_id}}/bulk-members")
+    async def bulk_list_members(list_id: str, payload: BulkMembershipInput):
+        try:
+            results = [
+                runtime.segmentation.set_membership(
+                    list_id,
+                    contact_id,
+                    payload.action,
+                    source="browser-bulk",
+                    reason=payload.reason,
+                    idempotency_key=f"browser-bulk:{list_id}:{payload.action}:{contact_id}",
+                )
+                for contact_id in payload.contact_ids
+            ]
+            return {
+                "action": payload.action,
+                "requested": len(results),
+                "changed": sum(1 for result in results if result["changed"]),
+                "results": results,
+            }
+        except SegmentationError as error:
+            return _error(404 if error.code.endswith("_not_found") else 400, error.code, str(error))
+
     @app.get(f"{API_PREFIX}/contacts")
     async def contacts(list_id: str | None = None, q: str = "", limit: int = 100, offset: int = 0):
         safe_limit = max(1, min(limit, 500))
@@ -2312,6 +2381,165 @@ def create_app(
             )
         items = [_row(item) if isinstance(item, sqlite3.Row) else item for item in rows]
         return {"items": items, "limit": safe_limit, "offset": safe_offset}
+
+    @app.get(f"{API_PREFIX}/contacts/export")
+    async def export_contacts(list_id: str | None = None, q: str = "", format: str = "json"):
+        if format not in {"json", "csv"}:
+            return _error(400, "format_invalid", "contact export format must be json or csv")
+        items = runtime.campaigns.export_contacts(list_id=list_id)
+        if q.strip():
+            needle = q.strip().lower()
+            items = [
+                item
+                for item in items
+                if needle in item["normalized_email"].lower()
+                or needle in (item.get("display_name") or "").lower()
+            ]
+        if format == "json":
+            return Response(
+                content=json.dumps({"items": items}, ensure_ascii=False, indent=2),
+                media_type="application/json",
+                headers={"content-disposition": 'attachment; filename="contacts.json"'},
+            )
+        import csv
+        import io
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["email", "display_name", "lifecycle_status", "metadata"])
+        for item in items:
+            writer.writerow(
+                [
+                    item["normalized_email"],
+                    item.get("display_name") or "",
+                    item.get("lifecycle_status") or "active",
+                    json.dumps(item.get("metadata") or {}, ensure_ascii=False, sort_keys=True),
+                ]
+            )
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"content-disposition": 'attachment; filename="contacts.csv"'},
+        )
+
+    @app.get(f"{API_PREFIX}/contacts/{{contact_id}}")
+    async def contact_detail(contact_id: str):
+        try:
+            contact = runtime.store.get_contact(contact_id)
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+        lists = _query(
+            runtime.store,
+            "SELECT l.id, l.name, l.description FROM lists l "
+            "JOIN list_memberships m ON m.list_id = l.id WHERE m.contact_id = ? ORDER BY l.name",
+            (contact_id,),
+        )
+        sources = _query(
+            runtime.store,
+            "SELECT source_file, source_record_position, original_input, metadata_json, imported_at "
+            "FROM contact_sources WHERE contact_id = ? ORDER BY imported_at DESC LIMIT 100",
+            (contact_id,),
+        )
+        attributes = _query(
+            runtime.store,
+            "SELECT d.id, d.machine_key, d.label, d.field_type, v.text_value, v.number_value, "
+            "v.boolean_value, v.date_value, v.datetime_value, v.source_ref, v.source_record_position "
+            "FROM contact_attribute_values v JOIN contact_field_definitions d ON d.id = v.field_id "
+            "WHERE v.contact_id = ? ORDER BY d.machine_key",
+            (contact_id,),
+        )
+        return {
+            "contact": _row(contact),
+            "lists": lists,
+            "sources": sources,
+            "attributes": attributes,
+            "evidence": [_row(row) for row in runtime.store.list_authorization_evidence(contact_id=contact_id)],
+            "preferences": [_row(row) for row in runtime.store.list_preferences(contact_id=contact_id)],
+            "suppressions": [_row(row) for row in runtime.store.list_suppressions(normalized_email=contact["normalized_email"])],
+            "lifecycle": [_row(row) for row in runtime.store.list_lifecycle_records(contact_id=contact_id)],
+        }
+
+    @app.patch(f"{API_PREFIX}/contacts/{{contact_id}}")
+    async def update_contact(contact_id: str, payload: ContactUpdateInput):
+        try:
+            contact = runtime.store.update_contact(
+                contact_id,
+                display_name=payload.display_name,
+                metadata=payload.metadata,
+                expected_updated_at=payload.expected_updated_at,
+            )
+            return {"contact": _row(contact)}
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+        except ValueError as error:
+            return _error(409, "contact_conflict", str(error))
+
+    @app.post(f"{API_PREFIX}/contacts/{{contact_id}}/deactivate")
+    async def deactivate_contact(contact_id: str, payload: ContactLifecycleInput):
+        try:
+            runtime.store.deactivate_contact(contact_id, reason=payload.reason, actor=payload.actor)
+            return {"contact_id": contact_id, "status": "deactivated"}
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+
+    @app.get(f"{API_PREFIX}/contacts/{{contact_id}}/policy")
+    async def contact_policy(contact_id: str, purpose: str = "marketing", list_id: str | None = None):
+        try:
+            return runtime.campaigns.inspect_contact_policy(contact_id, purpose=purpose, list_id=list_id)
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+
+    @app.post(f"{API_PREFIX}/contacts/{{contact_id}}/evidence")
+    async def record_contact_evidence(contact_id: str, payload: ContactEvidenceInput):
+        try:
+            contact = runtime.store.get_contact(contact_id)
+            evidence_id = runtime.campaigns.record_authorization_evidence(
+                contact["normalized_email"],
+                purpose=payload.purpose,
+                status=payload.status,
+                source=payload.source,
+                actor=payload.actor,
+                evidence_ref=payload.evidence_ref,
+                list_id=payload.list_id,
+                policy_version=payload.policy_version,
+                details=payload.details,
+            )
+            return {"evidence_id": evidence_id, "status": payload.status.value}
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+
+    @app.post(f"{API_PREFIX}/contacts/{{contact_id}}/preference")
+    async def record_contact_preference(contact_id: str, payload: ContactPreferenceInput):
+        try:
+            contact = runtime.store.get_contact(contact_id)
+            preference_id = runtime.campaigns.set_preference(
+                contact["normalized_email"],
+                purpose=payload.purpose,
+                state=payload.state,
+                actor=payload.actor,
+                evidence_ref=payload.evidence_ref,
+                list_id=payload.list_id,
+                policy_version=payload.policy_version,
+            )
+            return {"preference_id": preference_id, "state": payload.state.value}
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
+
+    @app.post(f"{API_PREFIX}/contacts/{{contact_id}}/suppress")
+    async def suppress_contact(contact_id: str, payload: ContactSuppressionInput):
+        try:
+            contact = runtime.store.get_contact(contact_id)
+            suppression_id = runtime.campaigns.add_suppression(
+                contact["normalized_email"],
+                payload.category,
+                payload.reason,
+                list_id=payload.list_id,
+                purpose=payload.purpose,
+                actor=payload.actor,
+            )
+            return {"suppression_id": suppression_id, "category": payload.category.value}
+        except KeyError:
+            return _error(404, "contact_not_found", "contact was not found")
 
     @app.post(f"{API_PREFIX}/imports/preview")
     async def import_preview(file: UploadFile = File(...)):  # noqa: B008

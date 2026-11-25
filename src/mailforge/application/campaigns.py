@@ -338,6 +338,39 @@ class CampaignService:
             for contact in contacts
         ]
 
+    def inspect_contact_policy(
+        self, contact_id: str, *, purpose: str = "marketing", list_id: str | None = None
+    ) -> dict[str, object]:
+        """Explain current policy without creating a campaign or authorization."""
+
+        contact = self.store.get_contact(contact_id)
+        preview_campaign = {
+            "configuration_json": json.dumps({"communication_purpose": purpose}),
+            "audience_list_id": list_id or "__readiness_preview__",
+            "id": "__readiness_preview__",
+            "sender_config_ref": "__readiness_preview__",
+            "authorization": "unauthorized",
+        }
+        decision = self._eligibility.evaluate_contact(contact, campaign=preview_campaign)
+        return {
+            "contact": dict(contact),
+            "purpose": purpose,
+            "decision": decision.to_dict(),
+            "evidence": [
+                dict(row)
+                for row in self.store.list_authorization_evidence(contact_id=contact_id)
+            ],
+            "preferences": [
+                dict(row) for row in self.store.list_preferences(contact_id=contact_id)
+            ],
+            "suppressions": [
+                dict(row)
+                for row in self.store.list_suppressions(
+                    normalized_email=contact["normalized_email"]
+                )
+            ],
+        }
+
     def create_campaign(
         self,
         name: str,
