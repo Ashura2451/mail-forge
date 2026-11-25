@@ -641,6 +641,24 @@ class OutboundService:
         """
 
         pool.gate.require()
+        provider_service = ProviderService(self.store)
+        for config in getattr(pool, "configs", ()):
+            provider_ref = getattr(config, "provider_ref", None)
+            if not provider_ref:
+                continue
+            profile = provider_service.profile(provider_ref)
+            if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
+                raise PermissionError(
+                    "capture-only sandbox accounts may only run the bounded "
+                    "controlled-test operation"
+                )
+            if (
+                profile.host != config.host
+                or profile.port != config.port
+                or profile.credential_ref != config.credential_ref
+                or profile.ca_file != config.ca_file
+            ):
+                raise PermissionError("provider configuration changed after pool construction")
         self.store.get_campaign(campaign_id)
         schedule = self._stored_schedule(campaign_id)
         if schedule is not None and not self.schedules.due(schedule, self.now_fn()):

@@ -15,8 +15,10 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 import threading
 import uuid
 from collections.abc import Iterator
@@ -1658,7 +1660,17 @@ class CampaignStore:
             if str(self.path) == ":memory:":
                 yield
                 return
-            lock_path = self.path.with_name(f".{self.path.name}.provider.lock")
+            # Hash the database inode so symlink and hard-link aliases share
+            # one user-private sidecar without competing with SQLite's own
+            # locks on the database file.
+            identity = os.stat(self.path)
+            lock_root = Path(tempfile.gettempdir()).resolve() / "mailforge-provider-locks"
+            lock_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_root.chmod(0o700)
+            lock_name = hashlib.sha256(
+                f"{identity.st_dev}:{identity.st_ino}".encode("ascii")
+            ).hexdigest()
+            lock_path = lock_root / f"provider-{lock_name}.lock"
             with lock_path.open("a+") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 try:

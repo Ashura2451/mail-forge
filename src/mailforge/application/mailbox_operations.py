@@ -84,16 +84,33 @@ class MailboxOperationsService:
         resolver: CredentialResolver | None = None,
         *,
         profile=None,
+        expected_account: dict[str, Any] | None = None,
+        lock_held: bool = False,
     ):
-        self._fixture_account(account_ref)
-        profile = profile or self.provider_operations.providers.profile(account_ref)
-        return self.provider_operations.providers.imap_source(
-            account_ref,
-            resolver or EnvironmentCredentialResolver(),
-            mailbox=mailbox,
-            source_ref=self.source_ref(account_ref, mailbox),
-            profile=profile,
-        )
+        def build_source():
+            current = self._fixture_account(account_ref)
+            if expected_account is not None and (
+                current["host"] != expected_account["host"]
+                or current["port"] != expected_account["port"]
+                or current["kind"] != expected_account["kind"]
+            ):
+                raise MailboxOperationsError(
+                    "provider configuration changed during authorization",
+                    "configuration_changed",
+                )
+            selected_profile = profile or self.provider_operations.providers.profile(account_ref)
+            return self.provider_operations.providers.imap_source(
+                account_ref,
+                resolver or EnvironmentCredentialResolver(),
+                mailbox=mailbox,
+                source_ref=self.source_ref(account_ref, mailbox),
+                profile=selected_profile,
+            )
+
+        if lock_held:
+            return build_source()
+        with self.store.provider_operation_lock():
+            return build_source()
 
     def _grant(
         self, account: dict[str, Any], grant: ExternalOperationGrant, operation: ProviderOperation
@@ -136,6 +153,8 @@ class MailboxOperationsService:
                 account["inbound"]["mailbox"],
                 resolver,
                 profile=self.provider_operations.providers.profile(account_ref),
+                expected_account=account,
+                lock_held=True,
             )
         try:
             folders = source.discover_mailboxes()
@@ -203,6 +222,8 @@ class MailboxOperationsService:
                 mailbox,
                 resolver,
                 profile=self.provider_operations.providers.profile(account_ref),
+                expected_account=account,
+                lock_held=True,
             )
         source_ref = self.source_ref(account_ref, mailbox)
         self.store.register_inbound_source(
@@ -405,7 +426,12 @@ class MailboxOperationsService:
             current = self.action(request["id"])
             return current
         self.store.transition_inbound_mailbox_action(request["id"], action_state="queued")
-        source = self._source(account_ref, row["folder"] or "INBOX", resolver)
+        source = self._source(
+            account_ref,
+            row["folder"] or "INBOX",
+            resolver,
+            expected_account=account,
+        )
         target_uidvalidity = None
         mutation_started = False
         try:
@@ -647,8 +673,13 @@ class MailboxOperationsService:
             )
         if not action.get("account_ref") or not action.get("mailbox"):
             raise MailboxOperationsError("action is missing mailbox identity", "identity_invalid")
-        self._fixture_account(action["account_ref"])
-        source = self._source(action["account_ref"], action["mailbox"], resolver)
+        account = self._fixture_account(action["account_ref"])
+        source = self._source(
+            action["account_ref"],
+            action["mailbox"],
+            resolver,
+            expected_account=account,
+        )
         state = source.mailbox_state(action["mailbox"])
         if str(state["uidvalidity"]) != str(action.get("uidvalidity")):
             raise MailboxOperationsError(

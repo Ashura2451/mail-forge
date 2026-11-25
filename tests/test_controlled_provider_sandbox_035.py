@@ -15,6 +15,7 @@ from mailforge.application.campaigns import CampaignService
 from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.provider_operations import ProviderOperationsService
+from mailforge.application.providers import ProviderService
 from mailforge.domain.campaign import ContactCandidate
 from mailforge.domain.outbound import SenderPolicy, TemplateDefinition
 from mailforge.domain.provider import (
@@ -134,15 +135,27 @@ def test_capture_only_classification_requires_allowlisted_loopback(tmp_path, mon
 
 def test_provider_operation_lock_canonicalizes_database_alias(tmp_path):
     database = tmp_path / "canonical.sqlite3"
-    alias = tmp_path / "database-alias.sqlite3"
+    symlink_alias = tmp_path / "database-symlink.sqlite3"
+    hardlink_alias = tmp_path / "database-hardlink.sqlite3"
     CampaignStore(database)
-    alias.symlink_to(database)
+    symlink_alias.symlink_to(database)
+    hardlink_alias.hardlink_to(database)
     canonical = CampaignStore(database)
-    aliased = CampaignStore(alias)
-    assert canonical.path == aliased.path
-    assert canonical.path.with_name(f".{canonical.path.name}.provider.lock") == (
-        aliased.path.with_name(f".{aliased.path.name}.provider.lock")
-    )
+    symlinked = CampaignStore(symlink_alias)
+    hardlinked = CampaignStore(hardlink_alias)
+    assert canonical.path == symlinked.path
+    acquired = Event()
+
+    def acquire_alias_lock():
+        with hardlinked.provider_operation_lock():
+            acquired.set()
+
+    with canonical.provider_operation_lock():
+        thread = threading.Thread(target=acquire_alias_lock)
+        thread.start()
+        assert not acquired.wait(timeout=0.2)
+    thread.join(timeout=5)
+    assert acquired.is_set()
 
 
 def test_capture_only_classification_requires_process_fixture_authority(tmp_path, monkeypatch):
@@ -460,6 +473,16 @@ def test_campaign_execution_rejects_capture_only_accounts(tmp_path, monkeypatch)
             MappingCredentialResolver({"test:capture": "synthetic-password"}),
             gate=LiveSendGate(enabled=True),
         )
+    pool = ProviderService(store).smtp_pool(
+        "capture",
+        MappingCredentialResolver({"test:capture": "synthetic-password"}),
+        gate=LiveSendGate(enabled=True),
+    )
+    try:
+        with pytest.raises(PermissionError, match="capture-only sandbox"):
+            outbound.execute_smtp(campaign_id, pool)
+    finally:
+        pool.close()
 
 
 def test_reserved_submission_is_reconciled_as_pre_transport_abandonment(tmp_path, monkeypatch):
