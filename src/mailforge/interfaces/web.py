@@ -92,7 +92,7 @@ from mailforge.domain.provider import (
 )
 from mailforge.domain.policy import EvidenceStatus, PreferenceState
 from mailforge.infrastructure.campaign_store import SCHEMA_VERSION, CampaignStore
-from mailforge.infrastructure.credentials import LocalCredentialResolver
+from mailforge.infrastructure.credentials import CredentialError, LocalCredentialResolver
 
 API_PREFIX = "/api/v1"
 SESSION_COOKIE = "mailforge_session"
@@ -453,6 +453,12 @@ class ProviderInput(BaseModel):
     max_concurrency: int = Field(default=1, ge=1, le=100)
     inbound_enabled: bool = False
     sandbox_key: str | None = Field(default=None, max_length=80)
+
+
+class ProviderCredentialInput(BaseModel):
+    provider_ref: str = Field(min_length=1, max_length=120)
+    credential_ref: str = Field(pattern=r"^keychain:[A-Za-z0-9_.:-]+$", max_length=200)
+    secret: str = Field(min_length=1, max_length=4096)
 
 
 class ProviderAccountUpdateInput(BaseModel):
@@ -4407,6 +4413,26 @@ def create_app(
             }
         except (KeyError, ValueError) as error:
             return _error(400, "provider_invalid", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/credentials")
+    async def store_provider_credential(payload: ProviderCredentialInput):
+        try:
+            account = runtime.provider_operations.account(payload.provider_ref)
+            if account.get("credential_ref") != payload.credential_ref:
+                return _error(
+                    409,
+                    "credential_reference_mismatch",
+                    "credential reference must match the configured SMTP account",
+                )
+            runtime.credential_resolver.keychain.store(payload.credential_ref, payload.secret)
+            return {
+                "provider_ref": payload.provider_ref,
+                "credential_ref": payload.credential_ref,
+                "stored": True,
+                "secret_returned": False,
+            }
+        except (KeyError, ValueError, CredentialError) as error:
+            return _error(400, "credential_store_failed", str(error))
 
     @app.patch(f"{API_PREFIX}/providers/{{provider_ref}}")
     async def update_provider(provider_ref: str, payload: ProviderAccountUpdateInput):
