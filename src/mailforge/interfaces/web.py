@@ -15,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -3697,6 +3699,61 @@ def create_app(
             }
         except KeyError:
             return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepared-messages/{{intent_id}}")
+    async def prepared_message_inspection(campaign_id: str, intent_id: str):
+        try:
+            with runtime.store.connect() as connection:
+                intent = connection.execute(
+                    "SELECT id, normalized_email FROM delivery_intents WHERE id=? AND campaign_id=?",
+                    (intent_id, campaign_id),
+                ).fetchone()
+            if intent is None:
+                return _error(404, "prepared_message_not_found", "prepared message was not found")
+            prepared = runtime.store.get_prepared_message(intent_id)
+            if prepared is None:
+                return _error(404, "prepared_message_not_found", "prepared message was not found")
+            message = BytesParser(policy=email_default_policy).parsebytes(prepared["mime_bytes"])
+            parts = []
+            for part in message.walk():
+                if part.is_multipart():
+                    continue
+                payload = part.get_payload(decode=True) or b""
+                parts.append(
+                    {
+                        "content_type": part.get_content_type(),
+                        "disposition": part.get_content_disposition(),
+                        "filename": part.get_filename(),
+                        "content_id": part.get("Content-ID"),
+                        "size_bytes": len(payload),
+                    }
+                )
+            proof = runtime.store.get_outbound_proof(prepared["proof_id"]) if prepared["proof_id"] else None
+            return {
+                "intent_id": intent_id,
+                "recipient": intent["normalized_email"],
+                "prepared_message_id": prepared["id"],
+                "template_name": prepared["template_name"],
+                "template_version": prepared["template_version"],
+                "message_id": prepared["message_id"],
+                "content_hash": prepared["content_hash"],
+                "mime_size_bytes": len(prepared["mime_bytes"]),
+                "headers": {
+                    key: message.get(key)
+                    for key in ("From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type")
+                    if message.get(key) is not None
+                },
+                "parts": parts,
+                "proof": {
+                    "proof_id": proof["id"],
+                    "proof_hash": proof["proof_hash"],
+                    "content_hash": proof["content_hash"],
+                }
+                if proof
+                else None,
+            }
+        except KeyError:
+            return _error(404, "prepared_message_not_found", "prepared message was not found")
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/attempts/{{attempt_id}}/reconcile")
     async def reconcile_campaign_attempt(

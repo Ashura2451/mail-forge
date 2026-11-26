@@ -166,6 +166,13 @@ def test_browser_workspace_routes_share_the_operations_facade(tmp_path: Path) ->
             client.get(f"/api/v1/campaigns/{campaign_id}/recipients").json()["items"][0]["email"]
             == "browser@example.com"
         )
+        intent_id = client.get(f"/api/v1/campaigns/{campaign_id}/recipients").json()["items"][0]["id"]
+        inspected = client.get(
+            f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent_id}"
+        )
+        assert inspected.status_code == 200
+        assert inspected.json()["recipient"] == "browser@example.com"
+        assert inspected.json()["proof"]["content_hash"]
         assert client.get(f"/api/v1/campaigns/{campaign_id}/export?format=csv").status_code == 200
 
 
