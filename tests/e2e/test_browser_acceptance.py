@@ -420,6 +420,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 page.get_by_label("Account reference").fill("capture")
                 page.get_by_label("Port").fill(str(smtp.server_address[1]))
                 page.get_by_label("Username or sender identity").fill(sender)
+                page.get_by_label("Sender email").fill(sender)
                 page.get_by_label("Credential reference").fill("env:MAILFORGE_CAPTURE_PASSWORD")
                 page.get_by_label("CA file reference").fill(str(cert))
                 page.get_by_label("TLS mode").select_option("implicit_tls")
