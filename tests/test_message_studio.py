@@ -192,6 +192,86 @@ def test_message_studio_api_and_isolated_preview(tmp_path: Path) -> None:
     app.state.runtime.close()
 
 
+def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Path) -> None:
+    database = tmp_path / "preview-batch.sqlite3"
+    store = CampaignStore(database)
+    outbound = OutboundService(store)
+    studio = MessageStudioService(store, outbound=outbound)
+    list_id = store.create_list("Preview audience")
+    outbound.campaigns.import_candidates(
+        [
+            ContactCandidate("ada@example.com", "ada@example.com", "synthetic", 1, {"company": "A"}),
+            ContactCandidate("grace@example.com", "grace@example.com", "synthetic", 2, {}),
+        ],
+        list_id,
+    )
+    document = studio.blank_document("Preview batch")
+    document["subject"] = "Hello {{ contact.company }}"
+    document["blocks"] = [{"type": "text", "text": "Hi {{ name }} {{ contact.company }}"}]
+    created = studio.create_document("Preview batch", document=document)
+    published = studio.publish(created["id"], expected_revision_id=created["draft"]["id"])
+    campaign_id = outbound.campaigns.create_campaign(
+        "Preview export campaign",
+        list_id,
+        sender_config_ref="preview-sender",
+        template_ref="studio",
+        message_revision_id=published["published"]["id"],
+    )
+    report = studio.prepare_campaign(
+        campaign_id,
+        sender=SenderPolicy(ref="preview-sender", provider="synthetic", email="sender@example.com"),
+        revision_id=published["published"]["id"],
+    )
+    assert report.prepared == 2
+    contacts = store.list_contacts(list_id)
+    app = create_app(database, allowed_hosts={"testserver"})
+    with TestClient(app) as client:
+        session = client.get("/api/v1/session")
+        headers = {"x-mailforge-csrf": session.json()["csrf_token"]}
+        batch = client.post(
+            "/api/v1/message-studio/preview-batch",
+            headers=headers,
+            json={"revision_id": published["published"]["id"], "contact_ids": [item["id"] for item in contacts]},
+        )
+        assert batch.status_code == 200
+        assert len(batch.json()["items"]) == 2
+        assert batch.json()["items"][0]["compatibility"]["corpus_version"]
+        assert batch.json()["items"][1]["warnings"]
+        intent = store.list_intents(campaign_id)[0]
+        exported = client.get(
+            f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}/export"
+        )
+        assert exported.status_code == 200
+        assert exported.headers["content-type"].startswith("message/rfc822")
+        assert b"Subject:" in exported.content
+    app.state.runtime.close()
+
+
+def test_recipient_attachment_mapping_requires_published_revision_and_rejects_filename_conflicts(
+    tmp_path: Path,
+) -> None:
+    store, studio = _studio(tmp_path)
+    store.create_list("Mapping audience")
+    studio.store.upsert_contact(
+        "ada@example.com",
+        display_name="Ada",
+        metadata={},
+        source_file="synthetic",
+        source_record_position=1,
+        original_input="ada@example.com",
+    )
+    contact_id = store.contact_by_email("ada@example.com")["id"]
+    created = studio.create_document("Mapping", kind="template")
+    first = studio.create_asset("report.pdf", "application/pdf", b"first")
+    second = studio.create_asset("report.pdf", "application/pdf", b"second")
+    with pytest.raises(MessageStudioError, match="published"):
+        studio.map_recipient_attachment(created["draft"]["id"], contact_id, first["id"])
+    published = studio.publish(created["id"], expected_revision_id=created["draft"]["id"])
+    studio.map_recipient_attachment(published["published"]["id"], contact_id, first["id"])
+    with pytest.raises(MessageStudioError, match="different asset"):
+        studio.map_recipient_attachment(published["published"]["id"], contact_id, second["id"])
+
+
 def test_data_studio_recipient_batch_freezes_source_context_and_message(tmp_path: Path) -> None:
     store = CampaignStore(tmp_path / "batch.sqlite3")
     outbound = OutboundService(store)

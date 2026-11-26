@@ -44,6 +44,13 @@ MAX_BLOCKS = 100
 MAX_ASSET_BYTES = 10 * 1024 * 1024
 MAX_MESSAGE_ASSET_BYTES = 25 * 1024 * 1024
 MAX_FILENAME = 180
+MAX_BATCH_PREVIEWS = 10
+COMPATIBILITY_CORPUS_VERSION = "email-compat-2026.11-local-1"
+COMPATIBILITY_SOURCES = (
+    "https://www.caniemail.com/",
+    "https://www.rfc-editor.org/rfc/rfc2045",
+    "https://www.rfc-editor.org/rfc/rfc2112",
+)
 ALLOWED_BLOCKS = {
     "text",
     "heading",
@@ -829,27 +836,50 @@ class MessageStudioService:
     ) -> dict[str, Any]:
         with self.store.transaction(immediate=True) as connection:
             revision = connection.execute(
-                "SELECT id FROM message_revisions WHERE id = ?", (revision_id,)
+                "SELECT id,status FROM message_revisions WHERE id = ?", (revision_id,)
             ).fetchone()
             contact = connection.execute(
                 "SELECT id FROM contacts WHERE id = ?", (contact_id,)
             ).fetchone()
             asset = connection.execute(
-                "SELECT id,kind FROM message_assets WHERE id = ? AND archived_at IS NULL",
+                "SELECT id,kind,filename FROM message_assets WHERE id = ? AND archived_at IS NULL",
                 (asset_id,),
             ).fetchone()
             if revision is None:
                 raise MessageStudioError("message revision was not found", "revision_not_found")
+            if revision["status"] != "published":
+                raise MessageStudioError(
+                    "recipient attachment mappings require a published revision",
+                    "revision_not_published",
+                )
             if contact is None:
                 raise MessageStudioError("contact was not found", "contact_not_found")
             if asset is None or asset["kind"] != "attachment":
                 raise MessageStudioError("a reusable attachment asset is required", "asset_invalid")
+            conflicting = connection.execute(
+                "SELECT a.filename FROM message_recipient_attachments m "
+                "JOIN message_assets a ON a.id = m.asset_id "
+                "WHERE m.revision_id=? AND m.contact_id=? AND a.filename=? AND m.asset_id<>?",
+                (revision_id, contact_id, asset["filename"], asset_id),
+            ).fetchone()
+            if conflicting is not None:
+                raise MessageStudioError(
+                    "recipient already has a different asset with this filename",
+                    "attachment_mapping_conflict",
+                )
             connection.execute(
                 "INSERT INTO message_recipient_attachments(revision_id,contact_id,asset_id,required) "
                 "VALUES(?,?,?,?) ON CONFLICT(revision_id,contact_id,asset_id) DO UPDATE SET required=excluded.required",
                 (revision_id, contact_id, asset_id, int(required)),
             )
-        return {
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT m.revision_id,m.contact_id,m.asset_id,m.required,a.filename,a.media_type,a.size_bytes "
+                "FROM message_recipient_attachments m JOIN message_assets a ON a.id=m.asset_id "
+                "WHERE m.revision_id=? AND m.contact_id=? AND m.asset_id=?",
+                (revision_id, contact_id, asset_id),
+            ).fetchone()
+        return dict(row) if row is not None else {
             "revision_id": revision_id,
             "contact_id": contact_id,
             "asset_id": asset_id,
@@ -1129,7 +1159,9 @@ class MessageStudioService:
         )
         context, contact_id = self._contact_context(contact)
         if source.get("composition_mode", "structured") == "custom_html":
-            return self._render_custom_document(source, context, preview=preview)
+            result = self._render_custom_document(source, context, preview=preview)
+            result["compatibility"] = self._compatibility_diagnostics(source, result)
+            return result
         condition_modes = (
             contact.get("_data_studio_condition_modes") if isinstance(contact, Mapping) else None
         )
@@ -1187,7 +1219,7 @@ class MessageStudioService:
             }
             for item in attachments
         ]
-        return {
+        result = {
             "subject": rendered.subject,
             "preheader": preheader_rendered,
             "html": rendered.html or "",
@@ -1197,6 +1229,71 @@ class MessageStudioService:
             "approximate_bytes": approximate_bytes,
             "_rendered": rendered,
             "_attachments": tuple(attachments),
+        }
+        result["compatibility"] = self._compatibility_diagnostics(source, result)
+        result["diagnostics"] = result["compatibility"]["confirmed"]
+        return result
+
+    def _compatibility_diagnostics(
+        self, source: Mapping[str, Any], rendered: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Return versioned local diagnostics without claiming client rendering."""
+
+        confirmed: list[dict[str, Any]] = []
+        advisory: list[dict[str, Any]] = []
+        custom = source.get("custom_html", {})
+        source_html = str(
+            custom.get("original_source", rendered.get("html", ""))
+            if isinstance(custom, Mapping)
+            else rendered.get("html", "")
+        )
+        source_text = str(source.get("plain_text_override") or rendered.get("text", ""))
+        if not source_text.strip():
+            confirmed.append({
+                "severity": "ERROR", "category": "content", "code": "plain_text_missing",
+                "message": "The message has no plain-text alternative.", "confidence": "confirmed",
+            })
+        if re.search(r"<img\b", source_html, re.I) and re.search(
+            r"<img(?=[^>]*\bsrc=)[^>]*\balt=", source_html, re.I
+        ) is None:
+            confirmed.append({
+                "severity": "ERROR", "category": "accessibility", "code": "image_alt_missing",
+                "message": "At least one image is missing alternative text.", "confidence": "confirmed",
+            })
+        if re.search(r"\b(?:display\s*:\s*(?:flex|grid)|position\s*:)", source_html, re.I):
+            advisory.append({
+                "severity": "WARNING", "category": "compatibility", "code": "layout_feature_uncertain",
+                "message": "Advanced CSS layout may vary across email clients; inspect the source and test target clients.",
+                "confidence": "advisory",
+            })
+        if re.search(r"<(?:video|audio|canvas)\b", source_html, re.I):
+            advisory.append({
+                "severity": "WARNING", "category": "compatibility", "code": "interactive_media_uncertain",
+                "message": "Interactive media is not uniformly supported in email clients.", "confidence": "advisory",
+            })
+        if any(item.get("code") == "remote_resource" for item in rendered.get("diagnostics", [])):
+            advisory.append({
+                "severity": "WARNING", "category": "privacy", "code": "remote_resource_blocked",
+                "message": "Remote resources were not fetched; client-side privacy behavior remains unknown.",
+                "confidence": "advisory",
+            })
+        if rendered.get("approximate_bytes", 0) > 100 * 1024:
+            advisory.append({
+                "severity": "WARNING", "category": "size", "code": "message_size_advisory",
+                "message": "The prepared message is larger than 100 KiB; clipping and transport limits may vary.",
+                "confidence": "advisory",
+            })
+        return {
+            "corpus_version": COMPATIBILITY_CORPUS_VERSION,
+            "sources": list(COMPATIBILITY_SOURCES),
+            "confirmed": confirmed,
+            "advisory": advisory,
+            "unknown": [{
+                "category": "client_rendering", "code": "external_client_unverified",
+                "message": "Gmail, Outlook, and Apple Mail rendering was not exercised by this local diagnostic.",
+                "confidence": "unknown",
+            }],
+            "counts": {"confirmed": len(confirmed), "advisory": len(advisory), "unknown": 1},
         }
 
     def _render_custom_document(
@@ -1326,6 +1423,43 @@ class MessageStudioService:
         result.pop("_rendered", None)
         result.pop("_attachments", None)
         return result
+
+    def preview_batch(
+        self, revision_id: str, contact_ids: Sequence[str], *, limit: int = MAX_BATCH_PREVIEWS
+    ) -> dict[str, Any]:
+        """Render a bounded set of recipient previews through the canonical renderer."""
+
+        selected = list(dict.fromkeys(contact_ids))[: max(1, min(limit, MAX_BATCH_PREVIEWS))]
+        items: list[dict[str, Any]] = []
+        for contact_id in selected:
+            try:
+                contact = dict(self.store.get_contact(contact_id))
+                rendered = self.preview(revision_id=revision_id, contact_id=contact_id)
+                items.append(
+                    {
+                        "contact_id": contact_id,
+                        "email": contact["normalized_email"],
+                        "name": contact.get("display_name", ""),
+                        "subject": rendered["subject"],
+                        "text": rendered["text"],
+                        "html": rendered["html"],
+                        "warnings": rendered.get("warnings", []),
+                        "diagnostics": rendered.get("diagnostics", []),
+                        "compatibility": rendered.get("compatibility", {}),
+                        "attachments": rendered.get("attachments", []),
+                        "approximate_bytes": rendered.get("approximate_bytes", 0),
+                    }
+                )
+            except (KeyError, MessageStudioError) as error:
+                items.append(
+                    {
+                        "contact_id": contact_id,
+                        "status": "invalid",
+                        "error": str(error),
+                        "error_code": getattr(error, "code", "contact_invalid"),
+                    }
+                )
+        return {"revision_id": revision_id, "items": items, "limit": MAX_BATCH_PREVIEWS}
 
     def prepare_controlled_test(
         self,

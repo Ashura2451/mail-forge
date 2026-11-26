@@ -394,6 +394,11 @@ class MessagePreviewInput(BaseModel):
     condition_mode: str | None = None
 
 
+class MessagePreviewBatchInput(BaseModel):
+    revision_id: str
+    contact_ids: list[str] = Field(min_length=1, max_length=10)
+
+
 class MessageAttachmentMapInput(BaseModel):
     revision_id: str
     contact_id: str
@@ -2148,6 +2153,13 @@ def create_app(
         except (MessageStudioError, KeyError) as error:
             return _error(400, getattr(error, "code", "preview_invalid"), str(error))
 
+    @app.post(f"{API_PREFIX}/message-studio/preview-batch")
+    async def preview_message_batch(payload: MessagePreviewBatchInput):
+        try:
+            return runtime.message_studio.preview_batch(payload.revision_id, payload.contact_ids)
+        except (MessageStudioError, KeyError) as error:
+            return _error(400, getattr(error, "code", "preview_invalid"), str(error))
+
     @app.post(f"{API_PREFIX}/message-studio/custom-html/import")
     async def import_custom_html(
         name: str = "Imported HTML template",
@@ -3752,6 +3764,30 @@ def create_app(
                 if proof
                 else None,
             }
+        except KeyError:
+            return _error(404, "prepared_message_not_found", "prepared message was not found")
+
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepared-messages/{{intent_id}}/export")
+    async def prepared_message_export(campaign_id: str, intent_id: str):
+        try:
+            with runtime.store.connect() as connection:
+                intent = connection.execute(
+                    "SELECT id, normalized_email FROM delivery_intents WHERE id=? AND campaign_id=?",
+                    (intent_id, campaign_id),
+                ).fetchone()
+            if intent is None:
+                return _error(404, "prepared_message_not_found", "prepared message was not found")
+            prepared = runtime.store.get_prepared_message(intent_id)
+            if prepared is None:
+                return _error(404, "prepared_message_not_found", "prepared message was not found")
+            return Response(
+                content=prepared["mime_bytes"],
+                media_type="message/rfc822",
+                headers={
+                    "content-disposition": f'attachment; filename="{intent["normalized_email"]}.eml"',
+                    "cache-control": "no-store",
+                },
+            )
         except KeyError:
             return _error(404, "prepared_message_not_found", "prepared message was not found")
 

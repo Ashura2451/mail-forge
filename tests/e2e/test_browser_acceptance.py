@@ -21,6 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from mailforge.application.message_studio import MessageStudioService
+from mailforge.application.outbound import OutboundService
+from mailforge.domain.campaign import ContactCandidate
 from mailforge.infrastructure.campaign_store import CampaignStore
 from tests.test_provider_interoperability import _certificate, _ServerContext, _SMTPServer
 
@@ -1180,6 +1183,95 @@ def test_custom_html_import_edit_export_and_safe_preview(tmp_path: Path) -> None
             page.locator(".list-row").first.click()
             page.get_by_role("heading", name="Custom HTML source").wait_for()
             assert "Hello {{ name }}" in page.get_by_label("Custom HTML source").input_value()
+            browser.close()
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_message_studio_structured_personalization_recovery_and_attachment_isolation(
+    tmp_path: Path,
+) -> None:
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
+    repo = Path(__file__).parents[2]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "message-studio-browser.sqlite3"
+    store = CampaignStore(database)
+    outbound = OutboundService(store)
+    audience = store.create_list("Message Studio audience")
+    outbound.campaigns.import_candidates(
+        [
+            ContactCandidate("ada@example.com", "ada@example.com", "synthetic", 1, {"company": "Ada Labs"}),
+            ContactCandidate("grace@example.com", "grace@example.com", "synthetic", 2, {}),
+        ],
+        audience,
+    )
+    studio = MessageStudioService(store, outbound=outbound)
+    ada_asset = studio.create_asset("ada-report.pdf", "application/pdf", b"ADA-PRIVATE")
+    grace_asset = studio.create_asset("grace-report.pdf", "application/pdf", b"GRACE-PRIVATE")
+    contacts = store.list_contacts(audience)
+    frontend = repo / "src" / "mailforge" / "web_assets"
+    code = (
+        "import uvicorn; "
+        f"from mailforge.interfaces.web import create_app; "
+        f"uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), "
+        f"host='127.0.0.1', port={port}, log_level='error')"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    server = subprocess.Popen([sys.executable, "-c", code], env=environment)
+    try:
+        _wait_for_server(port)
+        with playwright.sync_playwright() as sync:
+            browser = sync.chromium.launch(headless=True, executable_path=executable)
+            page = browser.new_page(viewport={"width": 1440, "height": 1100})
+            page.goto(f"http://127.0.0.1:{port}/message-studio", wait_until="networkidle")
+            page.get_by_role("button", name="+ New message").click()
+            page.get_by_role("heading", name="Compose message").wait_for()
+            page.get_by_label("Subject").fill("Hello")
+            page.get_by_label("Merge field target").select_option("subject")
+            page.get_by_role("button", name="Email · email").click()
+            page.get_by_role("button", name="Undo").click()
+            assert "{{ email }}" not in page.get_by_label("Subject").input_value()
+            page.get_by_role("button", name="Redo").click()
+            assert "{{ email }}" in page.get_by_label("Subject").input_value()
+            page.get_by_role("button", name="Preview canonical output").click()
+            page.get_by_text("Recipient preview rendered").wait_for()
+            page.get_by_text("Plain text and diagnostics").click()
+            page.get_by_text("Compatibility corpus email-compat-2026.11-local-1").wait_for()
+            page.get_by_label("Message name").fill("Recovered browser draft")
+            page.reload(wait_until="networkidle")
+            page.locator(".list-row").first.click()
+            page.get_by_text("Unsaved local draft recovered").wait_for()
+            page.get_by_role("button", name="Restore local draft").click()
+            page.get_by_label("Fallback value").fill("friend")
+            page.get_by_role("button", name="Save draft").click()
+            page.get_by_text("Message draft saved").wait_for()
+            page.get_by_role("button", name="Publish revision").click()
+            page.get_by_text("Message revision published").wait_for()
+            mapping_contact = page.get_by_label("Mapping recipient")
+            mapping_asset = page.get_by_label("Mapping attachment asset")
+            mapping_contact.select_option(contacts[0]["id"])
+            mapping_asset.select_option(ada_asset["id"])
+            page.get_by_role("button", name="Map attachment").click()
+            page.get_by_text("Recipient attachment mapping saved").wait_for()
+            mapping_contact.select_option(contacts[1]["id"])
+            mapping_asset.select_option(grace_asset["id"])
+            page.get_by_role("button", name="Map attachment").click()
+            page.get_by_text("Recipient attachment mapping saved").wait_for()
+            page.locator(".list-row").filter(has_text="ada-report.pdf").last.wait_for()
+            page.locator(".list-row").filter(has_text="grace-report.pdf").last.wait_for()
+            recipient_panel = page.locator("section.panel").filter(has_text="Recipient inspection").last
+            recipient_panel.get_by_role("checkbox").nth(0).check()
+            recipient_panel.get_by_role("checkbox").nth(1).check()
+            page.get_by_role("button", name="Inspect selected recipients").click()
+            page.get_by_text("Recipient previews rendered").wait_for()
+            page.get_by_text("ada@example.com").last.wait_for()
+            page.get_by_text("grace@example.com").last.wait_for()
             browser.close()
     finally:
         server.terminate()
