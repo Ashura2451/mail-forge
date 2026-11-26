@@ -1,7 +1,7 @@
 # 0013. Campaign operations workspace
 
 **Date**: 2026-10-28
-**Status**: In Progress
+**Status**: Accepted
 **Task**: `MAILFORGE-CAMPAIGN-OPERATIONS-023`
 
 ## Summary
