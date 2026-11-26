@@ -6,7 +6,7 @@
 ## Current qualification checkpoint
 
 The milestone-038 implementation is present on canonical `main` at
-`5760d0f6e5c0540a4ca9e223d48835964975a12f`. Local tests and the rendered
+`cfa1e4b8037977eb28659cf300cc353749d326dc`. Local tests and the rendered
 browser journey cover structured/custom HTML authoring, revision reuse,
 undo/redo and draft recovery, field/fallback personalization, bounded
 multi-recipient inspection, recipient-scoped attachment mappings, versioned
