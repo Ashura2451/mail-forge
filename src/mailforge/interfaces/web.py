@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -351,6 +351,14 @@ class CampaignScheduleInput(BaseModel):
     fold: int | None = Field(default=None, ge=0, le=1)
 
 
+class CampaignDuplicateInput(BaseModel):
+    name: str | None = Field(default=None, max_length=160)
+
+
+class CampaignReconcileInput(BaseModel):
+    decision: str = Field(min_length=1, max_length=40)
+
+
 class SetupInput(BaseModel):
     timezone: str = Field(default="UTC", min_length=1, max_length=80)
     simulation_mode: bool = True
@@ -658,6 +666,7 @@ class WorkerSupervisor:
 
     def __init__(self, outbound: OutboundService):
         self.outbound = outbound
+        self.on_completed: Callable[[str], None] | None = None
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mailforge-worker")
         self._lock = threading.Lock()
         self._running: set[str] = set()
@@ -672,6 +681,7 @@ class WorkerSupervisor:
 
     def _run(self, campaign_id: str) -> None:
         try:
+            completed = False
             while True:
                 report, _transport = self.outbound.execute_worker(
                     campaign_id,
@@ -679,8 +689,11 @@ class WorkerSupervisor:
                     max_items=1,
                 )
                 if report.campaign_status in {"completed", "paused", "canceled", "failed"}:
+                    completed = report.campaign_status == "completed"
                     break
                 time.sleep(0.03)
+            if completed and self.on_completed is not None:
+                self.on_completed(campaign_id)
         except Exception:
             try:
                 campaign = self.outbound.store.get_campaign(campaign_id)
@@ -721,11 +734,13 @@ class CampaignScheduleSupervisor:
             try:
                 with self.store.connect() as connection:
                     rows = connection.execute(
-                        "SELECT c.id, s.* FROM campaigns c JOIN campaign_schedules s "
+                        "SELECT c.id, c.configuration_json, s.* FROM campaigns c JOIN campaign_schedules s "
                         "ON s.campaign_id=c.id WHERE c.status='scheduled' "
                         "AND c.authorization='simulation_authorized'"
                     ).fetchall()
                 for row in rows:
+                    if json.loads(row["configuration_json"] or "{}").get("archived_at"):
+                        continue
                     schedule = ScheduleSpec(
                         mode=ScheduleMode(row["mode"]),
                         timezone=row["timezone"],
@@ -902,6 +917,7 @@ class WebRuntime:
             worker_active=self.workers.active,
             worker_start=self.workers.start,
         )
+        self.workers.on_completed = self._advance_recurring_campaign
         self.automation = AutomationService(
             self.store,
             campaigns=self.campaigns,
@@ -954,6 +970,20 @@ class WebRuntime:
                     )
             except ValueError:
                 pass
+
+    def _advance_recurring_campaign(self, campaign_id: str) -> None:
+        try:
+            self.campaign_operations.create_next_recurring_run(campaign_id)
+        except (CampaignOperationsError, KeyError, ValueError):
+            # The completed run and its evidence remain durable; an operator
+            # can inspect the failed recurrence in the campaign workspace.
+            with self.store.transaction(immediate=True) as connection:
+                self.store.record_event(
+                    connection,
+                    "campaign",
+                    campaign_id,
+                    "campaign_recurrence_advance_failed",
+                )
 
     def close(self) -> None:
         self.automation_runtime.shutdown()
@@ -1095,7 +1125,11 @@ def _require_list(store: CampaignStore, list_id: str) -> None:
 
 def _campaign_view(runtime: WebRuntime, row: sqlite3.Row) -> dict[str, Any]:
     campaign = _row(row)
+    configuration = json.loads(row["configuration_json"] or "{}")
     campaign.pop("configuration", None)
+    campaign["archived"] = bool(configuration.get("archived_at"))
+    campaign["recurrence_parent_id"] = configuration.get("recurrence_parent_id")
+    campaign["recurrence_index"] = configuration.get("recurrence_index")
     report = runtime.campaigns.report(row["id"])
     campaign["report"] = report.to_dict()
     campaign["worker_active"] = runtime.workers.active(row["id"])
@@ -3295,20 +3329,25 @@ def create_app(
             )
 
     @app.get(f"{API_PREFIX}/campaigns")
-    async def campaigns(limit: int = 100, offset: int = 0):
+    async def campaigns(limit: int = 100, offset: int = 0, include_archived: bool = False):
         safe_limit = max(1, min(limit, 500))
         safe_offset = max(0, offset)
         rows = _query(
             runtime.store,
             "SELECT * FROM campaigns ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-            (safe_limit, safe_offset),
+            (min(500, safe_limit * 3), 0),
         )
+        visible = []
+        for item in rows:
+            view = _campaign_view(runtime, runtime.store.get_campaign(item["id"]))
+            if include_archived or not view["archived"]:
+                visible.append(view)
+        visible = visible[safe_offset : safe_offset + safe_limit]
         return {
-            "items": [
-                _campaign_view(runtime, runtime.store.get_campaign(item["id"])) for item in rows
-            ],
+            "items": visible,
             "limit": safe_limit,
             "offset": safe_offset,
+            "include_archived": include_archived,
         }
 
     @app.post(f"{API_PREFIX}/campaigns")
@@ -3333,6 +3372,27 @@ def create_app(
             return _error(
                 409 if "changed" in str(error) else 400, "campaign_update_failed", str(error)
             )
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/duplicate")
+    async def duplicate_campaign(campaign_id: str, payload: CampaignDuplicateInput | None = None):
+        try:
+            duplicate_id = runtime.campaign_operations.duplicate_campaign(
+                campaign_id, name=payload.name if payload else None
+            )
+            return {"id": duplicate_id, "status": "draft"}
+        except CampaignOperationsError as error:
+            return _error(400, error.code, str(error))
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/archive")
+    async def archive_campaign(campaign_id: str):
+        try:
+            return runtime.campaign_operations.archive_campaign(campaign_id)
+        except KeyError:
+            return _error(404, "campaign_not_found", "campaign was not found")
+        except ValueError as error:
+            return _error(409, "campaign_archive_failed", str(error))
 
     @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}")
     async def campaign_detail(campaign_id: str):
@@ -3620,6 +3680,19 @@ def create_app(
             }
         except KeyError:
             return _error(404, "campaign_not_found", "campaign was not found")
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/attempts/{{attempt_id}}/reconcile")
+    async def reconcile_campaign_attempt(
+        campaign_id: str, attempt_id: str, payload: CampaignReconcileInput
+    ):
+        try:
+            attempt = runtime.store.latest_attempt_for_campaign(campaign_id, attempt_id)
+            runtime.store.reconcile_attempt(attempt_id, payload.decision)
+            return {"campaign_id": campaign_id, "attempt_id": attempt["id"], "decision": payload.decision}
+        except KeyError:
+            return _error(404, "attempt_not_found", "campaign attempt was not found")
+        except ValueError as error:
+            return _error(409, "reconciliation_failed", str(error))
 
     @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/export")
     async def campaign_export(campaign_id: str, format: str = "json"):

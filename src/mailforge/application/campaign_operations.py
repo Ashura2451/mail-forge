@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from mailforge.application.eligibility import EligibilityService
 from mailforge.application.reporting import ReportFilters, ReportingService
@@ -200,6 +201,116 @@ class CampaignOperationsService:
             provider_account_ref=provider_account_ref,
         )
 
+    def duplicate_campaign(self, campaign_id: str, *, name: str | None = None) -> str:
+        """Create a fresh editable draft without copying authorization or outcomes."""
+
+        source = self.store.get_campaign(campaign_id)
+        configuration = _safe_config(source)
+        configuration.pop("archived_at", None)
+        configuration.pop("recurrence_parent_id", None)
+        configuration.pop("recurrence_index", None)
+        base_name = name.strip() if name else f"{source['name']} copy"
+        candidate = base_name
+        suffix = 2
+        with self.store.connect() as connection:
+            while connection.execute("SELECT 1 FROM campaigns WHERE name = ?", (candidate,)).fetchone():
+                candidate = f"{base_name} {suffix}"
+                suffix += 1
+        return self.campaigns.create_campaign(
+            candidate,
+            source["audience_list_id"],
+            description=source["description"] or "",
+            template_ref=f"campaign-template-{uuid.uuid4().hex[:12]}",
+            sender_config_ref=f"campaign-{uuid.uuid4().hex[:16]}",
+            configuration=configuration,
+            audience_source_type=source["audience_source_type"],
+            audience_source_id=source["audience_source_id"],
+            audience_revision_id=source["audience_revision_id"],
+            message_revision_id=source["message_revision_id"],
+            provider_account_ref=source["provider_account_ref"],
+        )
+
+    def archive_campaign(self, campaign_id: str) -> dict[str, Any]:
+        """Archive a campaign and stop any not-yet-started recurring children."""
+
+        source = self.store.get_campaign(campaign_id)
+        self.store.archive_campaign(campaign_id)
+        source_config = json.loads(source["configuration_json"] or "{}")
+        series_id = source_config.get("recurrence_parent_id", campaign_id)
+        with self.store.connect() as connection:
+            children = connection.execute(
+                "SELECT id, status, configuration_json FROM campaigns WHERE id != ?",
+                (campaign_id,),
+            ).fetchall()
+        for child in children:
+            config = json.loads(child["configuration_json"] or "{}")
+            if config.get("recurrence_parent_id") != series_id:
+                continue
+            if child["status"] in {
+                CampaignStatus.READY.value,
+                CampaignStatus.SCHEDULED.value,
+                CampaignStatus.PAUSED.value,
+            }:
+                try:
+                    self.campaigns.cancel(child["id"])
+                except ValueError:
+                    pass
+                self.store.archive_campaign(child["id"], reason="recurring_series_archived")
+        return {"campaign_id": campaign_id, "status": "archived"}
+
+    def create_next_recurring_run(self, campaign_id: str) -> str | None:
+        """Create a fresh, independently prepared child for a recurring definition."""
+
+        source = self.store.get_campaign(campaign_id)
+        source_config = json.loads(source["configuration_json"] or "{}")
+        if source_config.get("archived_at"):
+            return None
+        schedule_row = self.store.get_schedule(campaign_id)
+        if schedule_row is None or schedule_row["mode"] != ScheduleMode.RECURRING.value:
+            return None
+        schedule = self._schedule_from_row(schedule_row)
+        next_at = self.schedules.next_recurrence(schedule, self.outbound.now_fn())
+        parent_id = source_config.get("recurrence_parent_id", campaign_id)
+        index = int(source_config.get("recurrence_index", 0)) + 1
+        local_next = next_at.astimezone(ZoneInfo(schedule.timezone)).replace(tzinfo=None)
+        run_name = f"{source['name'].split(' · run ')[0]} · run {index}"
+        child_config = _safe_config(source)
+        child_config.update(
+            {
+                "recurrence_parent_id": parent_id,
+                "recurrence_index": index,
+                "recurrence_source_campaign_id": campaign_id,
+            }
+        )
+        child_id = self.campaigns.create_campaign(
+            run_name,
+            source["audience_list_id"],
+            description=source["description"] or "",
+            template_ref=f"campaign-template-{uuid.uuid4().hex[:12]}",
+            sender_config_ref=f"campaign-{uuid.uuid4().hex[:16]}",
+            configuration=child_config,
+            audience_source_type=source["audience_source_type"],
+            audience_source_id=source["audience_source_id"],
+            audience_revision_id=source["audience_revision_id"],
+            message_revision_id=source["message_revision_id"],
+            provider_account_ref=source["provider_account_ref"],
+        )
+        child_schedule = ScheduleSpec(
+            mode=ScheduleMode.RECURRING,
+            timezone=schedule.timezone,
+            scheduled_at=local_next.isoformat(),
+            weekdays=schedule.weekdays,
+            pacing_seconds=schedule.pacing_seconds,
+            cooldown_seconds=schedule.cooldown_seconds,
+            recurrence=schedule.recurrence,
+            catch_up_policy=schedule.catch_up_policy,
+            fold=schedule.fold,
+        )
+        self.prepare(child_id)
+        self.set_schedule(child_id, child_schedule)
+        self.authorize(child_id)
+        return child_id
+
     def update_draft(
         self, campaign_id: str, *, expected_updated_at: str | None, **values: Any
     ) -> None:
@@ -310,12 +421,21 @@ class CampaignOperationsService:
     def preflight(self, campaign_id: str) -> dict[str, Any]:
         campaign = self.store.get_campaign(campaign_id)
         findings: list[PreflightFinding] = []
+        audience_summary = {"matched": 0, "eligible": 0, "excluded": 0, "invalid": 0}
         source = campaign["audience_source_id"]
         try:
             if campaign["audience_source_type"] == "segment":
-                self.segmentation.get_segment(
+                segment = self.segmentation.get_segment(
                     campaign["audience_source_id"], campaign["audience_revision_id"]
                 )
+                compiled = self.segmentation.compile(segment["definition"], canonical_numbers=True)
+                with self.store.connect() as connection:
+                    contacts = list(
+                        connection.execute(
+                            f"SELECT c.* FROM contacts c WHERE {compiled.sql} ORDER BY normalized_email LIMIT 100001",
+                            compiled.parameters,
+                        )
+                    )
             else:
                 with self.store.connect() as connection:
                     exists = connection.execute(
@@ -332,6 +452,16 @@ class CampaignOperationsService:
                             "choose another audience",
                         )
                     )
+                contacts = self.store.list_contacts(source) if exists is not None else []
+            audience_summary["matched"] = len(contacts)
+            for contact in contacts[:100_000]:
+                decision = self.eligibility.evaluate_contact(contact, campaign=campaign)
+                if decision.status.value in {"eligible", "ready"}:
+                    audience_summary["eligible"] += 1
+                elif decision.status.value == "invalid":
+                    audience_summary["invalid"] += 1
+                else:
+                    audience_summary["excluded"] += 1
         except Exception as error:
             findings.append(
                 PreflightFinding(
@@ -520,6 +650,7 @@ class CampaignOperationsService:
             "warning_count": sum(item.severity == "warning" for item in findings),
             "findings": [item.to_dict() for item in findings],
             "provider": _safe_provider(account),
+            "audience_summary": audience_summary,
         }
 
     def prepare(self, campaign_id: str, *, run_key: str = "primary") -> dict[str, Any]:
@@ -733,7 +864,7 @@ class CampaignOperationsService:
     ) -> list[dict[str, Any]]:
         with self.store.connect() as connection:
             rows = connection.execute(
-                "SELECT a.* FROM delivery_attempts a JOIN delivery_intents i "
+                "SELECT a.*, i.normalized_email AS recipient FROM delivery_attempts a JOIN delivery_intents i "
                 "ON i.id=a.intent_id WHERE i.campaign_id=? "
                 "ORDER BY a.created_at DESC,a.id LIMIT ? OFFSET ?",
                 (campaign_id, max(1, min(limit, 500)), max(0, offset)),

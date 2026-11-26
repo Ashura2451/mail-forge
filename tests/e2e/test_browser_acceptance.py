@@ -294,6 +294,12 @@ def test_browser_audience_management_policy_journey(tmp_path: Path) -> None:
             page.get_by_text("Campaign draft created").wait_for()
             page.get_by_role("button", name="Prepare snapshots").click()
             page.get_by_text("Campaign prepared").wait_for()
+            page.get_by_label("Mode").select_option("recurring")
+            page.get_by_label("Scheduled local time").fill("2099-01-01T09:00:00")
+            page.get_by_label("Recurrence").select_option("daily")
+            page.get_by_label("Missed run policy").select_option("skip")
+            page.get_by_role("button", name="Save schedule").click()
+            page.get_by_text("Schedule saved").wait_for()
             browser.close()
     finally:
         server.terminate()

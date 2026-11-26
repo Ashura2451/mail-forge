@@ -257,6 +257,13 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--message-revision-id")
     update.add_argument("--provider-account-ref")
     update.add_argument("--description", default="")
+    duplicate = campaign_commands.add_parser("duplicate", help="create a fresh draft from a campaign")
+    duplicate.add_argument("--database", type=Path, required=True)
+    duplicate.add_argument("campaign_id")
+    duplicate.add_argument("--name")
+    archive_campaign = campaign_commands.add_parser("archive", help="archive a campaign series")
+    archive_campaign.add_argument("--database", type=Path, required=True)
+    archive_campaign.add_argument("campaign_id")
     preflight = campaign_commands.add_parser("preflight", help="run read-only campaign preflight")
     preflight.add_argument("--database", type=Path, required=True)
     preflight.add_argument("campaign_id")
@@ -1434,6 +1441,10 @@ def main(argv: list[str] | None = None) -> int:
                 with DatabaseProcessLock(args.database):
                     destination = service.store.backup_to(args.destination)
                     print(json.dumps({"backup": str(destination)}))
+            elif args.campaign_command == "duplicate":
+                print(json.dumps({"id": operations.duplicate_campaign(args.campaign_id, name=args.name)}))
+            elif args.campaign_command == "archive":
+                print(json.dumps(operations.archive_campaign(args.campaign_id)))
             elif args.campaign_command == "rehearse-migration":
                 print(
                     json.dumps(

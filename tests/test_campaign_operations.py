@@ -1,3 +1,5 @@
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -93,7 +95,6 @@ def test_draft_update_requires_current_version_and_schedule_rejects_dst_gap(tmp_
             message_revision_id=None,
             provider_account_ref=None,
         )
-
     with pytest.raises(CampaignOperationsError, match="does not exist"):
         operations.set_schedule(
             campaign_id,
@@ -104,6 +105,21 @@ def test_draft_update_requires_current_version_and_schedule_rejects_dst_gap(tmp_
             ),
         )
 
+
+def test_duplicate_and_archive_preserve_history_without_copying_execution_state(tmp_path: Path) -> None:
+    store, operations, list_id = _operations(tmp_path / "campaign.sqlite3")
+    original = operations.create_draft(name="Reusable", list_id=list_id)
+    operations.prepare(original)
+    operations.authorize(original)
+    duplicate = operations.duplicate_campaign(original)
+    copied = store.get_campaign(duplicate)
+    assert copied["status"] == "draft"
+    assert copied["authorization"] == "unauthorized"
+    assert store.list_intents(duplicate) == []
+    assert copied["name"] == "Reusable copy"
+    archived = operations.archive_campaign(original)
+    assert archived["status"] == "archived"
+    assert json.loads(store.get_campaign(original)["configuration_json"])["archived_at"]
 
 def test_browser_workspace_routes_share_the_operations_facade(tmp_path: Path) -> None:
     with TestClient(
@@ -151,3 +167,50 @@ def test_browser_workspace_routes_share_the_operations_facade(tmp_path: Path) ->
             == "browser@example.com"
         )
         assert client.get(f"/api/v1/campaigns/{campaign_id}/export?format=csv").status_code == 200
+
+
+def test_recurring_campaign_creates_a_fresh_scheduled_run(tmp_path: Path) -> None:
+    with TestClient(
+        create_app(
+            tmp_path / "recurring.sqlite3",
+            allowed_hosts={"testserver", "127.0.0.1", "localhost", "::1"},
+        )
+    ) as client:
+        session = client.get("/api/v1/session")
+        headers = {"x-mailforge-csrf": session.json()["csrf_token"]}
+        list_id = client.post(
+            "/api/v1/lists", headers=headers, json={"name": "Recurring audience"}
+        ).json()["id"]
+        client.post(
+            f"/api/v1/imports?list_id={list_id}",
+            headers=headers,
+            files={"file": ("audience.txt", b"recurring@example.com\n", "text/plain")},
+        )
+        campaign_id = client.post(
+            "/api/v1/campaigns", headers=headers, json={"name": "Recurring", "list_id": list_id}
+        ).json()["id"]
+        assert client.post(
+            f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={}
+        ).status_code == 200
+        assert client.put(
+            f"/api/v1/campaigns/{campaign_id}/schedule",
+            headers=headers,
+            json={
+                "mode": "recurring",
+                "timezone": "UTC",
+                "scheduled_at": "2020-01-01T00:00:00",
+                "recurrence": "daily",
+                "catch_up_policy": "next_window",
+            },
+        ).status_code == 200
+        assert client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code == 200
+        assert client.post(f"/api/v1/campaigns/{campaign_id}/simulate", headers=headers).status_code == 200
+        for _ in range(40):
+            items = client.get("/api/v1/campaigns").json()["items"]
+            if len(items) > 1 and any(item["status"] == "scheduled" for item in items):
+                break
+            time.sleep(0.025)
+        assert len(items) == 2
+        child = next(item for item in items if item["id"] != campaign_id)
+        assert child["status"] == "scheduled"
+        assert child["recurrence_parent_id"] == campaign_id

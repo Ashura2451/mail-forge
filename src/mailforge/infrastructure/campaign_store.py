@@ -4686,6 +4686,33 @@ class CampaignStore:
             raise KeyError(f"campaign not found: {campaign_id}")
         return row
 
+    def archive_campaign(self, campaign_id: str, *, reason: str = "operator_archived") -> None:
+        """Archive a non-running campaign without deleting historical evidence."""
+
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT status, configuration_json FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"campaign not found: {campaign_id}")
+            if row["status"] in {CampaignStatus.RUNNING.value, CampaignStatus.PAUSING.value}:
+                raise ValueError("running campaigns must be paused or canceled before archival")
+            configuration = json.loads(row["configuration_json"] or "{}")
+            if configuration.get("archived_at"):
+                return
+            configuration["archived_at"] = utc_now()
+            connection.execute(
+                "UPDATE campaigns SET configuration_json = ?, updated_at = ? WHERE id = ?",
+                (_json(configuration), utc_now(), campaign_id),
+            )
+            self.record_event(
+                connection,
+                "campaign",
+                campaign_id,
+                "campaign_archived",
+                {"reason": reason},
+            )
+
     def update_campaign_draft(
         self,
         campaign_id: str,
@@ -6478,3 +6505,15 @@ class CampaignStore:
                 "SELECT * FROM delivery_attempts WHERE intent_id = ? ORDER BY attempt_number DESC LIMIT 1",
                 (intent_id,),
             ).fetchone()
+
+    def latest_attempt_for_campaign(self, campaign_id: str, attempt_id: str) -> sqlite3.Row:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT da.* FROM delivery_attempts da "
+                "JOIN delivery_intents di ON di.id = da.intent_id "
+                "WHERE di.campaign_id = ? AND da.id = ?",
+                (campaign_id, attempt_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"campaign attempt not found: {attempt_id}")
+        return row

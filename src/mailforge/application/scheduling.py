@@ -135,6 +135,14 @@ class ScheduleEngine:
                 return candidate
         return None
 
+    def next_recurrence(self, schedule: ScheduleSpec, now: datetime) -> datetime:
+        """Return the next occurrence strictly after ``now`` for a definition."""
+
+        self.validate(schedule)
+        if schedule.mode is not ScheduleMode.RECURRING:
+            raise ScheduleError("next_recurrence requires a recurring schedule")
+        return self._recurring_occurrence(schedule, _utc(now), next_only=True)
+
     def _recurring_occurrence(
         self, schedule: ScheduleSpec, now: datetime, *, next_only: bool = False
     ) -> datetime:
