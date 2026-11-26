@@ -5,6 +5,7 @@ import socketserver
 import ssl
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,8 @@ class _SMTPServer(socketserver.ThreadingTCPServer):
         self.connections = 0
         self.commands: list[str] = []
         self.received_messages: list[bytes] = []
+        self.last_data_at: float | None = None
+        self.rate_lock = threading.Lock()
         super().__init__(("127.0.0.1", 0), _SMTPHandler)
 
 
@@ -133,6 +136,13 @@ class _SMTPHandler(socketserver.BaseRequestHandler):
                     connection.close()
                     return
                 code = server.scenario.get("data_code", 250)
+                min_interval = server.scenario.get("min_data_interval")
+                if min_interval is not None:
+                    with server.rate_lock:
+                        now = time.monotonic()
+                        if server.last_data_at is not None and now - server.last_data_at < float(min_interval):
+                            code = 550
+                        server.last_data_at = now
                 self._send(connection, f"{code} final data response\r\n".encode())
             elif verb == "RSET":
                 self._send(connection, b"250 reset\r\n")
