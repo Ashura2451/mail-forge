@@ -139,6 +139,7 @@ class PreparedSMTPTransport(SimulationTransport):
     def __init__(self, store: CampaignStore, pool: SMTPConnectionPool):
         self.store = store
         self.pool = pool
+        self.submission_guard: Callable[[str, str], None] | None = None
 
     def send(self, email: str, intent_id: str, attempt_number: int) -> DeliveryResult:
         prepared = self.store.get_prepared_message(intent_id)
@@ -183,6 +184,8 @@ class PreparedSMTPTransport(SimulationTransport):
             raise RuntimeError("Message Studio preparation requires outbound proof")
         if prepared["recipient"] != email:
             raise RuntimeError("prepared recipient does not match delivery intent")
+        if self.submission_guard is not None:
+            self.submission_guard(email, intent_id)
         result = deliver_smtp(
             self.pool,
             prepared["from_email"],
@@ -632,6 +635,7 @@ class OutboundService:
         stop_after: int | None = None,
         worker_id: str = "smtp-worker",
         allow_capture_only: bool = False,
+        submission_guard: Callable[[str, str], None] | None = None,
     ) -> tuple[CampaignReport, PreparedSMTPTransport]:
         """Execute prepared MIME through SMTP with the normal policy guard.
 
@@ -675,6 +679,7 @@ class OutboundService:
         if schedule is not None and not self.schedules.due(schedule, self.now_fn()):
             return self.campaigns.report(campaign_id), PreparedSMTPTransport(self.store, pool)
         transport = PreparedSMTPTransport(self.store, pool)
+        transport.submission_guard = submission_guard
 
         smtp_guard = self.campaigns._make_canonical_dispatch_guard(campaign_id, transport)
 
@@ -699,6 +704,7 @@ class OutboundService:
         stop_after: int | None = None,
         worker_id: str = "smtp-worker",
         allow_capture_only: bool = False,
+        submission_guard: Callable[[str, str], None] | None = None,
     ) -> tuple[CampaignReport, PreparedSMTPTransport]:
         """Execute through a durable provider profile and the canonical SMTP path."""
 
@@ -731,6 +737,7 @@ class OutboundService:
                 stop_after=stop_after,
                 worker_id=worker_id,
                 allow_capture_only=allow_capture_only,
+                submission_guard=submission_guard,
             )
         finally:
             pool.close()

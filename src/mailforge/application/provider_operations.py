@@ -329,6 +329,9 @@ class ProviderOperationsService:
             json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    def profile_fingerprint(self, ref: str) -> str:
+        return self._profile_fingerprint(self.providers.profile(ref))
+
     def accounts(self) -> list[dict[str, Any]]:
         return [
             self._account_with_sandbox_state(item) for item in self.store.list_provider_accounts()
@@ -456,6 +459,83 @@ class ProviderOperationsService:
             "expires_at": expires_at,
             "external_access": False,
         }
+
+    def issue_campaign_grant(
+        self,
+        ref: str,
+        *,
+        purpose: str,
+        expires_at: str,
+        max_submissions: int,
+        prepared_set_hash: str,
+    ) -> dict[str, object]:
+        """Issue a server-owned bounded grant for one prepared campaign."""
+
+        if max_submissions < 1 or max_submissions > 3:
+            raise ValueError("campaign authorization submissions must be between 1 and 3")
+        profile = self.providers.profile(ref)
+        if _loopback(profile.host) or self.is_sandbox_classified(ref):
+            raise PermissionError("campaign authorization requires an external SMTP profile")
+        if not prepared_set_hash.strip():
+            raise ValueError("campaign authorization requires a prepared-set hash")
+        authorization_ref = f"grant-{secrets.token_urlsafe(24)}"
+        grant = ExternalOperationGrant(
+            account_ref=ref,
+            operation=ProviderOperation.CAMPAIGN_EXECUTION,
+            host=profile.host,
+            port=profile.port,
+            purpose=purpose,
+            max_submissions=max_submissions,
+            expires_at=expires_at,
+            authorization_ref=authorization_ref,
+            proof_hash=prepared_set_hash,
+            profile_fingerprint=self._profile_fingerprint(profile),
+        )
+        grant.validate()
+        self.store.record_provider_operation_grant(
+            account_ref=ref,
+            operation=grant.operation.value,
+            host=grant.host,
+            port=grant.port,
+            purpose=grant.purpose,
+            sender=None,
+            recipient=None,
+            max_submissions=grant.max_submissions,
+            expires_at=grant.expires_at,
+            authorization_ref=grant.authorization_ref,
+            proof_hash=grant.proof_hash,
+            profile_fingerprint=grant.profile_fingerprint,
+        )
+        return {
+            "authorization_ref": authorization_ref,
+            "account_ref": ref,
+            "operation": grant.operation.value,
+            "purpose": purpose,
+            "expires_at": expires_at,
+            "max_submissions": max_submissions,
+            "prepared_set_hash": prepared_set_hash,
+            "profile_fingerprint": grant.profile_fingerprint,
+            "external_access": False,
+        }
+
+    def validate_campaign_grant(
+        self,
+        ref: str,
+        *,
+        authorization_ref: str,
+        purpose: str,
+        expires_at: str,
+        prepared_set_hash: str,
+    ) -> ExternalOperationGrant:
+        grant = self.grant_for_authorization(
+            ref,
+            ProviderOperation.CAMPAIGN_EXECUTION,
+            authorization_ref=authorization_ref,
+            purpose=purpose,
+            expires_at=expires_at,
+            proof_hash=prepared_set_hash,
+        )
+        return self._require_grant(ref, ProviderOperation.CAMPAIGN_EXECUTION, grant)
 
     def grant_for_authorization(
         self,

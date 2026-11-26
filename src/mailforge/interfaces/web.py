@@ -360,6 +360,22 @@ class CampaignExecutionInput(BaseModel):
     mode: Literal["loopback_smtp"] = "loopback_smtp"
 
 
+class CampaignExternalAuthorizationInput(BaseModel):
+    authorization_ref: str = Field(min_length=1, max_length=200)
+    purpose: str = Field(min_length=1, max_length=500)
+    expires_at: str
+    recipient_set_hash: str = Field(min_length=32, max_length=128)
+    prepared_set_hash: str = Field(min_length=32, max_length=128)
+
+
+class CampaignGrantInput(BaseModel):
+    campaign_id: str = Field(min_length=1, max_length=120)
+    purpose: str = Field(min_length=1, max_length=500)
+    expires_at: str
+    max_submissions: int = Field(ge=1, le=3)
+    prepared_set_hash: str = Field(min_length=32, max_length=128)
+
+
 class CampaignDuplicateInput(BaseModel):
     name: str | None = Field(default=None, max_length=160)
 
@@ -743,6 +759,37 @@ class WorkerSupervisor:
                         stop_after=1,
                         worker_id=f"web-{threading.get_ident()}",
                     )
+                elif mode == "external_smtp":
+                    provider_ref = campaign["provider_account_ref"]
+                    authorization_ref = configuration.get("external_authorization_ref")
+                    purpose = configuration.get("external_authorization_purpose")
+                    expires_at = configuration.get("external_authorization_expires_at")
+                    prepared_set_hash = configuration.get("external_prepared_set_hash")
+                    if not provider_ref or not authorization_ref or not purpose or not expires_at or not prepared_set_hash:
+                        raise PermissionError("external campaign authorization is incomplete")
+                    grant = self.provider_operations.validate_campaign_grant(
+                        provider_ref,
+                        authorization_ref=authorization_ref,
+                        purpose=purpose,
+                        expires_at=expires_at,
+                        prepared_set_hash=prepared_set_hash,
+                    )
+
+                    def consume_submission(_email: str, _intent_id: str) -> None:
+                        self.outbound.store.consume_provider_operation_grant(
+                            grant.authorization_ref, account_ref=provider_ref
+                        )
+
+                    report, transport = self.outbound.execute_provider(
+                        campaign_id,
+                        provider_ref,
+                        self.credential_resolver,
+                        gate=LiveSendGate.from_environment(explicit_flag=True),
+                        retry_deferred=False,
+                        stop_after=None,
+                        worker_id=f"web-{threading.get_ident()}",
+                        submission_guard=consume_submission,
+                    )
                 else:
                     report, transport = self.outbound.execute_worker(
                         campaign_id,
@@ -859,6 +906,8 @@ class CampaignScheduleSupervisor:
                 for row in rows:
                     configuration = json.loads(row["configuration_json"] or "{}")
                     if configuration.get("archived_at") or row["pause_requested"] or row["cancel_requested"]:
+                        continue
+                    if configuration.get("execution_mode") == "external_smtp":
                         continue
                     due = False
                     if row["status"] == CampaignStatus.PAUSED.value:
@@ -3732,6 +3781,41 @@ def create_app(
         except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
             return _error(400, "execution_failed", str(error))
 
+    @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/external-authorization-preview")
+    async def external_campaign_authorization_preview(campaign_id: str):
+        try:
+            return runtime.campaign_operations.external_authorization_preview(campaign_id)
+        except (KeyError, ValueError, CampaignOperationsError) as error:
+            return _error(400, getattr(error, "code", "external_authorization_preview_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/authorize-external")
+    async def authorize_external_campaign(
+        campaign_id: str, payload: CampaignExternalAuthorizationInput
+    ):
+        try:
+            return runtime.campaign_operations.bind_external_authorization(
+                campaign_id, **payload.model_dump()
+            )
+        except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
+            return _error(400, getattr(error, "code", "external_authorization_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/execute-external")
+    async def execute_external_campaign(campaign_id: str):
+        try:
+            campaign = runtime.store.get_campaign(campaign_id)
+            if campaign["authorization"] != "simulation_authorized" or not runtime.store.has_execution_declaration(
+                campaign_id
+            ):
+                return _error(400, "execution_not_authorized", "authorize the campaign before external execution")
+            configuration = json.loads(campaign["configuration_json"] or "{}")
+            if configuration.get("execution_mode") != "external_smtp":
+                return _error(400, "external_authorization_required", "bind a server-issued external campaign authorization first")
+            runtime.store.clear_pause_request(campaign_id)
+            started = runtime.workers.start(campaign_id)
+            return {"campaign_id": campaign_id, "started": started, "mode": "external_smtp", "external_access": False}
+        except (KeyError, ValueError, PermissionError) as error:
+            return _error(400, "external_execution_failed", str(error))
+
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/pause")
     async def pause_campaign(campaign_id: str):
         try:
@@ -4652,6 +4736,25 @@ def create_app(
             )
         except (KeyError, ValueError, PermissionError) as error:
             return _error(400, "provider_grant_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/campaign-grants")
+    async def issue_campaign_grant(provider_ref: str, payload: CampaignGrantInput):
+        try:
+            campaign = runtime.store.get_campaign(payload.campaign_id)
+            if campaign["provider_account_ref"] != provider_ref:
+                return _error(400, "provider_campaign_mismatch", "campaign is not bound to this provider")
+            preview = runtime.campaign_operations.external_authorization_preview(payload.campaign_id)
+            if preview["prepared_set_hash"] != payload.prepared_set_hash:
+                return _error(400, "campaign_identity_mismatch", "prepared campaign identity does not match")
+            return runtime.provider_operations.issue_campaign_grant(
+                provider_ref,
+                purpose=payload.purpose,
+                expires_at=payload.expires_at,
+                max_submissions=payload.max_submissions,
+                prepared_set_hash=payload.prepared_set_hash,
+            )
+        except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
+            return _error(400, getattr(error, "code", "campaign_grant_failed"), str(error))
 
     @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/test-proof")
     async def prepare_provider_test_proof(provider_ref: str, payload: ProviderProofInput):

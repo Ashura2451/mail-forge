@@ -3171,6 +3171,23 @@ class CampaignStore:
             row = connection.execute(query, parameters).fetchone()
         return dict(row) if row is not None else None
 
+    def consume_provider_operation_grant(
+        self, authorization_ref: str, *, account_ref: str
+    ) -> None:
+        """Consume one externally authorized campaign submission atomically."""
+
+        _assert_safe_reference(authorization_ref, "provider_grant.authorization_ref")
+        _assert_safe_reference(account_ref, "provider_grant.account_ref")
+        with self.transaction(immediate=True) as connection:
+            updated = connection.execute(
+                "UPDATE provider_operation_grants SET consumed_submissions = consumed_submissions + 1 "
+                "WHERE authorization_ref = ? AND account_ref = ? AND expires_at > ? "
+                "AND consumed_submissions < max_submissions",
+                (authorization_ref, account_ref, utc_now()),
+            )
+            if updated.rowcount != 1:
+                raise PermissionError("campaign authorization has no remaining submission")
+
     def reserve_provider_test_submission(
         self,
         *,
@@ -4716,7 +4733,7 @@ class CampaignStore:
     def set_campaign_execution_mode(self, campaign_id: str, mode: str) -> None:
         """Persist the explicitly selected local execution transport."""
 
-        if mode not in {"synthetic", "loopback_smtp"}:
+        if mode not in {"synthetic", "loopback_smtp", "external_smtp"}:
             raise ValueError("unsupported campaign execution mode")
         with self.transaction(immediate=True) as connection:
             row = connection.execute(

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -57,12 +59,23 @@ def _safe_config(campaign: Any) -> dict[str, Any]:
             "subject",
             "text",
             "execution_mode",
+            "external_authorization_ref",
+            "external_authorization_purpose",
+            "external_authorization_expires_at",
+            "external_recipient_set_hash",
+            "external_prepared_set_hash",
             "unsubscribe_endpoint_ref",
             "one_click_unsubscribe",
             "dkim_signed",
         )
         if key in configuration
     }
+
+
+def _digest_values(values: list[str]) -> str:
+    return hashlib.sha256(
+        json.dumps(sorted(values), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _safe_provider(account: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -764,6 +777,112 @@ class CampaignOperationsService:
                 )
         self.store.set_campaign_execution_mode(campaign_id, mode)
         return {"campaign_id": campaign_id, "execution_mode": mode}
+
+    def external_authorization_preview(
+        self, campaign_id: str, *, max_recipients: int = 3
+    ) -> dict[str, Any]:
+        campaign = self.store.get_campaign(campaign_id)
+        provider_ref = campaign["provider_account_ref"]
+        if not provider_ref:
+            raise CampaignOperationsError(
+                "external campaign authorization requires a provider account",
+                "provider_account_required",
+            )
+        account = self.provider_operations.account(provider_ref)
+        if account.get("sandbox") or account.get("host", "").lower() in {"localhost", "127.0.0.1", "::1"}:
+            raise CampaignOperationsError(
+                "external campaign authorization cannot use a local capture fixture",
+                "external_provider_required",
+            )
+        intents = self.store.list_intents(campaign_id)
+        if not intents or any(item["state"] not in {"prepared", "eligible_pending"} for item in intents):
+            raise CampaignOperationsError(
+                "prepare a campaign with immutable recipient and message snapshots first",
+                "campaign_not_prepared",
+            )
+        if len(intents) > max_recipients:
+            raise CampaignOperationsError(
+                f"external qualification is limited to {max_recipients} recipients",
+                "recipient_limit_exceeded",
+            )
+        recipients = [item["normalized_email"] for item in intents]
+        prepared_values = []
+        for intent in intents:
+            prepared = self.store.get_prepared_message(intent["id"])
+            if prepared is None:
+                raise CampaignOperationsError("prepared MIME artifact is missing", "prepared_artifact_missing")
+            prepared_values.append(
+                f"{intent['id']}:{prepared['content_hash']}:{prepared['proof_id'] or ''}"
+            )
+        return {
+            "campaign_id": campaign_id,
+            "provider": {
+                "ref": provider_ref,
+                "host": account["host"],
+                "port": account["port"],
+                "tls_mode": account["tls_mode"],
+                "credential_ref": account["credential_ref"],
+                "profile_fingerprint": self.provider_operations.profile_fingerprint(provider_ref),
+            },
+            "sender": json.loads(campaign["configuration_json"] or "{}").get(
+                "sender_email", account.get("sender_email")
+            ),
+            "recipients": recipients,
+            "recipient_set_hash": _digest_values(recipients),
+            "prepared_set_hash": _digest_values(prepared_values),
+            "max_submissions": len(recipients),
+            "message_limit_bytes": min(int(account.get("max_message_bytes") or 1_048_576), 1_048_576),
+            "external_access": False,
+            "stop_conditions": [
+                "authorization expiry",
+                "provider configuration drift",
+                "recipient eligibility or suppression change",
+                "ambiguous SMTP outcome",
+                "submission budget exhausted",
+            ],
+        }
+
+    def bind_external_authorization(
+        self,
+        campaign_id: str,
+        *,
+        authorization_ref: str,
+        purpose: str,
+        expires_at: str,
+        recipient_set_hash: str,
+        prepared_set_hash: str,
+    ) -> dict[str, Any]:
+        preview = self.external_authorization_preview(campaign_id)
+        if preview["recipient_set_hash"] != recipient_set_hash or preview["prepared_set_hash"] != prepared_set_hash:
+            raise CampaignOperationsError(
+                "authorization does not match the prepared campaign identity",
+                "campaign_identity_mismatch",
+            )
+        self.provider_operations.validate_campaign_grant(
+            preview["provider"]["ref"],
+            authorization_ref=authorization_ref,
+            purpose=purpose,
+            expires_at=expires_at,
+            prepared_set_hash=prepared_set_hash,
+        )
+        configuration = json.loads(self.store.get_campaign(campaign_id)["configuration_json"] or "{}")
+        configuration.update(
+            {
+                "execution_mode": "external_smtp",
+                "external_authorization_ref": authorization_ref,
+                "external_authorization_purpose": purpose,
+                "external_authorization_expires_at": expires_at,
+                "external_recipient_set_hash": recipient_set_hash,
+                "external_prepared_set_hash": prepared_set_hash,
+            }
+        )
+        self.store.set_campaign_execution_mode(campaign_id, "external_smtp")
+        with self.store.transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE campaigns SET configuration_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(configuration, sort_keys=True), datetime.now(UTC).isoformat(), campaign_id),
+            )
+        return {"campaign_id": campaign_id, "authorized": True, "external_access": False}
 
     def control(self, campaign_id: str, action: str) -> dict[str, Any]:
         if action == "pause":

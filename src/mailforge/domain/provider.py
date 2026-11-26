@@ -68,6 +68,7 @@ class ProviderOperation(enum.StrEnum):
     OUTBOUND_READINESS = "outbound_readiness"
     INBOUND_READINESS = "inbound_readiness"
     CONTROLLED_TEST_SEND = "controlled_test_send"
+    CAMPAIGN_EXECUTION = "campaign_execution"
     INBOUND_SYNC = "inbound_sync"
     INBOUND_MUTATION = "inbound_mutation"
 
