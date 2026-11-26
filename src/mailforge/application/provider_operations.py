@@ -45,11 +45,6 @@ from mailforge.infrastructure.smtp import (
     deliver,
 )
 
-GOOGLE_MAIL_SCOPE = "https://mail.google.com/"
-MICROSOFT_SMTP_SCOPE = "https://outlook.office.com/SMTP.Send"
-MICROSOFT_IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All"
-
-
 def _loopback(host: str) -> bool:
     if host.lower() == "localhost":
         return True
@@ -116,49 +111,42 @@ def provider_capabilities() -> tuple[ProviderCapability, ...]:
             docs=("https://docs.python.org/3/library/smtplib.html",),
         ),
         ProviderCapability(
-            "generic_imap",
-            "Custom IMAP",
-            (ProviderKind.IMAP,),
-            (AuthenticationMethod.PASSWORD, AuthenticationMethod.OAUTH2),
-            (TLSMode.IMPLICIT,),
-            (),
-            (("port", 993), ("mailbox", "INBOX")),
-            docs=("https://docs.python.org/3/library/imaplib.html",),
+            "mailtrap_email_sandbox",
+            "Mailtrap Email Sandbox",
+            (ProviderKind.SMTP,),
+            (AuthenticationMethod.PASSWORD,),
+            (TLSMode.STARTTLS,),
+            (("host", "sandbox.smtp.mailtrap.io"), ("port", 2525)),
+            restrictions=(
+                "Sandbox capture only; requires Business Owner authorization before any external submission.",
+                "Use synthetic sender/recipient identities and the bounded external attempt budget.",
+            ),
+            docs=(
+                "https://docs.mailtrap.io/email-sandbox/setup/sandbox-smtp-integration",
+                "https://docs.mailtrap.io/email-sandbox/setup",
+            ),
         ),
         ProviderCapability(
             "google_workspace",
-            "Google Gmail / Workspace",
-            (ProviderKind.SMTP, ProviderKind.IMAP),
+            "Google Workspace SMTP",
+            (ProviderKind.SMTP,),
             (AuthenticationMethod.OAUTH2,),
             (TLSMode.IMPLICIT, TLSMode.STARTTLS),
             (("host", "smtp.gmail.com"), ("port", 587)),
-            (("host", "imap.gmail.com"), ("port", 993), ("mailbox", "INBOX")),
-            scopes=(GOOGLE_MAIL_SCOPE,),
-            restrictions=(
-                "OAuth consent and Google app verification are provider-side requirements.",
-            ),
-            docs=(
-                "https://developers.google.com/workspace/gmail/imap/imap-smtp",
-                "https://developers.google.com/workspace/gmail/imap/xoauth2-protocol",
-            ),
+            scopes=(),
+            restrictions=("SMTP submission only; mailbox access is not part of Mailforge scope.",),
+            docs=("https://support.google.com/a/answer/176600",),
         ),
         ProviderCapability(
             "microsoft_365",
-            "Microsoft 365 / Outlook",
-            (ProviderKind.SMTP, ProviderKind.IMAP),
+            "Microsoft 365 SMTP",
+            (ProviderKind.SMTP,),
             (AuthenticationMethod.OAUTH2,),
             (TLSMode.IMPLICIT, TLSMode.STARTTLS),
             (("host", "smtp.office365.com"), ("port", 587)),
-            (("host", "outlook.office365.com"), ("port", 993), ("mailbox", "INBOX")),
-            scopes=(MICROSOFT_SMTP_SCOPE, MICROSOFT_IMAP_SCOPE, "offline_access"),
-            restrictions=(
-                "SMTP AUTH must be enabled for the tenant/mailbox; "
-                "basic auth is not a modern default.",
-            ),
-            docs=(
-                "https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth",
-                "https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/authenticated-client-smtp-submission",
-            ),
+            scopes=("https://outlook.office.com/SMTP.Send", "offline_access"),
+            restrictions=("SMTP AUTH must be enabled; mailbox access is not part of Mailforge scope.",),
+            docs=("https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/authenticated-client-smtp-submission",),
         ),
     )
 

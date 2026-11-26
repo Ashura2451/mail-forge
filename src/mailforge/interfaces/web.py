@@ -670,6 +670,24 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class RetiredMailboxScopeMiddleware(BaseHTTPMiddleware):
+    """Keep historical mailbox routes explicit while the product is outbound-only."""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path.lower()
+        if "/mailboxes" in path or "/inbound/mailbox" in path:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "mailbox_scope_retired",
+                        "message": "Mailforge is outbound-only; mailbox synchronization and IMAP/POP3 operations are retired",
+                    }
+                },
+                status_code=410,
+            )
+        return await call_next(request)
+
+
 class WorkerSupervisor:
     """Bounded in-process worker supervisor; all state remains durable in SQLite."""
 
@@ -1303,6 +1321,7 @@ def create_app(
     app.state.runtime = runtime
     app.state.session = session
     app.add_middleware(LocalSecurityMiddleware, session=session)
+    app.add_middleware(RetiredMailboxScopeMiddleware)
 
     @app.get("/healthz")
     async def healthz():
@@ -4361,6 +4380,12 @@ def create_app(
     @app.post(f"{API_PREFIX}/providers")
     async def register_provider(payload: ProviderInput):
         try:
+            if payload.kind is not ProviderKind.SMTP:
+                return _error(
+                    410,
+                    "provider_scope_retired",
+                    "Mailforge is outbound-only; IMAP and POP3 provider accounts are retired",
+                )
             values = payload.model_dump()
             sandbox_key = values.pop("sandbox_key")
             account_options = {
@@ -4441,6 +4466,11 @@ def create_app(
 
     @app.post(f"{API_PREFIX}/providers/{{provider_ref}}/inbound")
     async def configure_provider_inbound(provider_ref: str, payload: ProviderInboundInput):
+        return _error(
+            410,
+            "provider_scope_retired",
+            "Mailforge is outbound-only; inbound mailbox configuration is retired",
+        )
         try:
             return runtime.provider_operations.configure_inbound(
                 provider_ref,

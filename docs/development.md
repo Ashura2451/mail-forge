@@ -178,9 +178,10 @@ SMTP, or claims inbox delivery. One-click unsubscribe headers are gated by
 HTTPS and an explicit DKIM assertion, while the required endpoint and signing
 infrastructure remain outside this repository.
 
-### Synthetic inbound operations
+### Synthetic delivery-event evidence
 
-Inbound processing is local-first and uses no network adapter:
+Delivery-event parsing is local-first and uses no network adapter. Mailbox
+synchronization and IMAP/POP3 acquisition are retired product capabilities:
 
 ```bash
 mailforge inbound synthetic-demo --database /tmp/mailforge-inbound.sqlite3
@@ -189,10 +190,9 @@ mailforge inbound review --database /tmp/mailforge-inbound.sqlite3
 mailforge inbound stats --database /tmp/mailforge-inbound.sqlite3
 ```
 
-Local `.eml` and MBOX imports are read-only. `--retain-raw` is required when
+Local `.eml` and MBOX imports are read-only delivery-event evidence. `--retain-raw` is required when
 an EML import must remain replayable; otherwise the parser processes the bytes
-and releases them after durable metadata/evidence is stored. Real IMAP is
-represented only by the simulated endpoint and the disabled adapter. Inbound
+and releases them after durable metadata/evidence is stored. Delivery-event
 classification is evidence, not authentication: untrusted or ambiguous
 complaints/unsubscribe/DSN actions enter review, and no automatic reply is
 sent.

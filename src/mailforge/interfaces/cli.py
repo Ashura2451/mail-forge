@@ -1938,6 +1938,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             elif args.inbound_command == "mailbox":
+                raise SystemExit(
+                    "mailbox synchronization and IMAP/POP3 operations are retired; "
+                    "Mailforge is outbound-only"
+                )
                 from mailforge.infrastructure.credentials import EnvironmentCredentialResolver
 
                 if args.mailbox_command == "list":

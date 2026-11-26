@@ -81,7 +81,7 @@ def test_console_routes_have_no_axe_critical_or_serious_findings(tmp_path: Path)
                 "Message Studio",
                 "Campaigns",
                 "Automations",
-                "Inbound",
+                    "Delivery Events",
                 "Providers",
                 "Reports & Insights",
                 "Activity",

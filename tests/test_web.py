@@ -51,6 +51,32 @@ def test_local_session_requires_csrf_and_rejects_non_loopback_host(
     assert client.get("/api/v1/status", headers={"host": "evil.example"}).status_code == 400
 
 
+def test_outbound_only_scope_retire_mailbox_interfaces_and_capabilities(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
+    capabilities = client.get("/api/v1/providers/capabilities")
+    assert capabilities.status_code == 200
+    assert all(protocols == ["smtp"] for item in capabilities.json()["items"] for protocols in [item["protocols"]])
+    assert any(item["key"] == "mailtrap_email_sandbox" for item in capabilities.json()["items"])
+    retired = client.get("/api/v1/providers/legacy/mailboxes")
+    assert retired.status_code == 410
+    rejected = client.post(
+        "/api/v1/providers",
+        headers=headers,
+        json={
+            "ref": "retired-imap",
+            "kind": "imap",
+            "host": "imap.example.invalid",
+            "port": 993,
+            "username": "synthetic",
+            "credential_ref": "env:RETIRED",
+            "tls_mode": "implicit_tls",
+        },
+    )
+    assert rejected.status_code == 410
+
+
 def test_runtime_setup_health_and_application_backup_routes(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:

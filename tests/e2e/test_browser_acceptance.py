@@ -138,13 +138,13 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.wait_for_timeout(500)
             assert page.get_by_text("Browser synthetic campaign").is_visible()
 
-            for label in ("Inbound", "Providers", "Activity"):
+            for label in ("Delivery Events", "Providers", "Activity"):
                 page.get_by_role("button", name=label).click()
                 assert page.get_by_role("heading", name=label).is_visible()
 
             page.get_by_role("button", name="Providers").click()
             page.get_by_text(
-                "No provider accounts yet. Choose a profile and add a local SMTP or IMAP account."
+                "No provider accounts yet. Choose a profile and add a local SMTP account."
             ).wait_for()
             assert not page.get_by_role("heading", name="Controlled test message").is_visible()
             page.get_by_label("Provider profile").select_option("generic_smtp")
@@ -833,7 +833,7 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
                 reopened.wait_for_timeout(25)
             assert reopened.get_by_text("completed", exact=True).is_visible()
 
-            reopened.get_by_role("button", name="Inbound").click()
+            reopened.get_by_role("button", name="Delivery Events").click()
             reopened.locator("input[type=file]").set_input_files(
                 {
                     "name": "unsubscribe.eml",
@@ -846,10 +846,10 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
                     ).encode(),
                 }
             )
-            reopened.get_by_role("button", name="Import evidence for review").click()
-            reopened.get_by_text("Inbound evidence acquired").wait_for()
+            reopened.get_by_role("button", name="Import delivery-event evidence").click()
+            reopened.get_by_text("Delivery-event evidence imported").wait_for()
             reopened.get_by_text("create_unsubscribe").wait_for()
-            reopened.get_by_label("Search inbound messages").fill("unsubscribe")
+            reopened.get_by_label("Search delivery events").fill("unsubscribe")
             reopened.get_by_role("button", name="Search").click()
             message_row = reopened.locator('tr[tabindex="0"]').first
             message_row.click()
@@ -862,14 +862,14 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
             reopened.get_by_text("Reply-all draft prepared in Message Studio").wait_for()
             reopened.get_by_role("button", name="Approve").click()
             reopened.get_by_text("Review approved").wait_for()
-            assert reopened.get_by_text("No inbound actions need review.").is_visible()
+            assert reopened.get_by_text("No delivery-event actions need review.").is_visible()
 
             fresh_context = browser.new_context(viewport={"width": 390, "height": 844})
             fresh_page = fresh_context.new_page()
             fresh_page.goto(base, wait_until="networkidle")
             fresh_page.get_by_role("button", name="Open navigation").click()
-            fresh_page.get_by_role("button", name="Inbound").click()
-            assert fresh_page.get_by_text("No inbound actions need review.").is_visible()
+            fresh_page.get_by_role("button", name="Delivery Events").click()
+            assert fresh_page.get_by_text("No delivery-event actions need review.").is_visible()
             fresh_context.close()
             context.close()
             browser.close()

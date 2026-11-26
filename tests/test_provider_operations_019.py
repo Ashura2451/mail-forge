@@ -132,9 +132,8 @@ def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_pa
     assert account["display_name"] == "Local fixture"
     assert account["inbound_enabled"] is True
     assert any(item["key"] == "google_workspace" for item in service.capabilities())
-    imap = next(item for item in service.capabilities() if item["key"] == "generic_imap")
-    assert imap["outbound_defaults"] == {}
-    assert imap["inbound_defaults"]["port"] == 993
+    assert not any(item["key"] == "generic_imap" for item in service.capabilities())
+    assert all(item["protocols"] == ["smtp"] for item in service.capabilities())
     assert (
         service.configure_inbound("local", mailbox="Qualification", max_fetch=4)["mailbox"]
         == "Qualification"

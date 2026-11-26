@@ -1,5 +1,11 @@
 # 0020. Mailbox operations, synchronization and conversations
 
+> **MAILFORGE-039 scope disposition:** mailbox synchronization, IMAP/POP3
+> acquisition, conversation management, and mailbox mutations are retired from
+> the active outbound-only product. This specification remains historical for
+> schema/data compatibility and must not be treated as an active acceptance
+> target.
+
 **Date**: 2026-10-29
 **Status**: Implemented locally; fixture qualification only
 

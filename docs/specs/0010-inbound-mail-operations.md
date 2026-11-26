@@ -1,5 +1,11 @@
 # Inbound Mail Operations and Processing
 
+> **MAILFORGE-039 scope disposition:** this mailbox/incoming-mail product
+> scope is superseded by the Business Owner's outbound-only direction. Keep
+> the document as historical compatibility context; active implementation may
+> retain only delivery-event parsing, suppression, unsubscribe, and reporting
+> behavior that supports outbound operations.
+
 **Status:** Accepted for local implementation
 **Task:** `MAILFORGE-INBOUND-OPERATIONS-020`
 **Date:** 2026-10-28
