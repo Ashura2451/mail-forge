@@ -92,7 +92,7 @@ SOURCE_COMMIT=$(git rev-parse HEAD)
 ARTIFACT=$(basename "$OUTPUT")
 CHECKSUM=$(shasum -a 256 "$OUTPUT/Contents/MacOS/Mailforge" | awk '{print $1}')
 printf '%s\n' "Mailforge macOS arm64 bundle" "version=$VERSION" "source_commit=$SOURCE_COMMIT" "artifact=$ARTIFACT" "launcher_sha256=$CHECKSUM" > "$OUTPUT/Contents/Resources/BUILD-METADATA.txt"
-(cd "$OUTPUT/Contents" && find . -type f ! -name BUILD-METADATA.sha256 -print | sort | while IFS= read -r file; do shasum -a 256 "$file"; done) > "$OUTPUT/Contents/Resources/BUILD-METADATA.sha256"
+(cd "$OUTPUT/Contents" && find . -type f ! -name BUILD-METADATA.sha256 -print0 | xargs -0 -n 128 shasum -a 256) > "$OUTPUT/Contents/Resources/BUILD-METADATA.sha256"
 
 rm -rf "$STAGE"
 echo "Built $OUTPUT"
