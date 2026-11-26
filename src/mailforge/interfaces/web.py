@@ -683,13 +683,30 @@ class WorkerSupervisor:
         try:
             completed = False
             while True:
-                report, _transport = self.outbound.execute_worker(
+                report, transport = self.outbound.execute_worker(
                     campaign_id,
                     worker_id=f"web-{threading.get_ident()}",
                     max_items=1,
                 )
                 if report.campaign_status in {"completed", "paused", "canceled", "failed"}:
                     completed = report.campaign_status == "completed"
+                    break
+                if not getattr(transport, "calls", None):
+                    try:
+                        current = CampaignStatus(self.outbound.store.get_campaign(campaign_id)["status"])
+                        if current is CampaignStatus.RUNNING:
+                            self.outbound.store.transition_campaign(
+                                campaign_id,
+                                CampaignStatus.COMPLETING,
+                                "worker_waiting_for_policy_window",
+                            )
+                            self.outbound.store.transition_campaign(
+                                campaign_id,
+                                CampaignStatus.PAUSED,
+                                "retry_after_policy_window",
+                            )
+                    except ValueError:
+                        pass
                     break
                 time.sleep(0.03)
             if completed and self.on_completed is not None:

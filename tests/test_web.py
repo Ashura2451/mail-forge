@@ -334,6 +334,31 @@ def test_interrupted_import_batches_are_fenced_on_restart(
     assert "reversal" in batch["error_message"]
 
 
+def test_campaign_worker_pauses_when_policy_window_makes_no_progress(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    client, headers = _client(tmp_path, request)
+    list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Backpressure"}).json()["id"]
+    source = "".join(f"backpressure-{index:02d}@example.com\n" for index in range(12)).encode()
+    client.post(
+        f"/api/v1/imports?list_id={list_id}",
+        headers=headers,
+        files={"file": ("backpressure.txt", source, "text/plain")},
+    )
+    campaign_id = client.post(
+        "/api/v1/campaigns", headers=headers, json={"name": "Backpressure", "list_id": list_id}
+    ).json()["id"]
+    assert client.post(f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={}).status_code == 200
+    assert client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code == 200
+    assert client.post(f"/api/v1/campaigns/{campaign_id}/simulate", headers=headers).status_code == 200
+    for _ in range(100):
+        progress = client.get(f"/api/v1/campaigns/{campaign_id}/progress").json()
+        if progress["campaign_status"] in {"paused", "completed", "failed"}:
+            break
+        time.sleep(0.02)
+    assert progress["campaign_status"] == "paused"
+
+
 def test_local_api_data_connection_upload_preview_and_snapshot(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:

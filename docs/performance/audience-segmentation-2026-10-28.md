@@ -54,3 +54,25 @@ All correctness checks matched expected counts. This is a single local,
 serial synthetic run: it is not a production capacity/SLO claim, does not
 measure concurrent operators, and does not qualify real-provider or real-
 recipient behavior.
+
+## MAILFORGE-037 campaign operations qualification — 2026-11-25
+
+The campaign workbench was exercised through the local HTTP application with
+50 synthetic contacts. The run measured the real import, preparation,
+schedule persistence, authorization/start, policy backpressure, and durable
+progress/report path. The configured synthetic sender reached its local
+per-domain policy window after 10 accepted outcomes; the worker then paused
+instead of spinning while no progress was possible.
+
+| Operation | Rows/contacts | Elapsed | Result |
+| --- | ---: | ---: | --- |
+| Contact import | 50 | 0.3629 s | completed |
+| Campaign preparation | 50 | 0.7874 s | 50 durable intents |
+| Schedule persistence | one schedule | 0.0061 s | one-time schedule saved |
+| Authorization/start request | one campaign | 0.0027 s | synthetic worker started |
+| Policy-limited execution | 50 | 0.7058 s | paused after 10 accepted |
+
+The final report reconciled all 50 prepared recipients. Remaining pending and
+prepared states were preserved for a later operator retry after the policy
+window. This is a local serial synthetic measurement, not a throughput,
+deliverability, or production SLO claim.
