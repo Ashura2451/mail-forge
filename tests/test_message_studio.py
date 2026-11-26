@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 import time
 from email.parser import BytesParser
@@ -164,6 +165,45 @@ def test_asset_cid_and_campaign_snapshot_use_canonical_mime(tmp_path: Path) -> N
     assert json.loads(snapshot["document_json"])["name"] == "Image note"
 
 
+def test_recipient_attachment_mime_isolation_and_hashes(tmp_path: Path) -> None:
+    store, studio = _studio(tmp_path)
+    list_id = store.create_list("Isolation audience")
+    outbound = OutboundService(store)
+    outbound.campaigns.import_candidates(
+        [
+            ContactCandidate("ada@example.com", "ada@example.com", "synthetic", 1, {}),
+            ContactCandidate("grace@example.com", "grace@example.com", "synthetic", 2, {}),
+        ],
+        list_id,
+    )
+    first = studio.create_asset("ada.pdf", "application/pdf", b"ADA-PRIVATE")
+    second = studio.create_asset("grace.pdf", "application/pdf", b"GRACE-PRIVATE")
+    created = studio.create_document("Isolation", kind="template")
+    published = studio.publish(created["id"], expected_revision_id=created["draft"]["id"])
+    contacts = store.list_contacts(list_id)
+    studio.map_recipient_attachment(published["published"]["id"], contacts[0]["id"], first["id"])
+    studio.map_recipient_attachment(published["published"]["id"], contacts[1]["id"], second["id"])
+    campaign_id = outbound.campaigns.create_campaign(
+        "Isolation campaign", list_id, sender_config_ref="isolation", template_ref="studio",
+        message_revision_id=published["published"]["id"],
+    )
+    report = studio.prepare_campaign(
+        campaign_id,
+        sender=SenderPolicy(ref="isolation", provider="synthetic", email="sender@example.com"),
+        revision_id=published["published"]["id"],
+    )
+    assert report.prepared == 2
+    for intent in store.list_intents(campaign_id):
+        prepared = store.get_prepared_message(intent["id"])
+        message = BytesParser(policy=SMTP).parsebytes(prepared["mime_bytes"])
+        body = b"".join(part.get_payload(decode=True) or b"" for part in message.walk())
+        if intent["normalized_email"] == "ada@example.com":
+            assert b"ADA-PRIVATE" in body and b"GRACE-PRIVATE" not in body
+        else:
+            assert b"GRACE-PRIVATE" in body and b"ADA-PRIVATE" not in body
+        assert prepared["content_hash"] == hashlib.sha256(prepared["mime_bytes"]).hexdigest()
+
+
 def test_message_studio_api_and_isolated_preview(tmp_path: Path) -> None:
     app = create_app(tmp_path / "web.sqlite3", allowed_hosts={"testserver"})
     with TestClient(app) as client:
@@ -224,6 +264,8 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
     )
     assert report.prepared == 2
     contacts = store.list_contacts(list_id)
+    mapped_asset = studio.create_asset("recipient.pdf", "application/pdf", b"recipient-specific")
+    studio.map_recipient_attachment(published["published"]["id"], contacts[0]["id"], mapped_asset["id"])
     app = create_app(database, allowed_hosts={"testserver"})
     with TestClient(app) as client:
         session = client.get("/api/v1/session")
@@ -236,6 +278,7 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
         assert batch.status_code == 200
         assert len(batch.json()["items"]) == 2
         assert batch.json()["items"][0]["compatibility"]["corpus_version"]
+        assert batch.json()["items"][0]["attachments"][0]["filename"] == "recipient.pdf"
         assert batch.json()["items"][1]["warnings"]
         intent = store.list_intents(campaign_id)[0]
         exported = client.get(
@@ -244,6 +287,10 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
         assert exported.status_code == 200
         assert exported.headers["content-type"].startswith("message/rfc822")
         assert b"Subject:" in exported.content
+        with store.transaction(immediate=True) as connection:
+            connection.execute("UPDATE prepared_messages SET mime_bytes=? WHERE intent_id=?", (b"tampered", intent["id"]))
+        assert client.get(f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}").status_code == 409
+        assert client.get(f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}/export").status_code == 409
     app.state.runtime.close()
 
 
@@ -270,6 +317,18 @@ def test_recipient_attachment_mapping_requires_published_revision_and_rejects_fi
     studio.map_recipient_attachment(published["published"]["id"], contact_id, first["id"])
     with pytest.raises(MessageStudioError, match="different asset"):
         studio.map_recipient_attachment(published["published"]["id"], contact_id, second["id"])
+
+
+def test_compatibility_diagnostics_flag_each_missing_image_alt(tmp_path: Path) -> None:
+    _, studio = _studio(tmp_path)
+    image = studio.create_asset("pixel.png", "image/png", b"\x89PNG\r\n\x1a\nsynthetic")
+    document = studio.blank_document("Diagnostics")
+    document["blocks"] = [
+        {"type": "image", "asset_id": image["id"], "alt": "Logo"},
+        {"type": "image", "asset_id": image["id"], "alt": ""},
+    ]
+    preview = studio.preview(document=document)
+    assert any(item["code"] == "image_alt_missing" for item in preview["compatibility"]["confirmed"])
 
 
 def test_data_studio_recipient_batch_freezes_source_context_and_message(tmp_path: Path) -> None:

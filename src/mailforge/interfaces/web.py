@@ -13,6 +13,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from email.parser import BytesParser
@@ -66,6 +67,7 @@ from mailforge.application.mailbox_operations import (
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.operational_assurance import OperationalAssuranceService
 from mailforge.application.outbound import OutboundService
+from mailforge.application.outbound_proof import make_proof, verify_proof
 from mailforge.application.programmable_operations import ProgrammableOperationsService
 from mailforge.application.provider_operations import ProviderOperationsService
 from mailforge.application.providers import ProviderService
@@ -3712,6 +3714,17 @@ def create_app(
         except KeyError:
             return _error(404, "campaign_not_found", "campaign was not found")
 
+    def _verify_prepared_artifact(prepared: Mapping[str, Any]) -> dict[str, Any]:
+        prepared = dict(prepared)
+        proof_row = runtime.store.get_outbound_proof(prepared["proof_id"]) if prepared.get("proof_id") else None
+        if proof_row is None:
+            raise ValueError("prepared message has no verifiable outbound proof")
+        proof = make_proof(proof_row["id"], proof_row["proof"])
+        verify_proof(proof, bytes(prepared["mime_bytes"]))
+        if prepared["content_hash"] != proof.content_hash:
+            raise ValueError("prepared message content identity does not match its proof")
+        return {"proof_id": proof.proof_id, "proof_hash": proof.proof_hash, "content_hash": proof.content_hash}
+
     @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepared-messages/{{intent_id}}")
     async def prepared_message_inspection(campaign_id: str, intent_id: str):
         try:
@@ -3726,6 +3739,7 @@ def create_app(
             if prepared is None:
                 return _error(404, "prepared_message_not_found", "prepared message was not found")
             message = BytesParser(policy=email_default_policy).parsebytes(prepared["mime_bytes"])
+            proof_metadata = _verify_prepared_artifact(prepared)
             parts = []
             for part in message.walk():
                 if part.is_multipart():
@@ -3738,9 +3752,9 @@ def create_app(
                         "filename": part.get_filename(),
                         "content_id": part.get("Content-ID"),
                         "size_bytes": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
                     }
                 )
-            proof = runtime.store.get_outbound_proof(prepared["proof_id"]) if prepared["proof_id"] else None
             return {
                 "intent_id": intent_id,
                 "recipient": intent["normalized_email"],
@@ -3756,14 +3770,10 @@ def create_app(
                     if message.get(key) is not None
                 },
                 "parts": parts,
-                "proof": {
-                    "proof_id": proof["id"],
-                    "proof_hash": proof["proof_hash"],
-                    "content_hash": proof["content_hash"],
-                }
-                if proof
-                else None,
+                "proof": proof_metadata,
             }
+        except ValueError as error:
+            return _error(409, "prepared_message_integrity", str(error))
         except KeyError:
             return _error(404, "prepared_message_not_found", "prepared message was not found")
 
@@ -3780,6 +3790,7 @@ def create_app(
             prepared = runtime.store.get_prepared_message(intent_id)
             if prepared is None:
                 return _error(404, "prepared_message_not_found", "prepared message was not found")
+            _verify_prepared_artifact(prepared)
             return Response(
                 content=prepared["mime_bytes"],
                 media_type="message/rfc822",
@@ -3788,6 +3799,8 @@ def create_app(
                     "cache-control": "no-store",
                 },
             )
+        except ValueError as error:
+            return _error(409, "prepared_message_integrity", str(error))
         except KeyError:
             return _error(404, "prepared_message_not_found", "prepared message was not found")
 

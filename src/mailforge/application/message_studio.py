@@ -1253,9 +1253,12 @@ class MessageStudioService:
                 "severity": "ERROR", "category": "content", "code": "plain_text_missing",
                 "message": "The message has no plain-text alternative.", "confidence": "confirmed",
             })
-        if re.search(r"<img\b", source_html, re.I) and re.search(
-            r"<img(?=[^>]*\bsrc=)[^>]*\balt=", source_html, re.I
-        ) is None:
+        image_tags = re.findall(r"<img\b[^>]*>", source_html, re.I)
+        if any(
+            (match := re.search(r"\balt\s*=\s*([\"'])(.*?)\1", tag, re.I)) is None
+            or not match.group(2).strip()
+            for tag in image_tags
+        ):
             confirmed.append({
                 "severity": "ERROR", "category": "accessibility", "code": "image_alt_missing",
                 "message": "At least one image is missing alternative text.", "confidence": "confirmed",
@@ -1419,6 +1422,25 @@ class MessageStudioService:
             preview=True,
             immutable_revision=immutable_revision,
         )
+        if revision_id and contact_id:
+            with self.store.connect() as connection:
+                mapped = connection.execute(
+                    "SELECT a.filename,a.media_type,a.size_bytes FROM message_recipient_attachments m "
+                    "JOIN message_assets a ON a.id=m.asset_id "
+                    "WHERE m.revision_id=? AND m.contact_id=? ORDER BY a.filename",
+                    (revision_id, contact_id),
+                ).fetchall()
+            result["attachments"] = [*result.get("attachments", []), *[
+                {
+                    "filename": row["filename"],
+                    "content_type": row["media_type"],
+                    "content_id": None,
+                    "bytes": row["size_bytes"],
+                    "recipient_specific": True,
+                }
+                for row in mapped
+            ]]
+            result["approximate_bytes"] += sum(row["size_bytes"] for row in mapped)
         result["html"] = self._preview_snapshot(result["html"])
         result.pop("_rendered", None)
         result.pop("_attachments", None)
