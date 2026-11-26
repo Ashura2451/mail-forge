@@ -6,10 +6,12 @@
 ## Current qualification checkpoint
 
 The milestone-038 implementation is present on canonical `main` at
-`e5c48ebd3bdb55533a18170be8cb1ff35723e2ee`. Local tests and the packaged
+`5760d0f6e5c0540a4ca9e223d48835964975a12f`. Local tests and the rendered
 browser journey cover structured/custom HTML authoring, revision reuse,
-recipient-scoped attachment mappings, and proof-bound prepared-MIME inspection.
-External-client rendering compatibility, broad visual undo/redo, and
+undo/redo and draft recovery, field/fallback personalization, bounded
+multi-recipient inspection, recipient-scoped attachment mappings, versioned
+compatibility diagnostics, and proof-bound prepared-MIME inspection/export.
+External-client rendering compatibility, broad visual WYSIWYG parity, and
 independent packaged review remain unqualified; no live provider or recipient
 delivery is claimed.
 
