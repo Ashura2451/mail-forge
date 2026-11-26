@@ -604,6 +604,7 @@ class CampaignService:
         dispatch_guard: Callable[[object], tuple[bool, str, str | None]] | None = None,
         start_existing: bool = False,
         worker_id: str = "simulation-worker",
+        allow_pause_clear: bool = True,
     ) -> CampaignReport:
         campaign = self.store.get_campaign(campaign_id)
         if getattr(transport, "requires_policy_guard", False):
@@ -628,8 +629,11 @@ class CampaignService:
             CampaignStatus.SCHEDULED,
         } and not (start_existing and status is CampaignStatus.RUNNING):
             raise ValueError(f"campaign cannot execute from {status.value}")
+        if self.store.campaign_flags(campaign_id)[0] and not allow_pause_clear:
+            return self.report(campaign_id)
         recovered = self.store.recover_inflight(campaign_id)
-        self.store.clear_pause_request(campaign_id)
+        if allow_pause_clear:
+            self.store.clear_pause_request(campaign_id)
         if status is not CampaignStatus.RUNNING:
             self.store.transition_campaign(
                 campaign_id,

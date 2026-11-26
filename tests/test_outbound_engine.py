@@ -218,6 +218,16 @@ def test_schedule_engine_rejects_dst_gap_requires_fold_and_uses_utc():
     )
     assert engine.due(schedule, datetime(2026, 10, 27, 15, 0, tzinfo=UTC))
     assert not engine.due(schedule, datetime(2026, 10, 27, 22, 0, tzinfo=UTC))
+    overnight = ScheduleSpec(
+        mode=ScheduleMode.WINDOW,
+        timezone="UTC",
+        window_start="22:00",
+        window_end="02:00",
+        weekdays=(0,),
+    )
+    assert engine.due(overnight, datetime(2026, 10, 26, 23, 0, tzinfo=UTC))
+    assert engine.due(overnight, datetime(2026, 10, 27, 1, 0, tzinfo=UTC))
+    assert not engine.due(overnight, datetime(2026, 10, 27, 23, 0, tzinfo=UTC))
 
 
 def test_recurring_schedule_advances_daily_and_weekly_occurrences():

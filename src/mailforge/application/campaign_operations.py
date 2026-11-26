@@ -101,6 +101,64 @@ def _safe_provider(account: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _execution_state(
+    campaign: Any,
+    report: Any,
+    last_transition: Any,
+    next_automatic_at: str | None,
+) -> dict[str, Any]:
+    """Project canonical campaign facts into operator-facing lifecycle language."""
+
+    status = CampaignStatus(campaign["status"])
+    counts = report.counts
+    pause_requested = bool(campaign["pause_requested"])
+    transition_reason = last_transition["reason"] if last_transition else None
+    if status is CampaignStatus.COMPLETED:
+        if counts.get("permanent_failure", 0) or counts.get("deferred", 0):
+            key, label = "completed_with_failures", "Completed with failures"
+        else:
+            key, label = "completed_successfully", "Completed successfully"
+    elif status is CampaignStatus.PAUSED and pause_requested:
+        key, label = "manually_paused", "Manually paused"
+    elif status is CampaignStatus.PAUSED and (
+        counts.get("ambiguous", 0) or counts.get("deferred", 0)
+    ):
+        key, label = "requires_reconciliation", "Requires reconciliation"
+    elif (
+        status is CampaignStatus.PAUSED
+        and next_automatic_at is not None
+        and transition_reason in {
+            "retry_after_temporary_restriction",
+            "worker_waiting_for_temporary_restriction",
+            "unresolved_delivery_state",
+        }
+    ):
+        key, label = "waiting", "Waiting for an execution restriction"
+    else:
+        key = status.value
+        label = {
+            "draft": "Draft",
+            "validating": "Preparing",
+            "ready": "Ready",
+            "scheduled": "Scheduled",
+            "running": "Running",
+            "pausing": "Pausing",
+            "paused": "Paused",
+            "completing": "Completing",
+            "failed": "Failed",
+            "canceled": "Canceled",
+        }.get(status.value, status.value.replace("_", " ").title())
+    return {
+        "key": key,
+        "label": label,
+        "canonical_status": status.value,
+        "operator_pause_requested": pause_requested,
+        "automatic_continuation": key == "waiting",
+        "next_automatic_at": next_automatic_at if key == "waiting" else None,
+        "last_transition_reason": transition_reason,
+    }
+
+
 class CampaignOperationsService:
     """The single composition boundary for campaign creation and supervision."""
 
@@ -911,6 +969,7 @@ class CampaignOperationsService:
                     "authorize the campaign before resuming", "simulation_not_authorized"
                 )
             self.store.clear_pause_request(campaign_id)
+            configuration = json.loads(campaign["configuration_json"] or "{}")
             started = (
                 False
                 if campaign["status"] in {"completed", "canceled"}
@@ -920,7 +979,7 @@ class CampaignOperationsService:
                 "campaign_id": campaign_id,
                 "action": action,
                 "started": started,
-                "mode": "synthetic",
+                "mode": configuration.get("execution_mode", "synthetic"),
             }
         raise CampaignOperationsError("unsupported campaign action", "action_invalid")
 
@@ -974,6 +1033,12 @@ class CampaignOperationsService:
                     dict(self.store.campaign_last_transition(campaign_id))
                     if self.store.campaign_last_transition(campaign_id)
                     else None
+                ),
+                "state": _execution_state(
+                    campaign,
+                    self.campaigns.report(campaign_id),
+                    self.store.campaign_last_transition(campaign_id),
+                    self.store.campaign_next_automatic_at(campaign_id),
                 ),
             },
             "preview": self.recipients(campaign_id, limit=preview_limit),

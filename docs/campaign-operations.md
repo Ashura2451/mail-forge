@@ -18,11 +18,16 @@ eligibility, content, transport, accounts, durable records, and reporting.
 - Schedules use IANA time zones and reject nonexistent local times. Ambiguous
   local times require an explicit `fold`.
 - Pause, resume, cancel, preparation, and authorization are idempotent at the
-  operator-surface boundary. Ambiguous delivery outcomes remain unresolved and
-  are not replayed automatically.
+  operator-surface boundary. Temporary pre-submission restrictions persist as
+  automatic continuation boundaries for authorized campaigns, while an
+  operator pause remains a durable opt-out from that continuation. Ambiguous
+  and externally submitted deferred outcomes remain unresolved and are not
+  replayed automatically.
 - CSV/JSON exports are bounded, formula-safe, and exclude raw message bodies.
-- The worker is synthetic only. SMTP acceptance, inbox delivery, provider
-  qualification, and live recipient sending are not claimed.
+- The local worker supports synthetic and trusted loopback execution. A
+  separate server-issued external campaign grant may select the same canonical
+  worker, but this document does not claim external provider qualification,
+  inbox delivery, or unrestricted live recipient sending.
 
 ## Surfaces
 

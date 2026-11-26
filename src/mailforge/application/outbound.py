@@ -636,6 +636,7 @@ class OutboundService:
         worker_id: str = "smtp-worker",
         allow_capture_only: bool = False,
         submission_guard: Callable[[str, str], None] | None = None,
+        allow_pause_clear: bool = True,
     ) -> tuple[CampaignReport, PreparedSMTPTransport]:
         """Execute prepared MIME through SMTP with the normal policy guard.
 
@@ -690,6 +691,7 @@ class OutboundService:
             stop_after=stop_after,
             dispatch_guard=smtp_guard,
             worker_id=worker_id,
+            allow_pause_clear=allow_pause_clear,
         )
         return report, transport
 
@@ -705,6 +707,7 @@ class OutboundService:
         worker_id: str = "smtp-worker",
         allow_capture_only: bool = False,
         submission_guard: Callable[[str, str], None] | None = None,
+        allow_pause_clear: bool = True,
     ) -> tuple[CampaignReport, PreparedSMTPTransport]:
         """Execute through a durable provider profile and the canonical SMTP path."""
 
@@ -738,6 +741,7 @@ class OutboundService:
                 worker_id=worker_id,
                 allow_capture_only=allow_capture_only,
                 submission_guard=submission_guard,
+                allow_pause_clear=allow_pause_clear,
             )
         finally:
             pool.close()

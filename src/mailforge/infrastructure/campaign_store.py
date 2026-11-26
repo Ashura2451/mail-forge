@@ -4755,23 +4755,47 @@ class CampaignStore:
                 {"mode": mode},
             )
 
-    def campaign_next_automatic_at(self, campaign_id: str) -> str | None:
-        """Return the earliest persisted retry boundary for automatic continuation."""
+    def campaign_next_automatic_at(
+        self, campaign_id: str, *, now: datetime | None = None
+    ) -> str | None:
+        """Return the earliest pre-submission boundary for automatic continuation.
+
+        Deferred and ambiguous outcomes are intentionally excluded.  They are
+        the result of a submission attempt, not a temporary wait, and must not
+        cause the supervisor to replay an external operation automatically.
+        """
 
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT not_before_utc FROM delivery_intents WHERE campaign_id = ? "
-                "AND state IN (?, ?, ?) ORDER BY not_before_utc",
+                "AND state IN (?, ?) ORDER BY not_before_utc",
                 (
                     campaign_id,
                     DeliveryState.ELIGIBLE_PENDING.value,
                     DeliveryState.PREPARED.value,
-                    DeliveryState.DEFERRED.value,
                 ),
             ).fetchall()
         if any(row["not_before_utc"] is None for row in rows):
-            return utc_now()
+            return (now or datetime.now(UTC)).astimezone(UTC).replace(microsecond=0).isoformat()
         return next((row["not_before_utc"] for row in rows if row["not_before_utc"]), None)
+
+    def campaign_has_unsafe_inflight(self, campaign_id: str) -> bool:
+        """Return whether automatic continuation must wait for reconciliation."""
+
+        with self.connect() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM delivery_intents WHERE campaign_id = ? AND state IN (?, ?, ?, ?) LIMIT 1",
+                    (
+                        campaign_id,
+                        DeliveryState.AMBIGUOUS.value,
+                        DeliveryState.DEFERRED.value,
+                        DeliveryState.RESERVED.value,
+                        DeliveryState.ATTEMPT_STARTED.value,
+                    ),
+                ).fetchone()
+                is not None
+            )
 
     def campaign_last_transition(self, campaign_id: str) -> sqlite3.Row | None:
         with self.connect() as connection:

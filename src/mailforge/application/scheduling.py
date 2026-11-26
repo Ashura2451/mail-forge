@@ -93,16 +93,19 @@ class ScheduleEngine:
                 )
             return current >= occurrence
         local = current.astimezone(_zone(schedule.timezone))
-        if local.weekday() not in schedule.weekdays:
-            return False
         start = _local_time(schedule.window_start or "00:00")
         end = _local_time(schedule.window_end or "23:59:59")
         if start <= end:
+            if local.weekday() not in schedule.weekdays:
+                return False
             return start <= local.timetz().replace(tzinfo=None) <= end
-        return (
-            local.timetz().replace(tzinfo=None) >= start
-            or local.timetz().replace(tzinfo=None) <= end
-        )
+        local_time = local.timetz().replace(tzinfo=None)
+        if local_time >= start:
+            return local.weekday() in schedule.weekdays
+        if local_time <= end:
+            previous_weekday = (local.weekday() - 1) % 7
+            return previous_weekday in schedule.weekdays
+        return False
 
     def next_eligible(self, schedule: ScheduleSpec, now: datetime) -> datetime | None:
         self.validate(schedule)

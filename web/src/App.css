@@ -185,6 +185,10 @@ tr[tabindex] { cursor:pointer; }
 .status.running,.status.pending { color:var(--teal); background:var(--teal-soft); }
 .status.failed,.status.canceled { color:var(--coral); background:#fbe9e7; }
 .status.paused,.status.needs_review { color:var(--amber); background:var(--amber-soft); }
+.status.waiting { color:#8a5a18; background:var(--amber-soft); }
+.status.manually_paused { color:var(--amber); background:var(--amber-soft); }
+.status.requires_reconciliation,.status.completed_with_failures { color:var(--coral); background:#fbe9e7; }
+.status.completed_successfully { color:#197a55; background:#e5f4eb; }
 .row-arrow { color:var(--teal); }
 .file-drop { display:grid; gap:8px; padding:18px; border:1px dashed #9bb7b2; border-radius:8px; background:#f5fbf8; color:var(--teal); cursor:pointer; }
 .file-drop input[type='file'] { padding:0; border:0; background:transparent; }

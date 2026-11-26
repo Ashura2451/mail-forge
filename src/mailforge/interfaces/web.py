@@ -758,6 +758,7 @@ class WorkerSupervisor:
                         retry_deferred=True,
                         stop_after=1,
                         worker_id=f"web-{threading.get_ident()}",
+                        allow_pause_clear=False,
                     )
                 elif mode == "external_smtp":
                     provider_ref = campaign["provider_account_ref"]
@@ -789,6 +790,7 @@ class WorkerSupervisor:
                         stop_after=None,
                         worker_id=f"web-{threading.get_ident()}",
                         submission_guard=consume_submission,
+                        allow_pause_clear=False,
                     )
                 else:
                     report, transport = self.outbound.execute_worker(
@@ -804,15 +806,16 @@ class WorkerSupervisor:
                         counts.get(state, 0)
                         for state in ("ambiguous", "reserved", "attempt_started")
                     )
-                    next_at = self.outbound.store.campaign_next_automatic_at(campaign_id)
-                    if pause_requested or cancel_requested or unsafe_pending or (
-                        next_at is not None and next_at > self.outbound.now_fn().isoformat()
-                    ):
+                    last_transition = self.outbound.store.campaign_last_transition(campaign_id)
+                    if pause_requested or cancel_requested or unsafe_pending:
                         break
-                    # A bounded chunk paused after its final accepted item; run
-                    # one reconciliation pass so the durable state reaches
-                    # completed rather than remaining in resume_available.
-                    continue
+                    # Loopback uses bounded one-message chunks. Continue only
+                    # for that explicit resumable boundary; temporary waits,
+                    # deferred submissions, and ambiguous outcomes stop here
+                    # until the durable scheduler or an operator acts.
+                    if last_transition and last_transition["reason"] == "resume_available":
+                        continue
+                    break
                 if report.campaign_status in {"completed", "canceled", "failed"}:
                     completed = report.campaign_status == "completed"
                     break
@@ -881,7 +884,7 @@ class WorkerSupervisor:
 
 
 class CampaignScheduleSupervisor:
-    """Starts only authorized, due synthetic schedules from durable rows."""
+    """Starts only authorized, due schedules from durable campaign rows."""
 
     def __init__(self, store: CampaignStore, outbound: OutboundService, workers: WorkerSupervisor):
         self.store = store
@@ -907,13 +910,10 @@ class CampaignScheduleSupervisor:
                     configuration = json.loads(row["configuration_json"] or "{}")
                     if configuration.get("archived_at") or row["pause_requested"] or row["cancel_requested"]:
                         continue
-                    if configuration.get("execution_mode") == "external_smtp":
-                        continue
+                    now = self.outbound.now_fn()
                     due = False
-                    if row["status"] == CampaignStatus.PAUSED.value:
-                        next_at = self.store.campaign_next_automatic_at(row["id"])
-                        due = next_at is not None and next_at <= self.outbound.now_fn().isoformat()
-                    elif row["mode"]:
+                    schedule = None
+                    if row["mode"]:
                         schedule = ScheduleSpec(
                             mode=ScheduleMode(row["mode"]),
                             timezone=row["timezone"],
@@ -927,7 +927,24 @@ class CampaignScheduleSupervisor:
                             catch_up_policy=CatchUpPolicy(row["catch_up_policy"]),
                             fold=row["fold"],
                         )
-                        due = self.outbound.schedules.due(schedule, self.outbound.now_fn())
+                    if row["status"] == CampaignStatus.PAUSED.value:
+                        next_at = self.store.campaign_next_automatic_at(row["id"], now=now)
+                        due_now = self.outbound.now_fn().isoformat()
+                        last_transition = self.store.campaign_last_transition(row["id"])
+                        due = (
+                            next_at is not None
+                            and next_at <= due_now
+                            and last_transition is not None
+                            and last_transition["reason"] in {
+                                "retry_after_temporary_restriction",
+                                "worker_waiting_for_temporary_restriction",
+                                "unresolved_delivery_state",
+                            }
+                            and not self.store.campaign_has_unsafe_inflight(row["id"])
+                            and (schedule is None or self.outbound.schedules.due(schedule, now))
+                        )
+                    elif schedule is not None:
+                        due = self.outbound.schedules.due(schedule, now)
                     if due:
                         self.workers.start(row["id"])
             except Exception:
