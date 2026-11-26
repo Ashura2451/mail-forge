@@ -1,7 +1,7 @@
 # 0008. Message Studio and deterministic rendering
 
 **Date**: 2026-10-28
-**Status**: Proposed
+**Status**: In Progress
 
 ## Summary
 
