@@ -811,6 +811,11 @@ class CampaignOperationsService:
             prepared = self.store.get_prepared_message(intent["id"])
             if prepared is None:
                 raise CampaignOperationsError("prepared MIME artifact is missing", "prepared_artifact_missing")
+            if len(bytes(prepared["mime_bytes"])) > 1_048_576:
+                raise CampaignOperationsError(
+                    "prepared message exceeds the 1 MiB external qualification limit",
+                    "message_limit_exceeded",
+                )
             prepared_values.append(
                 f"{intent['id']}:{prepared['content_hash']}:{prepared['proof_id'] or ''}"
             )
