@@ -1015,9 +1015,13 @@ function Campaigns({ data, onRun }: { data: ApiRecord, onRun: (action: () => Pro
 
 function CampaignPreviewPanel({ campaignId }: { campaignId?: string }) {
   const [previews, setPreviews] = useState<ApiRecord[]>([])
+  const [execution, setExecution] = useState<ApiRecord | null>(null)
   useEffect(() => { if (campaignId) void api<ApiRecord>(`/campaigns/${campaignId}/workspace`).then(result => setPreviews(result.message_previews || [])).catch(() => setPreviews([])) }, [campaignId])
   if (!campaignId || !previews.length) return null
-  return <section className="panel campaign-preview-panel"><div className="panel-head"><div><h3>Message previews</h3><p className="muted">Rendered by the canonical local message authority for synthetic recipients.</p></div><span className="tag">preview only</span></div>{previews.map((preview, index) => <article key={index} className="message-preview-card"><strong>{preview.subject || 'No subject'}</strong><small>{preview.email || `Synthetic recipient ${index + 1}`}</small><p>{preview.text || 'No text preview available.'}</p>{preview.warnings?.length ? <span className="warning-copy">{preview.warnings.join(' · ')}</span> : null}</article>)}</section>
+  const executeLoopback = async () => {
+    setExecution(await api<ApiRecord>(`/campaigns/${campaignId}/execute`, { method: 'POST', body: JSON.stringify({ mode: 'loopback_smtp' }) }))
+  }
+  return <section className="panel campaign-preview-panel"><div className="panel-head"><div><h3>Message previews</h3><p className="muted">Rendered by the canonical local message authority for synthetic recipients.</p></div><span className="tag">preview only</span></div>{previews.map((preview, index) => <article key={index} className="message-preview-card"><strong>{preview.subject || 'No subject'}</strong><small>{preview.email || `Synthetic recipient ${index + 1}`}</small><p>{preview.text || 'No text preview available.'}</p>{preview.warnings?.length ? <span className="warning-copy">{preview.warnings.join(' · ')}</span> : null}</article>)}<div className="button-row"><button className="primary" onClick={() => void executeLoopback()}>Run trusted loopback SMTP</button><span className="muted">Local capture fixture only; no external provider campaign.</span></div>{execution && <p className="muted" role="status">{execution.started ? 'Loopback campaign worker started.' : execution.error?.message || 'Loopback execution was not started.'}</p>}</section>
 }
 
 function CampaignWorkspace({ data, onRun }: { data: ApiRecord, onRun: (action: () => Promise<unknown>, message: string) => void }) {

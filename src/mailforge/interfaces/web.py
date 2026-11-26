@@ -19,7 +19,7 @@ from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -93,6 +93,7 @@ from mailforge.domain.provider import (
 from mailforge.domain.policy import EvidenceStatus, PreferenceState
 from mailforge.infrastructure.campaign_store import SCHEMA_VERSION, CampaignStore
 from mailforge.infrastructure.credentials import CredentialError, LocalCredentialResolver
+from mailforge.infrastructure.smtp import LiveSendGate
 
 API_PREFIX = "/api/v1"
 SESSION_COOKIE = "mailforge_session"
@@ -353,6 +354,10 @@ class CampaignScheduleInput(BaseModel):
     recurrence: str | None = Field(default=None, max_length=20)
     catch_up_policy: CatchUpPolicy = CatchUpPolicy.SKIP
     fold: int | None = Field(default=None, ge=0, le=1)
+
+
+class CampaignExecutionInput(BaseModel):
+    mode: Literal["loopback_smtp"] = "loopback_smtp"
 
 
 class CampaignDuplicateInput(BaseModel):
@@ -697,8 +702,10 @@ class RetiredMailboxScopeMiddleware(BaseHTTPMiddleware):
 class WorkerSupervisor:
     """Bounded in-process worker supervisor; all state remains durable in SQLite."""
 
-    def __init__(self, outbound: OutboundService):
+    def __init__(self, outbound: OutboundService, credential_resolver: LocalCredentialResolver, provider_operations: ProviderOperationsService):
         self.outbound = outbound
+        self.credential_resolver = credential_resolver
+        self.provider_operations = provider_operations
         self.on_completed: Callable[[str], None] | None = None
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mailforge-worker")
         self._lock = threading.Lock()
@@ -716,27 +723,71 @@ class WorkerSupervisor:
         try:
             completed = False
             while True:
-                report, transport = self.outbound.execute_worker(
-                    campaign_id,
-                    worker_id=f"web-{threading.get_ident()}",
-                    max_items=1,
-                )
-                if report.campaign_status in {"completed", "paused", "canceled", "failed"}:
+                before_counts = self.outbound.store.counts(campaign_id)
+                campaign = self.outbound.store.get_campaign(campaign_id)
+                configuration = json.loads(campaign["configuration_json"] or "{}")
+                mode = configuration.get("execution_mode", "synthetic")
+                if mode == "loopback_smtp":
+                    provider_ref = campaign["provider_account_ref"]
+                    if not provider_ref or not self.provider_operations.is_capture_only_sandbox(
+                        provider_ref
+                    ):
+                        raise PermissionError("trusted local capture fixture is unavailable")
+                    report, transport = self.outbound.execute_provider(
+                        campaign_id,
+                        provider_ref,
+                        self.credential_resolver,
+                        gate=LiveSendGate(enabled=True),
+                        allow_capture_only=True,
+                        retry_deferred=True,
+                        stop_after=1,
+                        worker_id=f"web-{threading.get_ident()}",
+                    )
+                else:
+                    report, transport = self.outbound.execute_worker(
+                        campaign_id,
+                        worker_id=f"web-{threading.get_ident()}",
+                        max_items=1,
+                        retry_deferred=True,
+                    )
+                if report.campaign_status == "paused":
+                    pause_requested, cancel_requested = self.outbound.store.campaign_flags(campaign_id)
+                    counts = self.outbound.store.counts(campaign_id)
+                    unsafe_pending = any(
+                        counts.get(state, 0)
+                        for state in ("ambiguous", "reserved", "attempt_started")
+                    )
+                    next_at = self.outbound.store.campaign_next_automatic_at(campaign_id)
+                    if pause_requested or cancel_requested or unsafe_pending or (
+                        next_at is not None and next_at > self.outbound.now_fn().isoformat()
+                    ):
+                        break
+                    # A bounded chunk paused after its final accepted item; run
+                    # one reconciliation pass so the durable state reaches
+                    # completed rather than remaining in resume_available.
+                    continue
+                if report.campaign_status in {"completed", "canceled", "failed"}:
                     completed = report.campaign_status == "completed"
                     break
-                if not getattr(transport, "calls", None):
+                after_counts = self.outbound.store.counts(campaign_id)
+                if before_counts == after_counts:
                     try:
                         current = CampaignStatus(self.outbound.store.get_campaign(campaign_id)["status"])
                         if current is CampaignStatus.RUNNING:
                             self.outbound.store.transition_campaign(
                                 campaign_id,
                                 CampaignStatus.COMPLETING,
-                                "worker_waiting_for_policy_window",
+                                "worker_waiting_for_temporary_restriction",
+                                {
+                                    "next_automatic_at": self.outbound.store.campaign_next_automatic_at(
+                                        campaign_id
+                                    )
+                                },
                             )
                             self.outbound.store.transition_campaign(
                                 campaign_id,
                                 CampaignStatus.PAUSED,
-                                "retry_after_policy_window",
+                                "retry_after_temporary_restriction",
                             )
                     except ValueError:
                         pass
@@ -744,9 +795,25 @@ class WorkerSupervisor:
                 time.sleep(0.03)
             if completed and self.on_completed is not None:
                 self.on_completed(campaign_id)
-        except Exception:
+        except Exception as error:
             try:
                 campaign = self.outbound.store.get_campaign(campaign_id)
+                with self.outbound.store.transaction(immediate=True) as connection:
+                    self.outbound.store.record_event(
+                        connection,
+                        "campaign",
+                        campaign_id,
+                        "campaign_worker_failed",
+                        {
+                            "error": type(error).__name__,
+                            "detail": (
+                                str(error)[:240]
+                                if not any(token in str(error).lower() for token in ("secret", "password", "token", "bearer"))
+                                else "worker failure detail redacted"
+                            ),
+                            "status": campaign["status"],
+                        },
+                    )
                 if campaign["status"] in {"running", "pausing"}:
                     self.outbound.store.transition_campaign(
                         campaign_id, CampaignStatus.FAILED, "worker_failed"
@@ -784,27 +851,35 @@ class CampaignScheduleSupervisor:
             try:
                 with self.store.connect() as connection:
                     rows = connection.execute(
-                        "SELECT c.id, c.configuration_json, s.* FROM campaigns c JOIN campaign_schedules s "
-                        "ON s.campaign_id=c.id WHERE c.status='scheduled' "
+                        "SELECT c.id, c.status, c.configuration_json, c.pause_requested, "
+                        "c.cancel_requested, s.* FROM campaigns c LEFT JOIN campaign_schedules s "
+                        "ON s.campaign_id=c.id WHERE c.status IN ('scheduled', 'paused') "
                         "AND c.authorization='simulation_authorized'"
                     ).fetchall()
                 for row in rows:
-                    if json.loads(row["configuration_json"] or "{}").get("archived_at"):
+                    configuration = json.loads(row["configuration_json"] or "{}")
+                    if configuration.get("archived_at") or row["pause_requested"] or row["cancel_requested"]:
                         continue
-                    schedule = ScheduleSpec(
-                        mode=ScheduleMode(row["mode"]),
-                        timezone=row["timezone"],
-                        scheduled_at=row["scheduled_at"],
-                        window_start=row["window_start"],
-                        window_end=row["window_end"],
-                        weekdays=tuple(json.loads(row["weekdays_json"] or "[]")),
-                        pacing_seconds=float(row["pacing_seconds"]),
-                        cooldown_seconds=float(row["cooldown_seconds"]),
-                        recurrence=row["recurrence"],
-                        catch_up_policy=CatchUpPolicy(row["catch_up_policy"]),
-                        fold=row["fold"],
-                    )
-                    if self.outbound.schedules.due(schedule, self.outbound.now_fn()):
+                    due = False
+                    if row["status"] == CampaignStatus.PAUSED.value:
+                        next_at = self.store.campaign_next_automatic_at(row["id"])
+                        due = next_at is not None and next_at <= self.outbound.now_fn().isoformat()
+                    elif row["mode"]:
+                        schedule = ScheduleSpec(
+                            mode=ScheduleMode(row["mode"]),
+                            timezone=row["timezone"],
+                            scheduled_at=row["scheduled_at"],
+                            window_start=row["window_start"],
+                            window_end=row["window_end"],
+                            weekdays=tuple(json.loads(row["weekdays_json"] or "[]")),
+                            pacing_seconds=float(row["pacing_seconds"]),
+                            cooldown_seconds=float(row["cooldown_seconds"]),
+                            recurrence=row["recurrence"],
+                            catch_up_policy=CatchUpPolicy(row["catch_up_policy"]),
+                            fold=row["fold"],
+                        )
+                        due = self.outbound.schedules.due(schedule, self.outbound.now_fn())
+                    if due:
                         self.workers.start(row["id"])
             except Exception:
                 pass
@@ -951,7 +1026,7 @@ class WebRuntime:
         self.operational_assurance = OperationalAssuranceService(self.store, self.data_directory)
         self.reporting = ReportingService(self.store)
         self.email_standards = EmailStandardsService(self.store)
-        self.workers = WorkerSupervisor(self.outbound)
+        self.workers = WorkerSupervisor(self.outbound, self.credential_resolver, self.provider_operations)
         self.campaign_scheduler = CampaignScheduleSupervisor(
             self.store, self.outbound, self.workers
         )
@@ -3631,10 +3706,31 @@ def create_app(
                 )
             if campaign["status"] in {"completed", "canceled"}:
                 return {"campaign_id": campaign_id, "started": False, "mode": "synthetic"}
+            runtime.campaign_operations.set_execution_mode(campaign_id, "synthetic")
+            runtime.store.clear_pause_request(campaign_id)
             started = runtime.workers.start(campaign_id)
             return {"campaign_id": campaign_id, "started": started, "mode": "synthetic"}
         except (KeyError, ValueError, PermissionError) as error:
             return _error(400, "simulation_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/execute")
+    async def execute_campaign(campaign_id: str, payload: CampaignExecutionInput):
+        try:
+            campaign = runtime.store.get_campaign(campaign_id)
+            if campaign["authorization"] != "simulation_authorized" or not runtime.store.has_execution_declaration(
+                campaign_id
+            ):
+                return _error(
+                    400,
+                    "execution_not_authorized",
+                    "authorize the prepared campaign before starting loopback SMTP execution",
+                )
+            runtime.campaign_operations.set_execution_mode(campaign_id, payload.mode)
+            runtime.store.clear_pause_request(campaign_id)
+            started = runtime.workers.start(campaign_id)
+            return {"campaign_id": campaign_id, "started": started, "mode": payload.mode}
+        except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
+            return _error(400, "execution_failed", str(error))
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/pause")
     async def pause_campaign(campaign_id: str):

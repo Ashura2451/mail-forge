@@ -56,6 +56,7 @@ def _safe_config(campaign: Any) -> dict[str, Any]:
             "sender_email",
             "subject",
             "text",
+            "execution_mode",
             "unsubscribe_endpoint_ref",
             "one_click_unsubscribe",
             "dkim_signed",
@@ -172,12 +173,25 @@ class CampaignOperationsService:
         if not validate_email(sender_email).valid:
             raise CampaignOperationsError("sender email is invalid", "sender_invalid")
         self._validate_message_revision(message_revision_id)
+        sender_ref = f"campaign-{uuid.uuid4().hex[:16]}"
         if provider_account_ref:
             try:
-                self.provider_operations.account(provider_account_ref)
+                account = self.provider_operations.account(provider_account_ref)
             except KeyError as error:
                 raise CampaignOperationsError(str(error), "provider_account_not_found") from error
-        sender_ref = f"campaign-{uuid.uuid4().hex[:16]}"
+            sender_ref = account.get("sender_policy_ref") or f"provider-{provider_account_ref}"
+            if not account.get("sender_policy_ref") and not any(
+                row["ref"] == sender_ref for row in self.store.list_sender_policies()
+            ):
+                self.store.register_sender_policy(
+                    SenderPolicy(
+                        ref=sender_ref,
+                        provider="smtp",
+                        email=account.get("sender_email") or sender_email,
+                        max_per_minute=int(account.get("pacing_per_minute") or 60),
+                        max_concurrency=int(account.get("max_concurrency") or 1),
+                    )
+                )
         return self.campaigns.create_campaign(
             name.strip(),
             list_id,
@@ -221,7 +235,7 @@ class CampaignOperationsService:
             source["audience_list_id"],
             description=source["description"] or "",
             template_ref=f"campaign-template-{uuid.uuid4().hex[:12]}",
-            sender_config_ref=f"campaign-{uuid.uuid4().hex[:16]}",
+            sender_config_ref=source["sender_config_ref"],
             configuration=configuration,
             audience_source_type=source["audience_source_type"],
             audience_source_id=source["audience_source_id"],
@@ -287,7 +301,7 @@ class CampaignOperationsService:
             source["audience_list_id"],
             description=source["description"] or "",
             template_ref=f"campaign-template-{uuid.uuid4().hex[:12]}",
-            sender_config_ref=f"campaign-{uuid.uuid4().hex[:16]}",
+            sender_config_ref=source["sender_config_ref"],
             configuration=child_config,
             audience_source_type=source["audience_source_type"],
             audience_source_id=source["audience_source_id"],
@@ -722,10 +736,43 @@ class CampaignOperationsService:
             "next_eligible_at": next_at.isoformat() if next_at else None,
         }
 
+    def set_execution_mode(self, campaign_id: str, mode: str) -> dict[str, Any]:
+        if mode not in {"synthetic", "loopback_smtp"}:
+            raise CampaignOperationsError("unsupported execution mode", "execution_mode_invalid")
+        campaign = self.store.get_campaign(campaign_id)
+        status = CampaignStatus(campaign["status"])
+        if status not in {
+            CampaignStatus.READY,
+            CampaignStatus.SCHEDULED,
+            CampaignStatus.PAUSED,
+        }:
+            raise CampaignOperationsError(
+                "execution mode can only be selected before or between runs",
+                "execution_mode_state",
+            )
+        if mode == "loopback_smtp":
+            provider_ref = campaign["provider_account_ref"]
+            if not provider_ref:
+                raise CampaignOperationsError(
+                    "loopback SMTP execution requires a selected provider account",
+                    "provider_account_required",
+                )
+            if not self.provider_operations.is_capture_only_sandbox(provider_ref):
+                raise CampaignOperationsError(
+                    "campaign SMTP execution is limited to a trusted local capture fixture",
+                    "loopback_fixture_required",
+                )
+        self.store.set_campaign_execution_mode(campaign_id, mode)
+        return {"campaign_id": campaign_id, "execution_mode": mode}
+
     def control(self, campaign_id: str, action: str) -> dict[str, Any]:
         if action == "pause":
             status = self.store.get_campaign(campaign_id)["status"]
-            if status not in {CampaignStatus.PAUSED.value, CampaignStatus.PAUSING.value}:
+            if status == CampaignStatus.PAUSED.value:
+                # A temporary-restriction pause is resumable by the scheduler;
+                # an operator pause must durably opt out of that continuation.
+                self.store.request_pause(campaign_id)
+            elif status != CampaignStatus.PAUSING.value:
                 self.campaigns.pause(campaign_id)
             return {"campaign_id": campaign_id, "action": action, "idempotent": True}
         if action == "cancel":
@@ -739,6 +786,7 @@ class CampaignOperationsService:
                 raise CampaignOperationsError(
                     "authorize the campaign before resuming", "simulation_not_authorized"
                 )
+            self.store.clear_pause_request(campaign_id)
             started = (
                 False
                 if campaign["status"] in {"completed", "canceled"}
@@ -795,6 +843,15 @@ class CampaignOperationsService:
             "schedule": asdict(self._schedule_from_row(schedule)) if schedule else None,
             "preflight": self.preflight(campaign_id),
             "progress": self.campaigns.report(campaign_id).to_dict(),
+            "execution": {
+                "mode": _safe_config(campaign).get("execution_mode", "synthetic"),
+                "next_automatic_at": self.store.campaign_next_automatic_at(campaign_id),
+                "last_transition": (
+                    dict(self.store.campaign_last_transition(campaign_id))
+                    if self.store.campaign_last_transition(campaign_id)
+                    else None
+                ),
+            },
             "preview": self.recipients(campaign_id, limit=preview_limit),
             "message_previews": self._message_previews(campaign_id, preview_limit),
         }

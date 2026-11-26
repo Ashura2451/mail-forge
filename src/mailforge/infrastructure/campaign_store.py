@@ -4713,6 +4713,57 @@ class CampaignStore:
                 {"reason": reason},
             )
 
+    def set_campaign_execution_mode(self, campaign_id: str, mode: str) -> None:
+        """Persist the explicitly selected local execution transport."""
+
+        if mode not in {"synthetic", "loopback_smtp"}:
+            raise ValueError("unsupported campaign execution mode")
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT configuration_json FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"campaign not found: {campaign_id}")
+            configuration = json.loads(row["configuration_json"] or "{}")
+            configuration["execution_mode"] = mode
+            connection.execute(
+                "UPDATE campaigns SET configuration_json = ?, updated_at = ? WHERE id = ?",
+                (_json(configuration), utc_now(), campaign_id),
+            )
+            self.record_event(
+                connection,
+                "campaign",
+                campaign_id,
+                "campaign_execution_mode_selected",
+                {"mode": mode},
+            )
+
+    def campaign_next_automatic_at(self, campaign_id: str) -> str | None:
+        """Return the earliest persisted retry boundary for automatic continuation."""
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT not_before_utc FROM delivery_intents WHERE campaign_id = ? "
+                "AND state IN (?, ?, ?) ORDER BY not_before_utc",
+                (
+                    campaign_id,
+                    DeliveryState.ELIGIBLE_PENDING.value,
+                    DeliveryState.PREPARED.value,
+                    DeliveryState.DEFERRED.value,
+                ),
+            ).fetchall()
+        if any(row["not_before_utc"] is None for row in rows):
+            return utc_now()
+        return next((row["not_before_utc"] for row in rows if row["not_before_utc"]), None)
+
+    def campaign_last_transition(self, campaign_id: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT from_status, to_status, reason, occurred_at FROM campaign_transitions "
+                "WHERE campaign_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 1",
+                (campaign_id,),
+            ).fetchone()
+
     def update_campaign_draft(
         self,
         campaign_id: str,

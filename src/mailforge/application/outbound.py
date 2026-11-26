@@ -631,6 +631,7 @@ class OutboundService:
         retry_deferred: bool = False,
         stop_after: int | None = None,
         worker_id: str = "smtp-worker",
+        allow_capture_only: bool = False,
     ) -> tuple[CampaignReport, PreparedSMTPTransport]:
         """Execute prepared MIME through SMTP with the normal policy guard.
 
@@ -654,10 +655,14 @@ class OutboundService:
                 # the authority for that legacy path.
                 continue
             if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
-                raise PermissionError(
-                    "capture-only sandbox accounts may only run the bounded "
-                    "controlled-test operation"
-                )
+                if not allow_capture_only:
+                    raise PermissionError(
+                        "capture-only sandbox accounts require the local campaign execution path"
+                    )
+                from mailforge.application.provider_operations import ProviderOperationsService
+
+                if not ProviderOperationsService(self.store).is_capture_only_sandbox(provider_ref):
+                    raise PermissionError("trusted local capture fixture is unavailable")
             if (
                 profile.host != config.host
                 or profile.port != config.port
@@ -693,6 +698,7 @@ class OutboundService:
         retry_deferred: bool = False,
         stop_after: int | None = None,
         worker_id: str = "smtp-worker",
+        allow_capture_only: bool = False,
     ) -> tuple[CampaignReport, PreparedSMTPTransport]:
         """Execute through a durable provider profile and the canonical SMTP path."""
 
@@ -700,16 +706,20 @@ class OutboundService:
         with self.store.provider_operation_lock():
             profile = provider_service.profile(provider_ref)
             campaign = self.store.get_campaign(campaign_id)
-            if profile.sender_policy_ref != campaign["sender_config_ref"]:
+            if profile.sender_policy_ref and profile.sender_policy_ref != campaign["sender_config_ref"]:
                 raise ValueError(
                     f"provider profile {provider_ref} is not associated with campaign sender "
                     f"policy {campaign['sender_config_ref']}"
                 )
             if (profile.metadata or {}).get("sandbox", {}).get("key") == CAPTURE_ONLY_SANDBOX_KEY:
-                raise PermissionError(
-                    "capture-only sandbox accounts may only run the bounded "
-                    "controlled-test operation"
-                )
+                if not allow_capture_only:
+                    raise PermissionError(
+                        "capture-only sandbox accounts require the local campaign execution path"
+                    )
+                from mailforge.application.provider_operations import ProviderOperationsService
+
+                if not ProviderOperationsService(self.store).is_capture_only_sandbox(provider_ref):
+                    raise PermissionError("trusted local capture fixture is unavailable")
             pool = provider_service.smtp_pool(
                 provider_ref, credential_resolver, gate=gate, profile=profile
             )
@@ -720,6 +730,7 @@ class OutboundService:
                 retry_deferred=retry_deferred,
                 stop_after=stop_after,
                 worker_id=worker_id,
+                allow_capture_only=allow_capture_only,
             )
         finally:
             pool.close()
@@ -759,6 +770,7 @@ class OutboundService:
         worker_id: str,
         outcomes: Mapping[str, AttemptOutcome | DeliveryResult] | None = None,
         max_items: int | None = None,
+        retry_deferred: bool = True,
     ) -> tuple[CampaignReport, PreparedSimulationTransport]:
         campaign = self.store.get_campaign(campaign_id)
         if (
@@ -817,7 +829,11 @@ class OutboundService:
                         campaign_id, CampaignStatus.PAUSED, "paused_by_operator"
                     )
                 break
-            intent = self.store.reserve_next(campaign_id, worker_id=worker_id)
+            intent = self.store.reserve_next(
+                campaign_id,
+                retry_deferred=retry_deferred,
+                worker_id=worker_id,
+            )
             if intent is None:
                 drained = True
                 break
