@@ -3,6 +3,16 @@
 **Date**: 2026-10-28
 **Status**: In Progress
 
+## Current qualification checkpoint
+
+The milestone-038 implementation is present on canonical `main` at
+`e5c48ebd3bdb55533a18170be8cb1ff35723e2ee`. Local tests and the packaged
+browser journey cover structured/custom HTML authoring, revision reuse,
+recipient-scoped attachment mappings, and proof-bound prepared-MIME inspection.
+External-client rendering compatibility, broad visual undo/redo, and
+independent packaged review remain unqualified; no live provider or recipient
+delivery is claimed.
+
 ## Summary
 
 Message Studio gives local operators one durable place to compose, validate,
