@@ -1,11 +1,12 @@
 # Mailforge
 
-Mailforge is a local-first modular monolith. The packaged sorting and
-transformation services are authoritative; the former SORTER/MSORTER Python
-wrappers are retired while their operational data contracts remain preserved.
-MAILER resources remain preserved as a data/configuration compatibility
-boundary. Its executable runner is retired; no operational data or mail is
-migrated or sent by this repository state.
+Mailforge is a local-first email utility with three independently useful
+workflows: sort email lists, compare lists, and prepare controlled sends. The
+packaged sorting service and the canonical campaign/outbound services remain
+authoritative; legacy SORTER/MSORTER and MAILER data contracts are preserved
+only where they are needed for compatibility. The browser starts with these
+three workflows and keeps account setup, saved lists, history, and recovery as
+optional support.
 
 ## Quick start
 
@@ -20,6 +21,10 @@ uv run --locked pytest
 uv run ruff check src tests
 uv run ruff format --check src tests
 ```
+
+The React/Vite console uses Node 24 or newer. From `web/`, run `npm run build`
+and `npm run lint` with that runtime; the build writes the served assets to
+`src/mailforge/web_assets/`.
 
 Without `uv`, use an isolated virtual environment and install the project with
 `python -m pip install -e '.[dev]'`. Do not install into the system Python.
@@ -44,11 +49,13 @@ uv run mailforge transform list formatted_emails.txt sorted_mails.txt
 uv run mailforge transform count sorted_mails.txt
 ```
 
-Real SMTP delivery is deliberately disabled pending provider qualification and
-phase-aware outcome reconciliation. For local MAILER compatibility use the
-report-only `campaign translate-legacy`, explicit `campaign import-legacy`, and
-`campaign rehearse-legacy-state` commands. See `docs/mailer-retirement-010.md`
-for the mapping and rollback boundary.
+Real SMTP delivery remains phase-aware and authorization-bound. Local
+simulation and controlled loopback qualification are available; inbox
+delivery is never inferred from SMTP acceptance. For local MAILER compatibility
+use the report-only `campaign translate-legacy`, explicit `campaign
+import-legacy`, and `campaign rehearse-legacy-state` commands. See
+[`docs/mailer-retirement-010.md`](docs/mailer-retirement-010.md) for the
+mapping and rollback boundary.
 
 Recipient policy is shared by import, campaign preview/preparation, simulated
 dispatch, resume, retry, and inbound reconciliation. Use `campaign eligibility`

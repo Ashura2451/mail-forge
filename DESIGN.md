@@ -2,23 +2,34 @@
 
 ## Product character
 
-Mailforge is a serious local operations console for people who need to
-understand and control consequential email work. The interface should feel
+Mailforge is a focused local email utility for people who need to sort address
+files, compare lists, or prepare a controlled send. The interface should feel
 calm, explicit, and inspectable: every state has a source, every risky action
 has a clear mode, and empty or unavailable data explains what the operator can
 do next.
 
-The primary user is a local operator who knows campaigns and recipients but
-should not need Python, SQLite, or SMTP expertise to use the first web slice.
-The product is a local browser application, not a hosted multi-tenant service.
+The primary user may already have an HTML email and a recipient file. They
+should not need Python, SQLite, SMTP, campaign, CRM, or marketing-platform
+knowledge to use the first web slice. The product is a local browser
+application, not a hosted multi-tenant service.
 
 ## Visual direction
 
-Use an editorial operations-console direction: warm off-white canvas, ink
-navy text, slate borders, and teal as the primary action color. Amber marks
+Use an editorial utility direction: warm off-white canvas, ink navy text,
+slate borders, and teal as the primary action color. Amber marks
 attention and coral marks destructive or unresolved outcomes. The visual
 language is inspired by accessible documentation and operations products such
 as GitHub Primer, but Mailforge uses its own palette and terminology.
+
+The design research compared two directions. A dense persistent operations rail
+would preserve the previous service-oriented console, but made 17 destinations
+compete before a user chose a job. A task-first workspace, informed by the
+GOV.UK task-list guidance (short task names, visible sentence-case status, and
+user-controlled order), keeps Sort email, Compare lists, and Send visible while
+placing account and recovery utilities behind More tools. This direction was
+selected because the primary operations are independent and do not require a
+fixed wizard. WCAG 2.2 label guidance and Primer's skip/navigation patterns
+reinforce persistent labels, visible focus, and explicit state text.
 
 Avoid glossy gradients, oversized hero art, decorative charts, and competitor
 branding. Density should support scanning tables and status cards without
@@ -54,12 +65,12 @@ headings, and 32px page titles. Use `tabular-nums` for counts and timestamps.
 ## Components and interaction states
 
 - Navigation: icon-free text labels with an active rail and a visible current
-  location. The primary path is Home, Send, Contacts, Messages, List cleaning,
-  and Activity. Advanced capabilities remain available under an explicit More
-  tools group and preserve their deep links.
-- More tools is collapsed on Home and expands on demand or when an advanced
-  route is opened directly. It is progressive disclosure, not a replacement
-  for removing redundant controls inside a workbench.
+  location. The primary path is Home, Sort email, Compare lists, Send, and
+  History. Email accounts, Saved lists, and Settings remain available under an
+  explicit More tools group.
+- More tools is collapsed on Home and expands on demand or when a utility route
+  is opened directly. It is progressive disclosure for optional conveniences,
+  not a second product area.
 - Status badges: always include text, never color alone. Use `Draft`, `Ready`,
   `Running`, `Paused`, `Completed`, `Needs review`, and `Unverified` exactly.
 - Cards: one clear title, one primary value, one supporting sentence, and an

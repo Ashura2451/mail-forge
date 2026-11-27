@@ -65,3 +65,28 @@ export async function uploadFiles(path: string, files: Record<string, File>, fie
   if (!response.ok) throw new Error(payload.error?.message || 'Import failed')
   return payload
 }
+
+export async function uploadComparison(main: File | null, references: File[], fields: Record<string, string> = {}) {
+  const form = new FormData()
+  if (main) form.append('main', main)
+  references.forEach(file => form.append('references', file))
+  Object.entries(fields).forEach(([key, value]) => form.append(key, value))
+  const response = await fetch('/api/v1/list-comparison/preview', {
+    method: 'POST', body: form, credentials: 'same-origin', headers: { 'x-mailforge-csrf': csrf },
+  })
+  const payload = await response.json()
+  if (!response.ok) throw new Error(payload.error?.message || 'Comparison failed')
+  return payload
+}
+
+export async function exportComparison(result: ApiRecord) {
+  const response = await fetch('/api/v1/list-comparison/export', {
+    method: 'POST', body: JSON.stringify(result), credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', 'x-mailforge-csrf': csrf },
+  })
+  if (!response.ok) {
+    const payload = await response.json()
+    throw new Error(payload.error?.message || 'Export failed')
+  }
+  return response.blob()
+}

@@ -11,15 +11,15 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -46,6 +46,7 @@ from mailforge.application.inbound_operations import InboundOperations, InboundO
 from mailforge.application.inbound_sources import EmlFileSource, MboxSource
 from mailforge.application.ingest import iter_raw_values
 from mailforge.application.integration_hub import IntegrationHubError, IntegrationHubService
+from mailforge.application.list_comparison import ListComparisonError, ListComparisonService
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.local_application import (
     DataDirectory,
@@ -82,6 +83,7 @@ from mailforge.domain.outbound import (
     SenderPolicy,
     TemplateDefinition,
 )
+from mailforge.domain.policy import EvidenceStatus, PreferenceState
 from mailforge.domain.provider import (
     AuthenticationMethod,
     ExternalOperationGrant,
@@ -90,7 +92,6 @@ from mailforge.domain.provider import (
     ProviderProfile,
     TLSMode,
 )
-from mailforge.domain.policy import EvidenceStatus, PreferenceState
 from mailforge.infrastructure.campaign_store import SCHEMA_VERSION, CampaignStore
 from mailforge.infrastructure.credentials import CredentialError, LocalCredentialResolver
 from mailforge.infrastructure.smtp import LiveSendGate
@@ -1145,6 +1146,7 @@ class WebRuntime:
             self.automation, self.automation_workers, self.integrations
         )
         self.list_processing = ListProcessingService(self.store)
+        self.list_comparison = ListComparisonService(self.store)
         self.frontend_dir = Path(frontend_dir) if frontend_dir else None
         self.store.reconcile_abandoned_provider_test_submissions()
         self._recover_running_campaigns()
@@ -2973,6 +2975,75 @@ def create_app(
                 (safe_limit, max(0, offset)),
             )
         }
+
+    @app.get(f"{API_PREFIX}/list-comparison/history")
+    async def list_comparison_history(limit: int = 100):
+        """Return selectable send history without treating prepared rows as sent."""
+
+        return {"items": runtime.list_comparison.history(limit=limit)}
+
+    @app.post(f"{API_PREFIX}/list-comparison/preview")
+    @app.post(f"{API_PREFIX}/comparison/preview")
+    async def list_comparison_preview(
+        main: UploadFile | None = File(default=None),  # noqa: B008
+        references: list[UploadFile] = File(default_factory=list),  # noqa: B008
+        operation: str = Form(default="subtract"),
+        campaign_ids: str = Form(default="[]"),
+        main_list_id: str | None = Form(default=None),
+        reference_list_ids: str = Form(default="[]"),
+    ):
+        temporary: list[Path] = []
+        try:
+            try:
+                selected_campaigns = json.loads(campaign_ids or "[]")
+                selected_lists = json.loads(reference_list_ids or "[]")
+            except json.JSONDecodeError as error:
+                raise ListComparisonError("history and saved-list selections must be JSON arrays", "selection_invalid") from error
+            if not isinstance(selected_campaigns, list) or not all(isinstance(item, str) for item in selected_campaigns):
+                raise ListComparisonError("campaign_ids must be a list of identifiers", "selection_invalid")
+            if not isinstance(selected_lists, list) or not all(isinstance(item, str) for item in selected_lists):
+                raise ListComparisonError("reference_list_ids must be a list of identifiers", "selection_invalid")
+            if main_list_id:
+                result = runtime.list_comparison.compare_saved_lists(
+                    main_list_id,
+                    selected_lists,
+                    operation=operation,
+                    history_campaign_ids=selected_campaigns,
+                )
+            else:
+                if main is None:
+                    raise ListComparisonError("choose a main list or upload one", "main_required")
+                main_path = _upload_list_tool(main, runtime.list_processing.root)
+                temporary.append(main_path)
+                reference_paths = []
+                for upload in references:
+                    path = _upload_list_tool(upload, runtime.list_processing.root)
+                    temporary.append(path)
+                    reference_paths.append(path)
+                result = runtime.list_comparison.compare_files(
+                    main_path,
+                    reference_paths,
+                    operation=operation,
+                    history_campaign_ids=selected_campaigns,
+                )
+            return result
+        except ListComparisonError as error:
+            return _error(404 if error.code == "list_not_found" else 400, error.code, str(error))
+        finally:
+            for path in temporary:
+                path.unlink(missing_ok=True)
+
+    @app.post(f"{API_PREFIX}/list-comparison/export")
+    async def list_comparison_export(payload: dict[str, Any]):
+        try:
+            content = runtime.list_comparison.export_csv(payload)
+        except (TypeError, KeyError) as error:
+            return _error(400, "export_invalid", str(error))
+        return Response(
+            content=content,
+            media_type="text/csv",
+            headers={"content-disposition": 'attachment; filename="mailforge-comparison.csv"'},
+        )
 
     @app.post(f"{API_PREFIX}/list-tools/jobs")
     async def create_list_tools_job(
