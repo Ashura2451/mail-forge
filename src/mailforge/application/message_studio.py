@@ -32,6 +32,7 @@ from mailforge.application.outbound_proof import (
 from mailforge.application.templates import SafeTemplateRenderer
 from mailforge.domain.email import normalize_email, validate_email
 from mailforge.domain.outbound import AttachmentSpec, SenderPolicy, TemplateDefinition
+from mailforge.infrastructure.campaign_store import CampaignStore
 MAX_DOCUMENT_BYTES = 256 * 1024
 MAX_BLOCKS = 100
 MAX_ASSET_BYTES = 10 * 1024 * 1024

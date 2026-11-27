@@ -20,7 +20,6 @@ from mailforge.application.local_application import (
 from mailforge.application.mailer_compat import (
     load_legacy_configuration,
     migrate_legacy_state,
-    prepare_legacy_campaign,
 )
 from mailforge.application.sorting import EmailSorter, SortConfig
 from mailforge.application.transform import (
