@@ -129,7 +129,17 @@ def test_packaged_send_uses_controlled_smtp_and_does_not_duplicate_after_restart
                 page.get_by_text("Local send started").wait_for()
                 page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
                 assert len(smtp.received_messages) == 1
-                assert page.get_by_text("accepted", exact=True).is_visible()
+                record = page.evaluate(
+                    """async name => {
+                        const campaigns = await (await fetch('/api/v1/campaigns')).json();
+                        const item = campaigns.items.find(candidate => candidate.name.includes(name));
+                        return item ? await (await fetch(`/api/v1/campaigns/${item.id}/workspace`)).json() : null;
+                    }""",
+                    "Packaged qualification",
+                )
+                assert record["campaign"]["status"] == "completed"
+                assert record["progress"]["counts"]["accepted"] == 1
+                assert record["preview"][0]["latest_outcome"] == "accepted"
                 browser.close()
         finally:
             stop()
