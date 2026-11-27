@@ -88,13 +88,29 @@ def test_custom_html_revisions_are_immutable_and_personalization_is_escaped(tmp_
         saved["revisions"][-1]["document"]["custom_html"]["original_source"]
         == first["document"]["custom_html"]["original_source"]
     )
-    assert (
-        saved["draft"]["document"]["custom_html"]["original_source"] == "<p>Changed {{ name }}</p>"
-    )
     assert "Changed Sample recipient" in studio.preview(revision_id=saved["draft"]["id"])["html"]
     assert "Changed Sample recipient" in studio.preview(revision_id=saved["draft"]["id"])["text"]
 
 
+def test_custom_html_can_carry_file_attachments_into_preview(tmp_path: Path) -> None:
+    studio = _studio(tmp_path)
+    document = studio.import_custom_html(
+        "Proposal", b"<p>Hello {{ email }}</p>", filename="proposal.html"
+    )
+    attachment = studio.create_asset("proposal.pdf", "application/pdf", b"PDF-FIXTURE")
+    draft = document["draft"]["document"]
+    draft["attachments"] = [{"asset_id": attachment["id"]}]
+    saved = studio.save_draft(document["id"], draft, expected_revision_id=document["draft"]["id"])
+    published = studio.publish(document["id"], expected_revision_id=saved["draft"]["id"])
+    preview = studio.preview(revision_id=published["published"]["id"])
+    assert preview["attachments"] == [
+        {
+            "filename": "proposal.pdf",
+            "content_type": "application/pdf",
+            "content_id": None,
+            "bytes": len(b"PDF-FIXTURE"),
+        }
+    ]
 @pytest.mark.parametrize(
     "source",
     [

@@ -211,6 +211,59 @@ def test_sorted_result_handoff_reuses_the_canonical_saved_list_authority(tmp_pat
         ]
 
 
+def test_sorted_provider_selection_filters_handoff_and_structured_export(tmp_path: Path) -> None:
+    with TestClient(
+        create_app(tmp_path / "provider-selection.sqlite3", allowed_hosts={"testserver"})
+    ) as client:
+        csrf = client.get("/api/v1/session").json()["csrf_token"]
+        headers = {"x-mailforge-csrf": csrf}
+        created = client.post(
+            "/api/v1/list-tools/jobs?profile=full&dns_mode=offline",
+            headers=headers,
+            files={
+                "file": (
+                    "structured.csv",
+                    b"email,name\nalice@gmail.com,Alice\nbob@example.com,Bob\n",
+                    "text/csv",
+                )
+            },
+        )
+        assert created.status_code == 200, created.text
+        job_id = created.json()["id"]
+        client.post(f"/api/v1/list-tools/jobs/{job_id}/start", headers=headers)
+        for _ in range(100):
+            job = client.get(f"/api/v1/list-tools/jobs/{job_id}").json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert job["status"] == "completed"
+        assert "gmail" in job["summary"]["providers"]
+
+        handoff = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/handoff",
+            headers=headers,
+            json={"provider_keys": ["gmail"]},
+        )
+        assert handoff.status_code == 200, handoff.text
+        selected = client.post(
+            "/api/v1/list-comparison/preview",
+            headers=headers,
+            data={"main_list_id": handoff.json()["list"]["id"], "operation": "subtract"},
+        )
+        assert [item["email"] for item in selected.json()["results"]] == ["alice@gmail.com"]
+        assert selected.json()["results"][0]["metadata"]["associated_data"]["fields"]["name"] == "Alice"
+
+        exported = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/export-selected",
+            headers=headers,
+            json={"provider_keys": ["gmail"]},
+        )
+        assert exported.status_code == 200, exported.text
+        assert "alice@gmail.com" in exported.text
+        assert "Alice" in exported.text
+        assert "bob@example.com" not in exported.text
+
+
 def test_direct_message_revision_can_bind_to_a_campaign_without_manual_template_setup(
     tmp_path: Path,
 ) -> None:

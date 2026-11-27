@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -411,3 +412,40 @@ class ListProcessingService:
             )
         path, _ = self.artifact_path(job_id, row["id"])
         return path
+
+    def export_selected(self, job_id: str, provider_keys: list[str]) -> tuple[str, str]:
+        """Project selected accepted rows while retaining structured source fields."""
+        job = self.get_job(job_id)
+        selected = {item.strip() for item in provider_keys if item.strip()}
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(
+            output,
+            fieldnames=[
+                "email", "provider", "domain", "registered_domain", "source_file",
+                "source_record_position", "associated_data",
+            ],
+        )
+        writer.writeheader()
+        with self.structured_result_path(job_id).open("r", encoding="utf-8") as handle:
+            for line in handle:
+                record = json.loads(line)
+                if record.get("processing_disposition") != "accepted":
+                    continue
+                classification = record.get("classification_result") or {}
+                provider = str(classification.get("provider") or "unknown")
+                if selected and provider not in selected:
+                    continue
+                associated = (record.get("metadata") or {}).get("associated_data") or {}
+                writer.writerow(
+                    {
+                        "email": record.get("normalized_address", ""),
+                        "provider": provider,
+                        "domain": classification.get("domain", ""),
+                        "registered_domain": classification.get("registered_domain", ""),
+                        "source_file": record.get("source_file", ""),
+                        "source_record_position": record.get("source_record_position", ""),
+                        "associated_data": json.dumps(associated, ensure_ascii=False, sort_keys=True),
+                    }
+                )
+        suffix = "selected" if selected else "all"
+        return output.getvalue(), f"{job['source_filename']}-{suffix}.csv"

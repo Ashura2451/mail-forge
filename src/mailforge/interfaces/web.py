@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import csv
+import io
 import json
 import os
 import secrets
@@ -91,6 +93,11 @@ class ListInput(BaseModel):
 
 class ListHandoffInput(BaseModel):
     name: str | None = Field(default=None, max_length=120)
+    provider_keys: list[str] = Field(default_factory=list, max_length=200)
+
+
+class ListSelectionInput(BaseModel):
+    provider_keys: list[str] = Field(default_factory=list, max_length=200)
 
 
 class ComparisonHandoffInput(BaseModel):
@@ -1902,12 +1909,25 @@ def create_app(
                 name = payload.name.strip() if payload and payload.name else ""
                 name = name or f"Sorted result {job_id[:8]}"
                 list_id = runtime.store.create_list(name, description)
-                imported = runtime.campaigns.import_sort_results(result_path, list_id)
+                imported = runtime.campaigns.import_sort_results(
+                    result_path,
+                    list_id,
+                    provider_keys=(payload.provider_keys if payload else None),
+                )
                 return {
                     "list": {"id": list_id, "name": name, "description": description},
                     "reused": False,
                     **imported,
                 }
+            if action == "export-selected":
+                content, filename = runtime.list_processing.export_selected(
+                    job_id, payload.provider_keys if payload else []
+                )
+                return Response(
+                    content=content,
+                    media_type="text/csv",
+                    headers={"content-disposition": f'attachment; filename="{filename}"'},
+                )
             if action == "start":
                 return runtime.list_processing.start(job_id)
             if action == "resume":
@@ -1925,6 +1945,63 @@ def create_app(
             )
         except (OSError, ValueError, KeyError, sqlite3.IntegrityError) as error:
             return _error(400, "handoff_failed", str(error))
+
+    @app.post(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/export-selected")
+    async def export_selected_sort_results(job_id: str, payload: ListSelectionInput):
+        """Export the selected canonical sort rows without losing structured fields."""
+        try:
+            job = runtime.list_processing.get_job(job_id)
+            result_path = runtime.list_processing.structured_result_path(job_id)
+            selected = {item.strip() for item in payload.provider_keys if item.strip()}
+            output = io.StringIO(newline="")
+            writer = csv.DictWriter(
+                output,
+                fieldnames=[
+                    "email",
+                    "provider",
+                    "domain",
+                    "registered_domain",
+                    "source_file",
+                    "source_record_position",
+                    "associated_data",
+                ],
+            )
+            writer.writeheader()
+            with result_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    record = json.loads(line)
+                    if record.get("processing_disposition") != "accepted":
+                        continue
+                    classification = record.get("classification_result") or {}
+                    provider = str(classification.get("provider") or "unknown")
+                    if selected and provider not in selected:
+                        continue
+                    associated = (record.get("metadata") or {}).get("associated_data") or {}
+                    writer.writerow(
+                        {
+                            "email": record.get("normalized_address", ""),
+                            "provider": provider,
+                            "domain": classification.get("domain", ""),
+                            "registered_domain": classification.get("registered_domain", ""),
+                            "source_file": record.get("source_file", ""),
+                            "source_record_position": record.get("source_record_position", ""),
+                            "associated_data": json.dumps(
+                                associated, ensure_ascii=False, sort_keys=True
+                            ),
+                        }
+                    )
+            suffix = "selected" if selected else "all"
+            return Response(
+                content=output.getvalue(),
+                media_type="text/csv",
+                headers={
+                    "content-disposition": (
+                        f'attachment; filename="{job["source_filename"]}-{suffix}.csv"'
+                    )
+                },
+            )
+        except (KeyError, OSError, ValueError, json.JSONDecodeError) as error:
+            return _error(404 if isinstance(error, KeyError) else 400, "sort_export_failed", str(error))
 
     @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/artifacts/{{artifact_id}}")
     async def list_tools_artifact(job_id: str, artifact_id: str):

@@ -212,14 +212,24 @@ class CampaignService:
                 )
         return {"records_imported": imported, "unique_contacts": len(unique_contacts)}
 
-    def import_sort_results(self, processing_jsonl: str | Path, list_id: str) -> dict[str, int]:
+    def import_sort_results(
+        self,
+        processing_jsonl: str | Path,
+        list_id: str,
+        *,
+        provider_keys: Iterable[str] | None = None,
+    ) -> dict[str, int]:
         """Import the documented sorting result schema, not legacy output files."""
 
         candidates: list[ContactCandidate] = []
+        selected = {str(item).strip() for item in (provider_keys or ()) if str(item).strip()}
         with Path(processing_jsonl).open("r", encoding="utf-8") as handle:
             for line in handle:
                 record = json.loads(line)
                 if record.get("processing_disposition") != "accepted":
+                    continue
+                provider = str((record.get("classification_result") or {}).get("provider") or "unknown")
+                if selected and provider not in selected:
                     continue
                 normalized = record.get("normalized_address")
                 if not isinstance(normalized, str) or not validate_email(normalized).valid:

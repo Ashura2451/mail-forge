@@ -16,3 +16,4 @@ label { display:grid; gap:6px; margin:13px 0; color:var(--ink); font-size:13px; 
 .utility-toggle { color:#a9c0bb; }
 .rail-foot small { color:#a9c0bb; }
 .stat-card small { color:#62736e; }
+iframe[title*="message preview"] { width:100%; min-height:260px; margin-top:10px; border:1px solid var(--line); background:#fff; }

@@ -66,6 +66,22 @@ export async function uploadFiles(path: string, files: Record<string, File>, fie
   return payload
 }
 
+export async function uploadAsset(file: File, kind: 'attachment' | 'image' = 'attachment') {
+  return uploadFiles('/message-studio/assets', { file }, { kind })
+}
+
+export async function exportSortSelection(jobId: string, providerKeys: string[]) {
+  const response = await fetch(`/api/v1/list-tools/jobs/${jobId}/export-selected`, {
+    method: 'POST', body: JSON.stringify({ provider_keys: providerKeys }), credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', 'x-mailforge-csrf': csrf },
+  })
+  if (!response.ok) {
+    const payload = await response.json()
+    throw new Error(payload.error?.message || 'Sort export failed')
+  }
+  return response.blob()
+}
+
 export async function uploadComparison(main: File | null, references: File[], fields: Record<string, string> = {}) {
   const form = new FormData()
   if (main) form.append('main', main)

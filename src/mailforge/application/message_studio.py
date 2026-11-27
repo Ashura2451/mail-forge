@@ -1212,6 +1212,12 @@ class MessageStudioService:
                         asset["id"], content_id=f"mailforge-custom-{asset['id']}"
                     )
                 )
+        for item in source.get("attachments", []):
+            attachments.append(
+                self._asset_attachment(
+                    item["asset_id"], content_id=item.get("content_id")
+                )
+            )
         html_template = analyzed["prepared_source"]
         text_template = (
             analyzed["plain_text"]
