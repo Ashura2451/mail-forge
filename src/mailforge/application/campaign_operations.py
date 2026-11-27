@@ -947,6 +947,55 @@ class CampaignOperationsService:
             )
         return {"campaign_id": campaign_id, "authorized": True, "external_access": False}
 
+    def prepare_external_authorization(
+        self,
+        campaign_id: str,
+        *,
+        purpose: str,
+        expires_at: str,
+        max_submissions: int,
+        prepared_set_hash: str,
+        confirm_exact_scope: bool,
+    ) -> dict[str, Any]:
+        """Issue and bind the server grant for an explicitly confirmed scope."""
+
+        if not confirm_exact_scope:
+            raise CampaignOperationsError(
+                "confirm the exact prepared recipients and submission scope",
+                "scope_confirmation_required",
+            )
+        preview = self.external_authorization_preview(campaign_id)
+        if max_submissions != len(preview["recipients"]):
+            raise CampaignOperationsError(
+                "submission scope must match the prepared recipient count",
+                "submission_scope_mismatch",
+            )
+        provider_ref = preview["provider"]["ref"]
+        grant = self.provider_operations.issue_campaign_grant(
+            provider_ref,
+            purpose=purpose,
+            expires_at=expires_at,
+            max_submissions=max_submissions,
+            prepared_set_hash=prepared_set_hash,
+        )
+        self.authorize(campaign_id)
+        bound = self.bind_external_authorization(
+            campaign_id,
+            authorization_ref=str(grant["authorization_ref"]),
+            purpose=purpose,
+            expires_at=expires_at,
+            recipient_set_hash=str(preview["recipient_set_hash"]),
+            prepared_set_hash=prepared_set_hash,
+        )
+        return {
+            **bound,
+            "scope": {
+                "recipients": len(preview["recipients"]),
+                "max_submissions": max_submissions,
+                "expires_at": expires_at,
+            },
+        }
+
     def control(self, campaign_id: str, action: str) -> dict[str, Any]:
         if action == "pause":
             status = self.store.get_campaign(campaign_id)["status"]

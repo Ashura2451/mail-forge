@@ -368,6 +368,14 @@ class CampaignExternalAuthorizationInput(BaseModel):
     prepared_set_hash: str = Field(min_length=32, max_length=128)
 
 
+class CampaignExternalAuthorizationPrepareInput(BaseModel):
+    purpose: str = Field(min_length=1, max_length=500)
+    expires_at: str
+    max_submissions: int = Field(ge=1, le=3)
+    prepared_set_hash: str = Field(min_length=32, max_length=128)
+    confirm_exact_scope: bool = False
+
+
 class CampaignGrantInput(BaseModel):
     campaign_id: str = Field(min_length=1, max_length=120)
     purpose: str = Field(min_length=1, max_length=500)
@@ -3815,6 +3823,21 @@ def create_app(
             )
         except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
             return _error(400, getattr(error, "code", "external_authorization_failed"), str(error))
+
+    @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepare-external-authorization")
+    async def prepare_external_authorization(
+        campaign_id: str, payload: CampaignExternalAuthorizationPrepareInput
+    ):
+        try:
+            return runtime.campaign_operations.prepare_external_authorization(
+                campaign_id, **payload.model_dump()
+            )
+        except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
+            return _error(
+                400,
+                getattr(error, "code", "external_authorization_prepare_failed"),
+                str(error),
+            )
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/execute-external")
     async def execute_external_campaign(campaign_id: str):

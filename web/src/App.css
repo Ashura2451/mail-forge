@@ -193,6 +193,8 @@ tr[tabindex] { cursor:pointer; }
 .file-drop { display:grid; gap:8px; padding:18px; border:1px dashed #9bb7b2; border-radius:8px; background:#f5fbf8; color:var(--teal); cursor:pointer; }
 .file-drop input[type='file'] { padding:0; border:0; background:transparent; }
 .preview-box { display:flex; align-items:center; gap:12px; margin-top:16px; padding:13px; border:1px solid #a9d4cd; border-radius:8px; background:var(--teal-soft); color:var(--teal); }
+.campaign-preview-panel > section.preview-box { display:none; }
+.external-provider .action-dock button:nth-child(3),.external-provider .action-dock button:nth-child(4) { display:none; }
 .preview-box strong { font-size:14px; }
 .preview-box span { color:var(--muted); font-size:12px; }
 .notice,.error,.loading { display:flex; align-items:center; gap:10px; margin:0 clamp(24px,5vw,72px) 12px; padding:11px 13px; border-radius:7px; font-size:13px; }

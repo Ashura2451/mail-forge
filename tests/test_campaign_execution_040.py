@@ -158,27 +158,15 @@ def test_external_campaign_authorization_binds_prepared_identity_without_contact
         assert record["external_access"] is False
         assert record["recipients"] == ["one@sandbox.example.com", "two@sandbox.example.com"]
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
-        grant = client.post(
-            "/api/v1/providers/external-provider/campaign-grants",
+        bound = client.post(
+            f"/api/v1/campaigns/{campaign}/prepare-external-authorization",
             headers=headers,
             json={
-                "campaign_id": campaign,
                 "purpose": "MAILFORGE-041 bounded synthetic campaign",
                 "expires_at": expires,
                 "max_submissions": 2,
                 "prepared_set_hash": record["prepared_set_hash"],
-            },
-        )
-        assert grant.status_code == 200, grant.text
-        bound = client.post(
-            f"/api/v1/campaigns/{campaign}/authorize-external",
-            headers=headers,
-            json={
-                "authorization_ref": grant.json()["authorization_ref"],
-                "purpose": "MAILFORGE-041 bounded synthetic campaign",
-                "expires_at": expires,
-                "recipient_set_hash": record["recipient_set_hash"],
-                "prepared_set_hash": record["prepared_set_hash"],
+                "confirm_exact_scope": True,
             },
         )
         assert bound.status_code == 200, bound.text
