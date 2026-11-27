@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -104,10 +105,11 @@ class ListComparisonService:
                 "comparison input exceeds the local processing limit", "input_limit"
             )
         emails: list[str] = []
+        metadata_by_email: dict[str, dict[str, Any]] = {}
         invalid = 0
         raw_values = 0
         try:
-            for _position, raw, _metadata in iter_structured_records(
+            for _position, raw, metadata in iter_structured_records(
                 path, max_bytes=MAX_COMPARISON_BYTES
             ):
                 raw_values += 1
@@ -119,11 +121,18 @@ class ListComparisonService:
                     normalized = normalize_email(candidate)
                     if validate_email(normalized).valid:
                         emails.append(normalized)
+                        metadata_by_email.setdefault(normalized, metadata)
                     else:
                         invalid += 1
         except (OSError, InputLimitError) as error:
             raise ListComparisonError(str(error), "input_invalid") from error
-        return self._from_emails(emails, path.name, invalid=invalid, raw_values=raw_values)
+        return self._from_emails(
+            emails,
+            path.name,
+            invalid=invalid,
+            raw_values=raw_values,
+            metadata=metadata_by_email,
+        )
 
     def _read_saved_list(self, list_id: str) -> dict[str, Any]:
         with self.store.connect() as connection:
@@ -131,11 +140,23 @@ class ListComparisonService:
         if exists is None:
             raise ListComparisonError("saved list was not found", "list_not_found")
         rows = self.store.list_contacts(list_id)
-        return self._from_emails((row["normalized_email"] for row in rows), f"saved list:{list_id}")
+        metadata = {
+            row["normalized_email"]: json.loads(row["metadata_json"] or "{}") for row in rows
+        }
+        return self._from_emails(
+            (row["normalized_email"] for row in rows),
+            f"saved list:{list_id}",
+            metadata=metadata,
+        )
 
     @staticmethod
     def _from_emails(
-        emails: Iterable[str], source: str, *, invalid: int = 0, raw_values: int | None = None
+        emails: Iterable[str],
+        source: str,
+        *,
+        invalid: int = 0,
+        raw_values: int | None = None,
+        metadata: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         records = list(emails)
         unique = set(records)
@@ -149,6 +170,7 @@ class ListComparisonService:
             "unique_count": len(unique),
             "duplicate_count": max(0, len(records) - len(unique)),
             "invalid_count": invalid,
+            "metadata": metadata or {},
         }
 
     def _successful_history(self, campaign_ids: Sequence[str]) -> set[str]:
@@ -207,7 +229,12 @@ class ListComparisonService:
             )
         reference_names = ", ".join(item["source"] for item in references) or "none"
         results = [
-            {"email": email, "classification": classification, "source": main["source"]}
+            {
+                "email": email,
+                "classification": classification,
+                "source": main["source"],
+                "metadata": main.get("metadata", {}).get(email, {}),
+            }
             for email in ordered
         ]
         return {

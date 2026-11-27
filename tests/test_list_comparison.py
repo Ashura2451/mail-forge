@@ -51,6 +51,40 @@ def test_file_comparison_uses_csv_address_column_and_keeps_row_data_out_of_error
     assert [item["email"] for item in result["results"]] == ["alice@example.com"]
 
 
+def test_comparison_result_handoff_preserves_associated_row_data(tmp_path: Path) -> None:
+    with TestClient(
+        create_app(tmp_path / "comparison-handoff.sqlite3", allowed_hosts={"testserver"})
+    ) as client:
+        csrf = client.get("/api/v1/session").json()["csrf_token"]
+        headers = {"x-mailforge-csrf": csrf}
+        result = client.post(
+            "/api/v1/list-comparison/preview",
+            headers=headers,
+            files={
+                "main": (
+                    "main.csv",
+                    b"email,name\nalice@example.com,Alice\n",
+                    "text/csv",
+                )
+            },
+            data={"operation": "subtract", "campaign_ids": "[]", "reference_list_ids": "[]"},
+        ).json()
+        handoff = client.post(
+            "/api/v1/list-comparison/handoff",
+            headers=headers,
+            json={"results": result["results"]},
+        )
+        assert handoff.status_code == 200, handoff.text
+        list_id = handoff.json()["list"]["id"]
+        readback = client.post(
+            "/api/v1/list-comparison/preview",
+            headers=headers,
+            data={"main_list_id": list_id, "operation": "subtract"},
+        )
+        assert readback.status_code == 200
+        assert readback.json()["results"][0]["metadata"]["fields"]["name"] == "Alice"
+
+
 def test_saved_list_comparison_does_not_include_prepared_but_unsent_history(tmp_path: Path) -> None:
     store = CampaignStore(tmp_path / "mailforge.sqlite3")
     main_list = store.create_list("Main")

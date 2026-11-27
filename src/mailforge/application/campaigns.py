@@ -242,6 +242,26 @@ class CampaignService:
                 )
         return self.import_candidates(candidates, list_id)
 
+    def import_comparison_results(
+        self, results: Iterable[dict[str, object]], list_id: str
+    ) -> dict[str, int]:
+        candidates: list[ContactCandidate] = []
+        for position, item in enumerate(results, 1):
+            normalized = item.get("email")
+            if not isinstance(normalized, str) or not validate_email(normalized).valid:
+                continue
+            metadata = item.get("metadata")
+            candidates.append(
+                ContactCandidate(
+                    normalized_email=normalize_email(normalized),
+                    original_input=normalized,
+                    source_file="list-comparison-result",
+                    source_record_position=position,
+                    metadata=metadata if isinstance(metadata, dict) else {},
+                )
+            )
+        return self.import_candidates(candidates, list_id)
+
     def add_suppression(
         self,
         email: str,

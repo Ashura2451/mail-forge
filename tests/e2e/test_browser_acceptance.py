@@ -138,6 +138,12 @@ def test_sorted_result_moves_into_compare_without_export(local_page) -> None:
     page.get_by_role("main").get_by_role("button", name="Compare lists", exact=True).click()
     page.get_by_role("heading", name="Comparison result").wait_for()
     assert page.get_by_text("alice@example.com").is_visible()
+    page.get_by_role("main").get_by_role("button", name="Send this result").click()
+    page.wait_for_url("**/send?list_id=*")
+    page.get_by_text("Using the selected sorted result from this local workspace.").wait_for()
+    page.get_by_role("main").get_by_role("button", name="Review this send").dispatch_event("click")
+    page.get_by_text("Recipient set and message prepared").wait_for()
+    page.goto(f"{base}/sort", wait_until="networkidle")
     page.get_by_role("navigation", name="Main navigation").get_by_role(
         "button", name="Sort email", exact=True
     ).click()

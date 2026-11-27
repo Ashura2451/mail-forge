@@ -93,6 +93,11 @@ class ListHandoffInput(BaseModel):
     name: str | None = Field(default=None, max_length=120)
 
 
+class ComparisonHandoffInput(BaseModel):
+    results: list[dict[str, Any]] = Field(min_length=1, max_length=250_000)
+    name: str | None = Field(default=None, max_length=120)
+
+
 class ContactUpdateInput(BaseModel):
     display_name: str | None = Field(default=None, max_length=240)
     metadata: dict[str, Any] | None = None
@@ -1828,6 +1833,32 @@ def create_app(
             media_type="text/csv",
             headers={"content-disposition": 'attachment; filename="mailforge-comparison.csv"'},
         )
+
+    @app.post(f"{API_PREFIX}/list-comparison/handoff")
+    async def list_comparison_handoff(payload: ComparisonHandoffInput):
+        try:
+            result_hash = hashlib.sha256(
+                json.dumps(payload.results, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            description = f"List comparison result {result_hash}"
+            existing = _query(
+                runtime.store,
+                "SELECT id, name, description FROM lists WHERE description = ? LIMIT 1",
+                (description,),
+            )
+            if existing:
+                return {"list": existing[0], "reused": True}
+            name = payload.name.strip() if payload.name else ""
+            name = name or f"Comparison result {result_hash[:8]}"
+            list_id = runtime.store.create_list(name, description)
+            imported = runtime.campaigns.import_comparison_results(payload.results, list_id)
+            return {
+                "list": {"id": list_id, "name": name, "description": description},
+                "reused": False,
+                **imported,
+            }
+        except (KeyError, OSError, ValueError, sqlite3.IntegrityError) as error:
+            return _error(400, "comparison_handoff_failed", str(error))
 
     @app.post(f"{API_PREFIX}/list-tools/jobs")
     async def create_list_tools_job(
