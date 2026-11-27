@@ -33,7 +33,7 @@ from mailforge.application.campaign_operations import (
     CampaignOperationsService,
 )
 from mailforge.application.campaigns import CampaignService
-from mailforge.application.ingest import iter_raw_values
+from mailforge.application.ingest import iter_structured_records
 from mailforge.application.list_comparison import ListComparisonError, ListComparisonService
 from mailforge.application.list_processing import ListProcessingError, ListProcessingService
 from mailforge.application.local_application import (
@@ -897,7 +897,7 @@ def _upload_preview(upload: UploadFile) -> tuple[list[ContactCandidate], dict[st
         invalid = 0
         duplicate = 0
         source_position = 0
-        for value in iter_raw_values(Path(handle.name)):
+        for _record_position, value, metadata in iter_structured_records(Path(handle.name)):
             source_position += 1
             extracted = extract_addresses(value)
             if not extracted:
@@ -918,7 +918,7 @@ def _upload_preview(upload: UploadFile) -> tuple[list[ContactCandidate], dict[st
                         original_input=item,
                         source_file=upload.filename or "browser-import",
                         source_record_position=source_position,
-                        metadata={},
+                        metadata=metadata,
                     )
                 )
     return candidates, {

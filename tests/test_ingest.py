@@ -2,7 +2,11 @@ import json
 
 import pytest
 
-from mailforge.application.ingest import InputLimitError, collect_unique_addresses
+from mailforge.application.ingest import (
+    InputLimitError,
+    collect_unique_addresses,
+    iter_structured_records,
+)
 
 
 @pytest.mark.parametrize(
@@ -25,3 +29,12 @@ def test_oversized_input_is_rejected_before_processing(tmp_path):
     path.write_text("a@example.com", encoding="utf-8")
     with pytest.raises(InputLimitError):
         collect_unique_addresses(path, max_bytes=1)
+
+
+def test_csv_structured_records_preserve_row_fields_without_header_candidates(tmp_path):
+    path = tmp_path / "input.csv"
+    path.write_text("email,name\nalice@example.com,Alice\n", encoding="utf-8")
+
+    assert list(iter_structured_records(path)) == [
+        (2, "alice@example.com", {"fields": {"email": "alice@example.com", "name": "Alice"}})
+    ]

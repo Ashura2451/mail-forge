@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from mailforge.application.ingest import InputLimitError, iter_raw_values
+from mailforge.application.ingest import InputLimitError, iter_structured_records
 from mailforge.application.sorting import EmailSorter, SortConfig
 from mailforge.domain.email import extract_addresses, normalize_email, validate_email
 from mailforge.domain.sorting import DNSMode
@@ -122,7 +122,9 @@ class ListProcessingService:
         samples: list[str] = []
         invalid = duplicates = values = 0
         try:
-            for raw in iter_raw_values(path, max_bytes=MAX_UPLOAD_BYTES):
+            for _position, raw, _metadata in iter_structured_records(
+                path, max_bytes=MAX_UPLOAD_BYTES
+            ):
                 values += 1
                 extracted = extract_addresses(raw)
                 if not extracted:

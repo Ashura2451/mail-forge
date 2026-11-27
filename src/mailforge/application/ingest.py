@@ -72,6 +72,46 @@ def iter_raw_values(path: Path, *, max_bytes: int = 16 * 1024 * 1024) -> Iterato
         yield from handle
 
 
+def iter_structured_records(
+    path: Path, *, max_bytes: int = 1_073_741_824
+) -> Iterator[tuple[int, str, dict[str, Any]]]:
+    """Yield source rows with bounded associated fields for sorting."""
+
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise InputLimitError(f"input is {size} bytes; maximum is {max_bytes}")
+    if path.suffix.lower() == ".csv":
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            reader = csv.reader(handle)
+            first_row = next(reader, None)
+            if first_row is None:
+                return
+            if not any(
+                "email" in str(value).lower() or "address" in str(value).lower()
+                for value in first_row
+            ):
+                yield 1, "\n".join(first_row), {}
+                for position, row in enumerate(reader, 2):
+                    yield position, "\n".join(row), {}
+                return
+            handle.seek(0)
+            for position, row in enumerate(csv.DictReader(handle), 2):
+                fields = {
+                    str(key): str(value)[:10_000]
+                    for key, value in row.items()
+                    if key and value is not None
+                }
+                address_values = [
+                    value
+                    for key, value in fields.items()
+                    if "email" in key.lower() or "address" in key.lower()
+                ]
+                yield position, "\n".join(address_values or fields.values()), {"fields": fields}
+        return
+    for position, raw in enumerate(iter_raw_values(path, max_bytes=max_bytes), 1):
+        yield position, raw, {}
+
+
 def iter_normalized_addresses(path: Path, **kwargs: Any) -> Iterator[str]:
     """Yield valid normalized addresses in source order."""
 

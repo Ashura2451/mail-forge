@@ -40,8 +40,9 @@ def test_multi_source_structured_results_and_quarantine_reconcile(tmp_path):
         "duplicate",
         "accepted",
     ]
-    assert records[0]["source_file"] == str(first)
-    assert records[-1]["source_file"] == str(second)
+    assert records[0]["source_file"] == first.name
+    assert records[-1]["source_file"] == second.name
+    assert "/" not in records[0]["source_file"]
     assert ReasonCode.INVALID_SYNTAX.value in records[1]["diagnostic_reason_codes"]
     assert records[2]["deduplication_disposition"] == "duplicate"
     assert result.quarantine_path is not None
@@ -52,6 +53,24 @@ def test_multi_source_structured_results_and_quarantine_reconcile(tmp_path):
     assert summary["counts"]["unique_valid"] == 2
     assert summary["counts"]["duplicates_removed"] == 1
     assert summary["counts"]["quarantined"] == 1
+
+
+def test_csv_sort_preserves_associated_fields_in_structured_results(tmp_path):
+    source = tmp_path / "input.csv"
+    source.write_text("email,name\nalice@example.com,Alice\n", encoding="utf-8")
+
+    result = EmailSorter(make_config(tmp_path)).sort_file(source, resume=False)
+
+    records = [
+        json.loads(line)
+        for line in result.structured_results_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 1
+    assert records[0]["processing_disposition"] == "accepted"
+    assert records[0]["metadata"]["associated_data"]["fields"] == {
+        "email": "alice@example.com",
+        "name": "Alice",
+    }
 
 
 def test_dry_run_profile_writes_explainable_preview_without_legacy_outputs(tmp_path):

@@ -14,7 +14,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from mailforge.application.ingest import InputLimitError, iter_raw_values
+from mailforge.application.ingest import InputLimitError, iter_structured_records
 from mailforge.domain.email import extract_addresses, normalize_email, validate_email
 from mailforge.infrastructure.campaign_store import CampaignStore
 
@@ -107,7 +107,9 @@ class ListComparisonService:
         invalid = 0
         raw_values = 0
         try:
-            for raw in iter_raw_values(path, max_bytes=MAX_COMPARISON_BYTES):
+            for _position, raw, _metadata in iter_structured_records(
+                path, max_bytes=MAX_COMPARISON_BYTES
+            ):
                 raw_values += 1
                 candidates = extract_addresses(raw)
                 if not candidates:

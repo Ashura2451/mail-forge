@@ -234,6 +234,9 @@ class CampaignService:
                             "validation": record.get("validation_result", {}),
                             "classification": record.get("classification_result", {}),
                             "rule_version": record.get("rule_version"),
+                            "associated_data": record.get("metadata", {}).get(
+                                "associated_data", {}
+                            ),
                         },
                     )
                 )

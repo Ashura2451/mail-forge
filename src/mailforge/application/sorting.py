@@ -19,7 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from mailforge.application.ingest import InputLimitError, iter_raw_values
+from mailforge.application.ingest import (
+    InputLimitError,
+    iter_raw_values,
+    iter_structured_records,
+)
 from mailforge.application.local_application import default_data_directory
 from mailforge.domain.email import (
     classify_address,
@@ -203,6 +207,14 @@ class InputReader:
         for position, raw in InputReader.iter_records(path, max_bytes=max_bytes):
             for candidate in extract_addresses(raw):
                 yield (position, candidate) if with_positions else candidate
+
+    @staticmethod
+    def iter_emails_with_metadata(
+        path: str | Path, *, max_bytes: int = 1_073_741_824
+    ) -> Iterator[tuple[int, str, dict[str, Any]]]:
+        for position, raw, metadata in iter_structured_records(Path(path), max_bytes=max_bytes):
+            for candidate in extract_addresses(raw):
+                yield position, candidate, metadata
 
     @staticmethod
     def iter_records(
@@ -745,21 +757,25 @@ class EmailSorter:
                 ):
                     quarantine_handle.write(payload + "\n")
 
-            def iter_candidates() -> Iterator[tuple[Path, int, str]]:
+            def iter_candidates() -> Iterator[tuple[Path, int, str, dict[str, Any]]]:
                 if len(sources) == 1:
-                    for source_record_position, candidate in InputReader.iter_emails(
-                        source, max_bytes=self.config.max_bytes, with_positions=True
+                    for (
+                        source_record_position,
+                        candidate,
+                        metadata,
+                    ) in InputReader.iter_emails_with_metadata(
+                        source, max_bytes=self.config.max_bytes
                     ):
-                        yield source, source_record_position, candidate
+                        yield source, source_record_position, candidate, metadata
                     return
                 for source_path in sources:
-                    for source_record_position, raw_value in InputReader.iter_records(
+                    for source_record_position, raw_value, metadata in iter_structured_records(
                         source_path, max_bytes=self.config.max_bytes
                     ):
                         for candidate in extract_addresses(raw_value):
-                            yield source_path, source_record_position, candidate
+                            yield source_path, source_record_position, candidate, metadata
 
-            for source_path, source_record_position, raw in iter_candidates():
+            for source_path, source_record_position, raw, associated_data in iter_candidates():
                 if skip_remaining > 0:
                     skip_remaining -= 1
                     continue
@@ -786,13 +802,14 @@ class EmailSorter:
                         ProcessingResult(
                             original_input=raw,
                             normalized_address=normalized,
-                            source_file=str(source_path),
+                            source_file=source_path.name,
                             source_record_position=source_record_position,
                             validation_result={"valid": False, "reason": validation.reason},
                             classification_result={},
                             deduplication_disposition="not_evaluated",
                             diagnostic_reason_codes=(ReasonCode.INVALID_SYNTAX.value,),
                             processing_disposition=ProcessingDisposition.REJECTED,
+                            metadata={"associated_data": associated_data},
                         )
                     )
                     continue
@@ -808,13 +825,14 @@ class EmailSorter:
                         ProcessingResult(
                             original_input=raw,
                             normalized_address=normalized,
-                            source_file=str(source_path),
+                            source_file=source_path.name,
                             source_record_position=source_record_position,
                             validation_result={"valid": True, "reason": "ok"},
                             classification_result={},
                             deduplication_disposition="duplicate",
                             diagnostic_reason_codes=(ReasonCode.DUPLICATE.value,),
                             processing_disposition=ProcessingDisposition.DUPLICATE,
+                            metadata={"associated_data": associated_data},
                         )
                     )
                     continue
@@ -903,7 +921,7 @@ class EmailSorter:
                             has_subaddress,
                             ProcessingDisposition.ACCEPTED.value,
                             ";".join(reason_codes),
-                            _csv_safe(str(source_path), enabled=self.config.formula_safe_csv),
+                            _csv_safe(source_path.name, enabled=self.config.formula_safe_csv),
                             source_record_position,
                         ]
                     )
@@ -912,7 +930,7 @@ class EmailSorter:
                     ProcessingResult(
                         original_input=raw,
                         normalized_address=normalized,
-                        source_file=str(source_path),
+                        source_file=source_path.name,
                         source_record_position=source_record_position,
                         validation_result={"valid": True, "reason": "ok"},
                         classification_result={
@@ -929,7 +947,11 @@ class EmailSorter:
                         diagnostic_reason_codes=tuple(reason_codes),
                         dns_evidence_status=dns_evidence_status,
                         processing_disposition=ProcessingDisposition.ACCEPTED,
-                        metadata={"profile": self.config.profile, "dry_run": dry_run},
+                        metadata={
+                            "profile": self.config.profile,
+                            "dry_run": dry_run,
+                            "associated_data": associated_data,
+                        },
                     )
                 )
                 if self.config.progress_every and position % self.config.progress_every == 0:

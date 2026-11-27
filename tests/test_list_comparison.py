@@ -32,6 +32,25 @@ def test_file_comparison_normalizes_deduplicates_and_preserves_invalid_count(
     assert result["non_destructive"] is True
 
 
+def test_file_comparison_uses_csv_address_column_and_keeps_row_data_out_of_errors(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main.csv"
+    reference = tmp_path / "reference.csv"
+    main.write_text(
+        "email,name\nalice@example.com,Alice\nbob@example.com,Bob\n",
+        encoding="utf-8",
+    )
+    reference.write_text("email,name\nbob@example.com,Old Bob\n", encoding="utf-8")
+
+    result = ListComparisonService(CampaignStore(tmp_path / "structured.sqlite3")).compare_files(
+        main, [reference], operation="subtract"
+    )
+
+    assert result["counts"]["main_invalid"] == 0
+    assert [item["email"] for item in result["results"]] == ["alice@example.com"]
+
+
 def test_saved_list_comparison_does_not_include_prepared_but_unsent_history(tmp_path: Path) -> None:
     store = CampaignStore(tmp_path / "mailforge.sqlite3")
     main_list = store.create_list("Main")
@@ -82,6 +101,28 @@ def test_web_comparison_endpoint_accepts_multiple_files_without_persistence_side
 
     assert response.status_code == 200
     assert [item["email"] for item in response.json()["results"]] == ["alice@example.com"]
+
+
+def test_list_tools_preview_preserves_csv_row_boundaries(tmp_path: Path) -> None:
+    with TestClient(
+        create_app(tmp_path / "preview.sqlite3", allowed_hosts={"testserver", "127.0.0.1"})
+    ) as client:
+        csrf = client.get("/api/v1/session").json()["csrf_token"]
+        response = client.post(
+            "/api/v1/list-tools/preview",
+            headers={"x-mailforge-csrf": csrf},
+            files={
+                "file": (
+                    "recipients.csv",
+                    b"email,name\nalice@example.com,Alice\n",
+                    "text/csv",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] == 1
+    assert response.json()["invalid"] == 0
 
 
 def test_sorted_result_handoff_reuses_the_canonical_saved_list_authority(tmp_path: Path) -> None:
