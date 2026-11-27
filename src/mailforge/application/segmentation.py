@@ -592,13 +592,18 @@ class SegmentationService:
                 "SELECT definition_hash FROM segment_revisions WHERE id = ?",
                 (expected_revision_id,),
             ).fetchone()
-            if current_revision is not None and current_revision["definition_hash"] == definition_hash:
+            if (
+                current_revision is not None
+                and current_revision["definition_hash"] == definition_hash
+            ):
                 connection.execute(
                     "UPDATE segments SET description = COALESCE(?, description), updated_at = ?, updated_by = ? WHERE id = ?",
                     (description, now, actor, segment_id),
                 )
                 result = _row_dict(segment)
-                result["description"] = description if description is not None else segment["description"]
+                result["description"] = (
+                    description if description is not None else segment["description"]
+                )
                 result["updated_at"] = now
                 result["revision"] = _row_dict(current_revision)
                 result["revisions"] = [_row_dict(current_revision)]
@@ -1018,27 +1023,50 @@ class SegmentationService:
             for position, row in enumerate(rows, start=1):
                 counts["records"] += 1
                 email_key = next(
-                    (key for key, field_id in mappings.items() if field_id == "contact.email"), "email"
+                    (key for key, field_id in mappings.items() if field_id == "contact.email"),
+                    "email",
                 )
                 email = row.get(email_key) or row.get("email")
                 if not isinstance(email, str):
                     invalid.append(
                         {"row": position, "field": email_key, "reason": "valid email is required"}
                     )
-                    self.store.record_import_batch_row(batch_id, row_number=position, contact_id="", created_contact=False, membership_added=False, before_contact={}, after_contact={}, attribute_changes=[])
+                    self.store.record_import_batch_row(
+                        batch_id,
+                        row_number=position,
+                        contact_id="",
+                        created_contact=False,
+                        membership_added=False,
+                        before_contact={},
+                        after_contact={},
+                        attribute_changes=[],
+                    )
                     continue
                 normalized = normalize_email(email)
                 if not validate_email(normalized).valid:
                     invalid.append(
                         {"row": position, "field": email_key, "reason": "valid email is required"}
                     )
-                    self.store.record_import_batch_row(batch_id, row_number=position, contact_id="", created_contact=False, membership_added=False, before_contact={}, after_contact={}, attribute_changes=[])
+                    self.store.record_import_batch_row(
+                        batch_id,
+                        row_number=position,
+                        contact_id="",
+                        created_contact=False,
+                        membership_added=False,
+                        before_contact={},
+                        after_contact={},
+                        attribute_changes=[],
+                    )
                     continue
                 contact = self.store.contact_by_email(normalized)
-                before_contact = {
-                    "display_name": contact["display_name"],
-                    "metadata_json": contact["metadata_json"],
-                } if contact else {}
+                before_contact = (
+                    {
+                        "display_name": contact["display_name"],
+                        "metadata_json": contact["metadata_json"],
+                    }
+                    if contact
+                    else {}
+                )
                 contact_id = self.store.upsert_contact(
                     normalized,
                     display_name=str(row.get("display_name", "")),
@@ -1063,7 +1091,9 @@ class SegmentationService:
                         continue
                     raw = row.get(source_key)
                     try:
-                        value = _parse_value(field["field_type"], raw, f"row {position} {source_key}")
+                        value = _parse_value(
+                            field["field_type"], raw, f"row {position} {source_key}"
+                        )
                         if field["controlled_values_json"] and value not in json.loads(
                             field["controlled_values_json"]
                         ):
@@ -1074,44 +1104,117 @@ class SegmentationService:
                         invalid.append({"row": position, "field": source_key, "reason": str(error)})
                         continue
                     columns = _value_columns(field["field_type"], value)
-                    value_column = next(key for key, column_value in columns.items() if column_value is not None)
+                    value_column = next(
+                        key for key, column_value in columns.items() if column_value is not None
+                    )
                     with self.store.transaction(immediate=True) as connection:
                         prior_conflict = connection.execute(
                             "SELECT id, disposition FROM contact_attribute_conflicts WHERE source_ref=? AND source_record_position=? AND contact_id=? AND field_id=?",
                             (source_ref, position, contact_id, field["id"]),
                         ).fetchone()
                         if prior_conflict is not None and not overwrite:
-                            conflicts.append({"id": prior_conflict["id"], "row": position, "field": field["machine_key"], "disposition": prior_conflict["disposition"]})
+                            conflicts.append(
+                                {
+                                    "id": prior_conflict["id"],
+                                    "row": position,
+                                    "field": field["machine_key"],
+                                    "disposition": prior_conflict["disposition"],
+                                }
+                            )
                             continue
                         existing = connection.execute(
                             "SELECT * FROM contact_attribute_values WHERE contact_id=? AND field_id=?",
                             (contact_id, field["id"]),
                         ).fetchone()
-                        old_value = self._stored_value(existing, field["field_type"]) if existing else None
+                        old_value = (
+                            self._stored_value(existing, field["field_type"]) if existing else None
+                        )
                         if existing and old_value != value:
                             disposition = "overwritten" if overwrite else "preserved"
-                            conflict_id = prior_conflict["id"] if prior_conflict is not None else str(uuid.uuid4())
+                            conflict_id = (
+                                prior_conflict["id"]
+                                if prior_conflict is not None
+                                else str(uuid.uuid4())
+                            )
                             if prior_conflict is None:
                                 connection.execute(
                                     "INSERT INTO contact_attribute_conflicts(id, contact_id, field_id, source_kind, source_ref, source_record_position, existing_summary, incoming_summary, disposition, reason, actor, created_at) VALUES (?, ?, ?, 'structured', ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    (conflict_id, contact_id, field["id"], source_ref, position, str(old_value)[:MAX_COMPARISON], str(value)[:MAX_COMPARISON], disposition, "explicit overwrite" if overwrite else "populated value preserved", actor, utc_now()),
+                                    (
+                                        conflict_id,
+                                        contact_id,
+                                        field["id"],
+                                        source_ref,
+                                        position,
+                                        str(old_value)[:MAX_COMPARISON],
+                                        str(value)[:MAX_COMPARISON],
+                                        disposition,
+                                        "explicit overwrite"
+                                        if overwrite
+                                        else "populated value preserved",
+                                        actor,
+                                        utc_now(),
+                                    ),
                                 )
                             else:
-                                connection.execute("UPDATE contact_attribute_conflicts SET disposition=?,reason=?,actor=? WHERE id=?", (disposition, "explicit overwrite", actor, conflict_id))
-                            conflicts.append({"id": conflict_id, "row": position, "field": field["machine_key"], "disposition": disposition})
+                                connection.execute(
+                                    "UPDATE contact_attribute_conflicts SET disposition=?,reason=?,actor=? WHERE id=?",
+                                    (disposition, "explicit overwrite", actor, conflict_id),
+                                )
+                            conflicts.append(
+                                {
+                                    "id": conflict_id,
+                                    "row": position,
+                                    "field": field["machine_key"],
+                                    "disposition": disposition,
+                                }
+                            )
                             if not overwrite:
                                 counts["preserved"] += 1
                                 continue
-                        attribute_changes.append({"field_id": field["id"], "value_column": value_column, "before": old_value, "after": value})
+                        attribute_changes.append(
+                            {
+                                "field_id": field["id"],
+                                "value_column": value_column,
+                                "before": old_value,
+                                "after": value,
+                            }
+                        )
                         if existing is not None and old_value != value:
                             connection.execute(
                                 "UPDATE contact_attribute_values SET value_type=?, text_value=?, number_value=?, boolean_value=?, date_value=?, datetime_value=?, source_kind='structured', source_ref=?, source_record_position=?, provenance_json='{}', updated_at=?, updated_by=? WHERE contact_id=? AND field_id=?",
-                                (field["field_type"], columns["text_value"], columns["number_value"], columns["boolean_value"], columns["date_value"], columns["datetime_value"], source_ref, position, utc_now(), actor, contact_id, field["id"]),
+                                (
+                                    field["field_type"],
+                                    columns["text_value"],
+                                    columns["number_value"],
+                                    columns["boolean_value"],
+                                    columns["date_value"],
+                                    columns["datetime_value"],
+                                    source_ref,
+                                    position,
+                                    utc_now(),
+                                    actor,
+                                    contact_id,
+                                    field["id"],
+                                ),
                             )
                         elif existing is None:
                             connection.execute(
                                 "INSERT INTO contact_attribute_values(contact_id, field_id, value_type, text_value, number_value, boolean_value, date_value, datetime_value, source_kind, source_ref, source_record_position, provenance_json, created_at, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'structured', ?, ?, '{}', ?, ?, ?)",
-                                (contact_id, field["id"], field["field_type"], columns["text_value"], columns["number_value"], columns["boolean_value"], columns["date_value"], columns["datetime_value"], source_ref, position, utc_now(), utc_now(), actor),
+                                (
+                                    contact_id,
+                                    field["id"],
+                                    field["field_type"],
+                                    columns["text_value"],
+                                    columns["number_value"],
+                                    columns["boolean_value"],
+                                    columns["date_value"],
+                                    columns["datetime_value"],
+                                    source_ref,
+                                    position,
+                                    utc_now(),
+                                    utc_now(),
+                                    actor,
+                                ),
                             )
                             counts["filled"] += 1
                 after_row = self.store.get_contact(contact_id)
@@ -1122,7 +1225,10 @@ class SegmentationService:
                     created_contact=contact is None,
                     membership_added=bool(membership_result["changed"]),
                     before_contact=before_contact,
-                    after_contact={"display_name": after_row["display_name"], "metadata_json": after_row["metadata_json"]},
+                    after_contact={
+                        "display_name": after_row["display_name"],
+                        "metadata_json": after_row["metadata_json"],
+                    },
                     attribute_changes=attribute_changes,
                 )
             self.store.finish_import_batch(batch_id, status="completed")

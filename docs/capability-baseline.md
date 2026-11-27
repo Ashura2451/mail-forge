@@ -1,39 +1,18 @@
 # Mailforge capability baseline
 
-> Current scope is governed by MAILFORGE-044: Sort email, Compare lists, and
-> Send. The older rows in this historical baseline describe prior product
-> slices and must not be used to plan new Data Studio, automation, integration,
-> reporting, email-standards, inbound, mailbox, or programmable work. See
-> [the completion report](MAILFORGE-044-COMPLETION.md) and
-> [the owner acceptance guide](MAILFORGE-044-OWNER-ACCEPTANCE.md).
+This is the concise current capability register. Superseded implementation
+records are intentionally removed from the maintained documentation tree;
+repository history retains their provenance.
 
-This is an evidence register, not a parity claim. Status reflects repository
-inspection and synthetic checks through inbound operations task
-`MAILFORGE-INBOUND-OPERATIONS-020`. The detailed product claim ledger
-is [`docs/product/capability-atlas.md`](product/capability-atlas.md); this
-historical baseline remains for continuity.
+| Capability | Current status | Canonical owner | Boundary |
+| --- | --- | --- | --- |
+| Sort email | Implemented and qualified | `application/sorting.py`, `list_processing.py`, `domain/email.py` | Provider/domain classification, validation, dedupe, and export are local; DNS is optional and offline by default. |
+| Compare lists | Implemented and qualified | `application/list_comparison.py` | Read-only file, saved-list, and selected successful-history comparisons; no mutation. |
+| Send and message preparation | Implemented and qualified | `campaign_operations.py`, `message_studio.py`, `outbound.py` | Pasted/file recipients, plain text, HTML, personalization, immutable preparation, policy checks, and controlled execution. |
+| SMTP provider boundary | Implemented and loopback-qualified | `provider_operations.py`, `providers.py`, `infrastructure/smtp.py` | SMTP only; credentials are runtime references; external access remains explicitly gated. |
+| Recipient policy and recovery | Implemented locally | `campaigns.py`, `eligibility.py`, `policy.py`, `local_application.py` | SQLite is authoritative; backup, restore, lifecycle, suppression, and migration boundaries remain active. |
+| Legacy migration | Narrow compatibility | `mailer_compat.py`, `legacy_migration.py`, schema migration SQL | Explicit caller-supplied inputs only; retired runners and legacy directories are absent. |
 
-| Capability | Status | Current evidence | Intended behavior / acceptance direction | Source |
-| --- | --- | --- | --- | --- |
-| Contacts and lists | Implemented locally / synthetic | Canonical SQLite contacts, lists, source provenance, duplicate-safe import, correction, export, and deactivation | Real-data ownership and migration approval remain external | `CampaignStore`, policy-authority tests |
-| Campaign composition | Existing but unverified | MAILER has campaign config and file templates | Typed campaign model with safe preview and approval boundary | MAILER sources; packet |
-| Campaign operations workspace | Implemented locally / loopback qualified / external campaign ready pending approval | Shared `CampaignOperationsService`, browser/API draft/update/preflight/schedule/control/execute/drilldown/export paths, durable audience preparation, canonical prepared MIME dispatch through a trusted loopback SMTP fixture, bounded external campaign grant binding, automatic continuation, and focused tests | The exact external grant/recipient set is prepared for Business Owner approval; no external campaign operation has occurred; production capacity and backup/restore workload reconciliation remain separate qualifications | `docs/campaign-operations.md`, `tests/test_campaign_operations.py`, `tests/test_campaign_execution_040.py` |
-| Personalization and templates | Existing but unverified | Jinja/spintax rendering exists; synthetic template test passes | Deterministic preview, bounded rendering, escaping and template diagnostics | MAILER sources; test suite |
-| Sending | Partial | MAILER has SMTP delivery logic; foundation blocks ordinary and future-authorized legacy execution | Phase-aware authorization, outcome classification, reconciliation, no delivery guarantee claims | MAILER sources; SMTP boundary tests |
-| Incoming mail acquisition | RETIRED PRODUCT SCOPE | EML/MBOX and synthetic delivery-event evidence remain available only where needed for bounce, complaint, unsubscribe, suppression, and reporting workflows; IMAP/POP3 acquisition and mailbox synchronization are retired | Do not qualify mailbox access; preserve historical records and schema compatibility | MAILFORGE-039 scope consolidation; no external mailbox operation |
-| Incoming RFC5322/MIME parsing | Implemented and tested | Bounded stdlib parser, encoded headers/charsets, safe text/HTML previews, DSN/ARF evidence, basename-safe attachment metadata, malformed/oversize quarantine | Broaden corpus and operational limits with provider samples | inbound parser/workbench tests; specs 0003 and 0010 |
-| Inbound interpretation/correlation | Implemented synthetically | Human/automatic/DSN/complaint/unsubscribe/unknown classification; exact/probable/ambiguous/unmatched correlation; trust and review separation | Authentication/DKIM/SPF/DMARC and provider-specific trust remain pending | inbound service tests |
-| Inbound actions and suppression integration | Implemented for trusted synthetic exact evidence | Idempotent reviewable actions; hard bounce/complaint/unsubscribe suppression uses existing SQLite authority; temporary DSNs do not suppress | Operator policy, retention, and real mailbox acknowledgment remain pending | inbound service/store tests |
-| Delivery-event evidence | Implemented locally / synthetic | SQLite search/filter/detail, rule validation and idempotent runs, safe extraction/export, bounce/complaint/unsubscribe classification, suppression integration, and reporting | Mailbox synchronization, reply/forward drafts, mailbox mutation, and external automatic replies are retired | `InboundService`, `InboundOperations`, policy/reporting tests; MAILFORGE-039 |
-| Data Studio | Implemented locally / connected synthetically | `DataStudioService`, schema 17 recipe/preview/job API and CLI, React workbench, TXT/CSV/TSV/JSON/JSONL inputs/exports, typed transforms, filters, computed fields, dedupe, provider catalog classification, aggregation, multi-source set operations and joins, pinned revisions, atomic artifacts, explicit contact import, Message Studio recipient snapshots, workflow action, and trusted built-in contract | Controlled real-provider readiness and imported-code extensions remain out of scope; broad connected recovery and accessibility evidence remain follow-up | `docs/data-studio.md`, `tests/test_data_studio.py`, `tests/test_data_studio_completion.py`, API/browser tests |
-| Scheduling and automation | Existing but unverified | MAILER loops daily and has sending-window settings | Durable schedule, pause/resume, cancellation, recovery, and audit evidence | MAILER sources |
-| Database integration | Implemented locally / synthetic | CampaignStore schema 17 provides SQLite contacts, typed attributes, lists, immutable segment revisions, audience snapshots, policy evidence/preferences/declarations, lifecycle plans, campaigns, outbound, inbound workbench/rules/drafts, provider accounts/grants/OAuth/test evidence, visual workflow revisions/runs, Data Studio recipes/revisions/jobs/artifacts/consumer provenance/recipient snapshots/worker leases, events, transactional pacing, backup/restore, and migration rehearsal | SQLite is authoritative only for explicitly supplied modern databases; real-data migration requires approval | Campaign, segmentation, provider, policy, outbound, inbound, workflow, Data Studio, pacing, and migration tests; specs 0001–0010 |
-| Audience segmentation | Implemented locally / synthetic | Typed custom fields, bounded structured import, static membership history, parameterized nested AST evaluation, previews, immutable revisions, eligibility recheck, and recurring snapshots | No real recipient/provider data or external readiness is claimed | `tests/test_audience_segmentation.py`, web API acceptance, fixed-point boundaries, and local benchmark evidence |
-| Reporting and diagnostics | Implemented locally / synthetic | Versioned metric definitions, bounded timezone-aware comparison reports, campaign/provider/inbound/workflow/job drilldowns, deterministic insights, API/CLI parity, and safe JSON/CSV/HTML exports over canonical SQLite records | External qualification, quota, inbox, tracking, and hosted monitoring claims remain pending | `ReportingService`, `docs/operational-intelligence.md`, reporting/API tests; no live provider |
-| Desktop usability | Missing | No desktop UI or runtime found | Shared application services behind a future desktop interface | Repository inspection |
-| Data management | Partial | Checkpoints and flat state files exist; recovery contract is undocumented | Backup, restore, migration, retention, and tested rollback | Existing files; data-integrity review |
-| Security and recovery | Partial | Secrets use `.env` references; unsafe `eval` removed and SMTP is fail-closed | Secret-safe logs, import safety, authorization, recovery, and dependency review | Source inspection; tests |
-
-Competitor references supplied in the execution packet are domain context only;
-they were not used to declare parity. Any capability that conflicts with the
-approved user-provided SMTP model requires an explicit Business Owner decision.
+Historical SQLite tables may remain in existing user databases so records can
+be preserved and migrated safely. They are not created for new databases and
+have no active browser, CLI, worker, or provider authority.

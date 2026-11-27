@@ -1,16 +1,11 @@
 import json
 import smtplib
-import subprocess
-import sys
 from datetime import UTC, datetime
-from email.message import Message
-from importlib.metadata import files as installed_files
 
 import pytest
 
 from mailforge.application.campaigns import (
     CampaignService,
-    run_synthetic_demo,
 )
 from mailforge.application.mailer_compat import (
     load_legacy_configuration,
@@ -22,9 +17,6 @@ from mailforge.application.outbound import OutboundService, PreparedSMTPTranspor
 from mailforge.application.policy import PolicyEngine
 from mailforge.domain.campaign import AttemptOutcome, DeliveryState
 from mailforge.domain.outbound import (
-    AttachmentSpec,
-    ScheduleMode,
-    ScheduleSpec,
     SenderPolicy,
 )
 from mailforge.infrastructure.campaign_store import CampaignStore

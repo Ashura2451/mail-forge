@@ -6,9 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from tests.test_provider_interoperability import _SMTPServer, _ServerContext, _certificate
 from mailforge.application.outbound import OutboundService
-from mailforge.application.providers import ProviderService
 from mailforge.domain.campaign import DeliveryState
 from mailforge.domain.outbound import ScheduleMode, ScheduleSpec, SenderPolicy, TemplateDefinition
 from mailforge.domain.provider import ProviderKind, ProviderProfile, TLSMode
@@ -16,6 +14,7 @@ from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.infrastructure.credentials import MappingCredentialResolver
 from mailforge.infrastructure.smtp import LiveSendGate
 from mailforge.interfaces.web import create_app
+from tests.test_provider_interoperability import _certificate, _ServerContext, _SMTPServer
 
 
 def _csrf(client: TestClient) -> dict[str, str]:
@@ -30,18 +29,29 @@ def test_campaign_executes_complete_loopback_smtp_lifecycle(monkeypatch, tmp_pat
     monkeypatch.setenv("MAILFORGE_LOCAL_CAPTURE_ENDPOINT", f"127.0.0.1:{smtp.server_address[1]}")
     monkeypatch.setenv("MAILFORGE_CAPTURE_PASSWORD", "synthetic-capture-password")
 
-    with _ServerContext(smtp), TestClient(
-        create_app(
-            tmp_path / "campaign.sqlite3",
-            allowed_hosts={"testserver", "127.0.0.1", "localhost", "::1"},
-        )
-    ) as client:
+    with (
+        _ServerContext(smtp),
+        TestClient(
+            create_app(
+                tmp_path / "campaign.sqlite3",
+                allowed_hosts={"testserver", "127.0.0.1", "localhost", "::1"},
+            )
+        ) as client,
+    ):
         headers = _csrf(client)
-        list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Loopback"}).json()["id"]
+        list_id = client.post("/api/v1/lists", headers=headers, json={"name": "Loopback"}).json()[
+            "id"
+        ]
         imported = client.post(
             f"/api/v1/imports?list_id={list_id}",
             headers=headers,
-            files={"file": ("audience.txt", b"one@sandbox.example.com\ntwo@sandbox.example.com\n", "text/plain")},
+            files={
+                "file": (
+                    "audience.txt",
+                    b"one@sandbox.example.com\ntwo@sandbox.example.com\n",
+                    "text/plain",
+                )
+            },
         )
         assert imported.status_code == 200
         provider = client.post(
@@ -76,14 +86,22 @@ def test_campaign_executes_complete_loopback_smtp_lifecycle(monkeypatch, tmp_pat
         )
         assert campaign.status_code == 200, campaign.text
         campaign_id = campaign.json()["id"]
-        assert client.post(f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={}).status_code == 200
+        assert (
+            client.post(
+                f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={}
+            ).status_code
+            == 200
+        )
         pacing = client.put(
             f"/api/v1/campaigns/{campaign_id}/schedule",
             headers=headers,
             json={"mode": "immediate", "timezone": "UTC", "pacing_seconds": 0.05},
         )
         assert pacing.status_code == 200, pacing.text
-        assert client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code == 200
+        assert (
+            client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code
+            == 200
+        )
         started = client.post(
             f"/api/v1/campaigns/{campaign_id}/execute",
             headers=headers,
@@ -116,11 +134,19 @@ def test_external_campaign_authorization_binds_prepared_identity_without_contact
         )
     ) as client:
         headers = _csrf(client)
-        list_id = client.post("/api/v1/lists", headers=headers, json={"name": "External"}).json()["id"]
+        list_id = client.post("/api/v1/lists", headers=headers, json={"name": "External"}).json()[
+            "id"
+        ]
         imported = client.post(
             f"/api/v1/imports?list_id={list_id}",
             headers=headers,
-            files={"file": ("audience.txt", b"one@sandbox.example.com\ntwo@sandbox.example.com\n", "text/plain")},
+            files={
+                "file": (
+                    "audience.txt",
+                    b"one@sandbox.example.com\ntwo@sandbox.example.com\n",
+                    "text/plain",
+                )
+            },
         )
         assert imported.status_code == 200
         provider = client.post(
@@ -151,7 +177,12 @@ def test_external_campaign_authorization_binds_prepared_identity_without_contact
                 "text": "Hello {{ email }}",
             },
         ).json()["id"]
-        assert client.post(f"/api/v1/campaigns/{campaign}/prepare", headers=headers, json={}).status_code == 200
+        assert (
+            client.post(
+                f"/api/v1/campaigns/{campaign}/prepare", headers=headers, json={}
+            ).status_code
+            == 200
+        )
         preview = client.get(f"/api/v1/campaigns/{campaign}/external-authorization-preview")
         assert preview.status_code == 200, preview.text
         record = preview.json()
@@ -206,9 +237,7 @@ def test_canonical_campaign_pacing_handles_provider_rate_policy(monkeypatch, tmp
             metadata={"sandbox": {"key": "local_capture_only", "mode": "capture_only"}},
         )
     )
-    account = store.upsert_provider_account(
-        "pacing-loopback", sender_email="sender@sandbox.example.com"
-    )
+    store.upsert_provider_account("pacing-loopback", sender_email="sender@sandbox.example.com")
     list_id = store.create_list("pacing audience")
     for index in range(3):
         contact = store.upsert_contact(
@@ -226,7 +255,12 @@ def test_canonical_campaign_pacing_handles_provider_rate_policy(monkeypatch, tmp
         template_ref="pacing-template",
         audience_list_id=list_id,
     )
-    sender = SenderPolicy(ref="pacing-policy", provider="loopback", email="sender@sandbox.example.com", per_domain_per_minute=60)
+    sender = SenderPolicy(
+        ref="pacing-policy",
+        provider="loopback",
+        email="sender@sandbox.example.com",
+        per_domain_per_minute=60,
+    )
     with _ServerContext(smtp):
         service.prepare_campaign(
             campaign_id,
@@ -249,10 +283,11 @@ def test_canonical_campaign_pacing_handles_provider_rate_policy(monkeypatch, tmp
                 break
             retry_at = store.campaign_next_automatic_at(campaign_id)
             if retry_at:
-                wait = max(0.0, (datetime.fromisoformat(retry_at) - datetime.now(UTC)).total_seconds())
+                wait = max(
+                    0.0, (datetime.fromisoformat(retry_at) - datetime.now(UTC)).total_seconds()
+                )
                 time.sleep(wait + 0.01)
         assert report is not None
     assert report.counts[DeliveryState.ACCEPTED.value] == 3
     assert report.counts.get(DeliveryState.PERMANENT_FAILURE.value, 0) == 0
     assert len(smtp.received_messages) == 3
-

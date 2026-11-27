@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from mailforge.application.ingest import InputLimitError, iter_raw_values
+from mailforge.application.local_application import default_data_directory
 from mailforge.domain.email import (
     classify_address,
     extract_addresses,
@@ -92,29 +93,39 @@ class SortConfig:
 
     @classmethod
     def from_environment(cls, **overrides: Any) -> SortConfig:
-        values: dict[str, Any] = {}
-        if os.getenv("MSORTER_RESULTS_DIR"):
-            values["results_dir"] = Path(os.environ["MSORTER_RESULTS_DIR"])
-        if os.getenv("MSORTER_CONFIG_DIR"):
-            values["config_dir"] = Path(os.environ["MSORTER_CONFIG_DIR"])
-        if os.getenv("MSORTER_LOG_DIR"):
-            values["log_dir"] = Path(os.environ["MSORTER_LOG_DIR"])
-        if os.getenv("MSORTER_CHECKPOINT_PATH"):
-            values["checkpoint_path"] = Path(os.environ["MSORTER_CHECKPOINT_PATH"])
-        if os.getenv("MSORTER_DNS_MODE"):
-            values["dns_mode"] = DNSMode(os.environ["MSORTER_DNS_MODE"].lower())
-        if os.getenv("MSORTER_PROFILE"):
-            values["profile"] = os.environ["MSORTER_PROFILE"].lower()
+        workspace = Path(
+            os.environ.get("MAILFORGE_SORT_DATA_DIR", default_data_directory() / "sorting")
+        )
+        values: dict[str, Any] = {
+            "results_dir": workspace / "results",
+            "config_dir": workspace / "config",
+            "log_dir": workspace / "logs",
+            "checkpoint_path": workspace / "checkpoint.json",
+        }
         for name, field_name, converter in (
-            ("MSORTER_DNS_TIMEOUT", "dns_timeout", float),
-            ("MSORTER_DNS_RETRY_COUNT", "dns_retry_count", int),
-            ("MSORTER_DNS_CONCURRENCY", "dns_concurrency", int),
-            ("MSORTER_CHECKPOINT_INTERVAL", "checkpoint_interval", int),
-            ("MSORTER_MAX_BYTES", "max_bytes", int),
+            ("MAILFORGE_DNS_TIMEOUT", "dns_timeout", float),
+            ("MAILFORGE_DNS_RETRY_COUNT", "dns_retry_count", int),
+            ("MAILFORGE_DNS_CONCURRENCY", "dns_concurrency", int),
+            ("MAILFORGE_CHECKPOINT_INTERVAL", "checkpoint_interval", int),
+            ("MAILFORGE_MAX_BYTES", "max_bytes", int),
         ):
             if os.getenv(name):
                 values[field_name] = converter(os.environ[name])
         values.update(overrides)
+        packaged_config = Path(__file__).resolve().parents[1] / "resources" / "sorting"
+        config_dir = Path(values["config_dir"])
+        values.setdefault(
+            "providers_path",
+            config_dir / "providers.json"
+            if (config_dir / "providers.json").is_file()
+            else packaged_config / "providers.json",
+        )
+        values.setdefault(
+            "disposable_path",
+            config_dir / "disposable.json"
+            if (config_dir / "disposable.json").is_file()
+            else packaged_config / "disposable.json",
+        )
         return cls(**values)
 
     @classmethod

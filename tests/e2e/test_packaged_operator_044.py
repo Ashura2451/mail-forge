@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_provider_interoperability import _ServerContext, _SMTPServer, _certificate
 from tests.e2e.test_browser_acceptance import _chromium_executable, _wait_for_server
+from tests.test_provider_interoperability import _certificate, _ServerContext, _SMTPServer
 
 playwright = pytest.importorskip("playwright.sync_api")
 

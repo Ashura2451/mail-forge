@@ -41,7 +41,9 @@ def test_canonical_sorting_input_validation_checkpoint_and_provider_routing(tmp_
     assert list(InputReader.iter_emails(json_path)) == ["C@example.com"]
     assert list(InputReader.iter_emails(jsonl)) == ["D@example.com"]
 
-    providers = Path(__file__).parents[1] / "MSORTER" / "config" / "providers.json"
+    providers = (
+        Path(__file__).parents[1] / "src" / "mailforge" / "resources" / "sorting" / "providers.json"
+    )
     assert ProviderCatalog(providers).route("x@gmail.com")[0] == "gmail.txt"
     validator = AddressValidator()
     assert validator.validate("x@example.com")[0]

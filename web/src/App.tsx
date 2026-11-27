@@ -7,7 +7,6 @@ type Action = (work: () => Promise<unknown>, message: string) => void
 
 const primaryNav = [['dashboard', 'Home'], ['sort', 'Sort email'], ['compare', 'Compare lists'], ['send', 'Send'], ['history', 'History']]
 const utilityNav = [['accounts', 'Email accounts'], ['saved', 'Saved lists'], ['settings', 'Settings']]
-const legacyRoutes: Record<string, string> = { 'list-tools': 'sort', campaigns: 'send', activity: 'history', providers: 'accounts', contacts: 'saved', 'message-studio': 'send', maintenance: 'settings', 'data-studio': 'settings', 'data-connections': 'settings', automations: 'settings', functions: 'settings', integrations: 'settings', inbound: 'settings', reports: 'history', 'email-standards': 'settings', segments: 'saved' }
 const pageMeta: Record<string, { label: string, description: string }> = {
   dashboard: { label: 'Home', description: 'Choose a task and keep the important local status in view.' },
   sort: { label: 'Sort email', description: 'Clean, classify, and export addresses without an account or a send.' },
@@ -21,7 +20,7 @@ const pageMeta: Record<string, { label: string, description: string }> = {
 
 function viewFromPath(pathname: string) {
   const segment = pathname.replace(/^\/+/, '').split('/')[0]
-  return pageMeta[segment] ? segment : legacyRoutes[segment] || 'dashboard'
+  return pageMeta[segment] ? segment : 'dashboard'
 }
 function apiPath(view: string) { return ({ dashboard: '/dashboard', sort: '/list-tools/jobs', compare: '/list-comparison/history', send: '/campaigns', history: '/campaigns', accounts: '/providers', saved: '/lists', settings: '/runtime' } as Record<string, string>)[view] || '/dashboard' }
 

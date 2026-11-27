@@ -1,143 +1,43 @@
 # Mailforge product capability atlas
 
-**Baseline date:** 2026-10-29
-**Scope:** repository-backed product capability claims and the next dependency-aware roadmap.
-**Canonical interpretation:** “implemented” means the named local code path
-and evidence exist. It does not mean provider approval, inbox delivery,
-production operations, or business authorization.
+## Current product
 
-**MAILFORGE-044 final consolidation:** The historical capability rows below
-are retained as decision history, but they are not current product scope. The
-current product is Sort email, Compare lists, and Send, plus optional accounts,
-saved lists, history, recovery, and shared recipient-policy infrastructure.
-Standalone Data Studio, data connections, automation, integration hub, email
-standards, reporting, inbound/mailbox, and programmable surfaces are retired.
-Their active routes and implementation authorities were removed; durable
-historical records and schema compatibility remain only where required for
-preservation and migration. See [`MAILFORGE-044 completion`](../MAILFORGE-044-COMPLETION.md).
+Mailforge is a local email utility, not a hosted marketing, CRM, mailbox,
+automation, integration, or analytics platform.
 
-## Status vocabulary
-
-- **IMPLEMENTED AND VERIFIED** — local behavior is covered by focused tests and
-  a runnable path.
-- **IMPLEMENTED BUT NOT FULLY VERIFIED** — code and tests exist, but provider,
-  corpus, scale, or operational qualification is missing.
-- **SIMULATED** — deliberately fake, parser-backed, or synthetic; never a live
-  side effect.
-- **PARTIAL** — a useful slice exists but important behavior is absent.
-- **NOT IMPLEMENTED** — no supported implementation exists.
-- **EXTERNAL INTEGRATION PENDING** — the local seam exists; an external system
-  or credentialed adapter is not approved or connected.
-- **DECISION REQUIRED** — product or operational ownership is undefined.
-- **BLOCKED** — a prerequisite prevents safe implementation.
-
-## Capability matrix
-
-| ID / domain | Status | Current owner and evidence | Dependencies | Security / operations | Acceptance and next action |
-| --- | --- | --- | --- | --- | --- |
-| 01. Source ingestion and extraction | **IMPLEMENTED AND VERIFIED** | `application.ingest`, `domain.email`; TXT/CSV/JSON/JSONL and bounded JSONL tests | Local readable source; shared normalization | Size/depth limits; no network required | Ingest valid/invalid/duplicate records with provenance; extend corpus only with synthetic fixtures. |
-| 02. Sorting, validation, dedupe, classification | **IMPLEMENTED AND VERIFIED** | `application.sorting`, `domain.sorting`; parity and enhancement tests | 01; provider/disposable catalogs; optional DNS | DNS is offline by default; outputs are deterministic and formula-safe | Run package and legacy adapter flows against synthetic sources; keep `docs/sorting-capability-matrix.md` current. |
-| 03. Contact identity, lists, and provenance | **IMPLEMENTED LOCALLY / MIGRATION QUALIFICATION PARTIAL** | `infrastructure.campaign_store`, `application.campaigns`, browser Contacts workbench; contact detail/edit/deactivate, provenance, search/pagination, bulk membership, export, durable import ledger, reconciliation, and conservative reversal | SQLite schema; normalized address; existing typed fields and import authorities | Optimistic edits, append-only provenance, lifecycle history, conflict-safe before/after state, and bounded exports; real-data migration remains open | Run an approved production-shaped migration rehearsal and retention decision; no real-recipient migration is claimed. |
-| 04. Consent, preferences, and suppression | **IMPLEMENTED LOCALLY / POLICY WORKFLOW PARTIAL** | `application.eligibility`, `application.campaigns`, schema 5 evidence/preferences/declarations/lifecycle tables; browser policy panel and policy-readiness explanation | 03; operator/business policy and jurisdiction remain external | Imports and edits do not establish permission; withdrawal/suppression history remains durable; overlapping reasons are exposed in readiness | Qualify business policy, jurisdiction, retention, and real-provider trust before live sending. |
-| 05. Campaign lifecycle and durable state | **IMPLEMENTED AND VERIFIED** | `application.campaigns`, `domain.campaign`, `CampaignStore`; lifecycle/recovery/report tests | 03–04; SQLite transactions | Leases, transitions, ambiguous outcomes, and append-only events are durable | Run synthetic demo, pause/resume, backup/restore, and recovery; define production worker ownership later. |
-| 06. Templates, personalization, and content assets | **IMPLEMENTED LOCALLY / MESSAGE OPERATIONS PARTIAL** | `application.message_studio`, `custom_html`, `templates`, `composition`; structured/custom HTML modes, revision history, duplicate/archive, undo/redo with local draft recovery, field discovery/fallbacks, bounded multi-recipient previews, conditional/layout editing, versioned diagnostics, recipient attachment mapping/conflict checks, prepared MIME inspection/export in campaign workspace, source preservation, and proof tests | Contact context; SQLite message revisions/assets; typed segment revisions | No remote fetch; ZIP/path/active-content controls; context-safe merge fields; imported source remains untrusted; no direct-send bypass; attachment mappings are published-revision/contact scoped; diagnostics distinguish confirmed, advisory, and unknown client behavior | Local browser/package workflows, exact MIME identity, and 2,000-message synthetic preparation are qualified; external-client rendering corpus, broad visual WYSIWYG parity, and independent packaged review remain pending. |
-| 07. Outbound preparation and policy | **IMPLEMENTED AND VERIFIED** | `application.outbound`, `policy`, `scheduling`; prepared MIME, schedule, reservation, and concurrency tests | 03–06; SQLite authority | Suppression recheck, sender capacity, hashes, leases, no ambiguity retry | Keep prepared bytes reviewable; qualify a provider adapter only after 08 decisions. |
-| 08. SMTP/provider delivery | **IMPLEMENTED LOCALLY / EXTERNAL SANDBOX QUALIFICATION CLOSED** | `application.outbound`, `application.providers`, `application.provider_operations`, `infrastructure.smtp`; SMTP-only provider capability registry, process-gated loopback capture classification, runtime-only credential references, server-issued profile-bound grants, durable transport-start boundary, pre-transport recovery, phase evidence, loopback TLS tests, and the bounded MAILFORGE-041 campaign qualification | 04, 07; dedicated sandbox credentials; bounded Business Owner authorization | Tokens and refreshed material stay runtime-only; the completed sandbox run used approved synthetic identities, a bounded submission budget, 1 MiB limit, verified TLS, expiring grants, and no automatic retry of uncertain outcomes | The Business Owner confirmed all three fresh paced campaign messages in Mailtrap. The grant is exhausted; this is sandbox evidence, not recipient delivery or unrestricted provider readiness. |
-| 09. Inbound acquisition and parsing | **RETIRED PRODUCT SCOPE / DELIVERY-EVENT COMPATIBILITY ONLY** | Historical `application.inbound`, `inbound_parser`, and EML/MBOX evidence remain for bounce, complaint, unsubscribe, suppression, and reporting workflows; IMAP/POP3 acquisition and mailbox synchronization are retired | Outbound delivery-event records and existing schema/data compatibility | No mailbox retrieval, UID/UIDL synchronization, or mailbox operator workflow is supported; historical records are preserved | Do not qualify IMAP/POP3; retain bounded local delivery-event parsing and trust separation. |
-| 10. Bounce, complaint, unsubscribe, and reply handling | **IMPLEMENTED BUT NOT FULLY VERIFIED** | DSN/ARF/reply classification, correlation, review, shared suppression action, schema 12 workbench/rule/extraction/draft history, and policy-history tests | 04, 09; trust/authentication evidence | From/subject/MIME validity is not authentication; rule actions are bounded; automatic real actions are disabled | Qualify provider trust and verify per-recipient DSN and complaint cases against an approved corpus. |
-| 11. Analytics, tracking, and reporting | **IMPLEMENTED BUT NOT FULLY VERIFIED** | `application.reporting`, versioned metric registry, bounded SQLite aggregates, previous-period comparison, campaign/provider/inbound/workflow/job drilldowns, deterministic insights, API/CLI/browser Reports & Insights, and safe exports; focused synthetic tests | 05, 07; existing durable source records; larger workload measurement remains | No open/click beacon, inbox claim, recipient content in aggregates, or external analytics sink; accepted submission is not inbox delivery | Run connected browser acceptance and measured scale qualification; tracking and hosted analytics remain separate decisions. |
-| 12. Scheduling, automation, and workflows | **IMPLEMENTED BUT NOT FULLY VERIFIED** | `application.automation`, schema 8/10, versioned graph/revision API, Message Studio campaign references, and accessible Automation console; focused synthetic tests | 05, 07, 17; bounded in-process worker | UTC waits, immutable revisions, deduplication, step history, and no-live-network actions; local scale only | Run browser/restart/performance acceptance; hosted multi-user automation and real-provider actions remain out of scope. |
-| 13. Interfaces and operator experience | **IMPLEMENTED AND VERIFIED** | `interfaces.cli`, `interfaces.web`, `web/`; inbound search/rules/extraction/drafts, segmentation API/CLI/browser controls, compiled-serving, and Playwright desktop/narrow acceptance | Application services; local filesystem; FastAPI/React build | Loopback Host/origin/session/CSRF boundary; no multi-user or tenant model | Maintain the local console; hosted access, identity, and remote execution require separate approval. |
-| 14. Persistence, backup, restore, and migration | **IMPLEMENTED LOCALLY / PACKAGE AND FAILURE QUALIFICATION PARTIAL** | Versioned `CampaignStore` schema 28, including outbound proof records, profile-bound grants, transport-start boundary and abandoned provider-test recovery, durable import batches/row before-after evidence and conservative reversal, and typed attribute/segment/audience/message-studio/inbound-workbench/provider/automation/mailbox migrations, backup/restore, lifecycle planning, legacy rehearsal; SQLite tests | Schema versioning; local operator storage | Interrupted imports are fenced on restart; reversal never overwrites newer contact/policy changes; suppression/evidence/preference/provider/workflow/message/proof and mailbox history remain durable | Functional import/reversal and migration checks pass; package and synthetic workload are qualified locally, while production RPO/RTO, signing/notarization, and real-scale recovery remain unverified. |
-| 15. Security, integrations, and operations | **IMPLEMENTED LOCALLY / NOT FULLY QUALIFIED** | Secret-safe credential boundary, fail-closed SMTP gate, TLS verification, `KeychainCredentialResolver`, `OperationalAssuranceService`, durable health/incidents/jobs observations, stable single-runtime ownership, alias-safe backup/restore locking, and redacted diagnostic export | All domains; release and provider choices | Local health and incident evidence is durable and bounded; Keychain resolution fails closed when unavailable; provider trust, real quotas, hosted monitoring, signing, and production SLOs remain unverified | Local synthetic 032 scope is accepted; qualify signed/notarized Keychain continuity, measured workload limits, recovery objectives, provider observations, and an operator incident runbook. |
-| 16. Local browser application | **IMPLEMENTED AND VERIFIED** | `interfaces.web`, `web/src`, `docs/architecture-decision-013-local-web-application.md`, `docs/web-operational-acceptance-014.md`; API lifecycle, provider setup, campaign journey, restart, closure, responsive, and axe checks | 03–10, FastAPI/Uvicorn, React/TypeScript/Vite | Canonical workers remain local and supervised; compiled assets are packaged; browser closure does not own work; one local SQLite runtime owner | Hosted access, live provider qualification, multi-user identity, and remote execution remain separate decisions. |
-| 17. Audience segmentation | **IMPLEMENTED AND SYNTHETICALLY QUALIFIED** | `application.segmentation`, schema 7/28, `tests/test_audience_segmentation.py`, web API/CLI/browser controls, revisioned segment CRUD, bounded preview/readiness, and 1k/10k/100k evidence | Contacts/lists, eligibility, SQLite, local React console | Typed values are registry-bound and parameterized; unknown remains non-match; readiness is explanatory only and execution rechecks canonical eligibility; external data is not accessed | Policy, migration, concurrent-operation, and real-recipient qualification remain separate decisions. |
-| 18. Campaign operations workspace | **IMPLEMENTED LOCALLY / LOOPBACK QUALIFIED / EXTERNAL CAMPAIGN READY — GRANT BOUNDARY QUALIFIED** | `application.campaign_operations`, shared browser/API/CLI surfaces, draft CAS, preflight audience counts, audience/message preparation, proof binding, schedules, recurring child runs, pacing/backpressure, automatic continuation, operator pause/cancel fencing, duplicate/archive, exact-scope external grant preparation/binding, bounded provider-budget consumption, reconciliation, drilldowns, bounded exports, and packaged browser acceptance | Existing campaign, segmentation, Message Studio, outbound, provider, reporting, proof, and SQLite authorities; explicit informed operator authorization | No second campaign engine; external execution requires a server-issued campaign grant, profile fingerprint, exact prepared/recipient hashes, expiry, budget, and `MAILFORGE_ALLOW_LIVE_SEND=1`; uncertain outcomes stop the current external run and are never replayed | The packaged operator journey is qualified against a controlled loopback fixture and survives restart without duplicate capture. MAILFORGE-041 Mailtrap evidence is closed and its grant exhausted; external provider production readiness, capacity, and signed distribution remain unqualified. |
-| 19. Structured Data Studio | **IMPLEMENTED LOCALLY / CONNECTED SYNTHETICALLY** | `application.data_studio`, schema 17 recipes/revisions/jobs/artifacts/consumer provenance/recipient snapshots/worker leases, multi-source set operations and bounded joins, TXT/CSV/TSV/JSON/JSONL exports, contact import, Message Studio batch preparation, workflow action, provider catalog classification, and disabled-by-default trusted extension contract | Existing SQLite authority, provider catalog, local artifact storage | Bounded source reads, pinned revisions, atomic publication, source-row provenance, no arbitrary code or remote scripts | Controlled real-provider readiness and trusted external code extensions remain deferred; broad connected recovery/accessibility scenarios remain follow-up. |
-| 20. External data connections and snapshots | **IMPLEMENTED LOCALLY / CONNECTED SYNTHETICALLY** | `application.data_connections`, schema 18 connection profiles/events/snapshots, bounded read-only SQLite/PostgreSQL/XLSX adapters, checksummed JSONL artifacts, Data Studio handoff, browser/API/CLI parity, and disposable PostgreSQL TLS qualification | Existing SQLite authority, symbolic credential resolver, Data Studio and downstream Contacts/Message Studio/Campaign/Automation authorities | No source writes, arbitrary SQL, plaintext credentials, uncontrolled paths, macros, or remote workers; preview/schema/row/artifact bounds are explicit | Continue representative source-size measurement and native keychain/secret-store qualification; no universal database or spreadsheet compatibility claim. |
-| 21. Email standards and sender diagnostics | **IMPLEMENTED LOCALLY / CONNECTED SYNTHETICALLY** | `application.email_standards`, schema 21 identities/diagnostics/unsubscribe/DMARC records, bounded DNS/SPF/DKIM/DMARC and MIME checks, campaign preflight, browser/API/CLI/reporting, RFC 8058 fixture endpoint | Sender identity, Message Composer, Campaign Operations, Eligibility, Inbound trust boundary, Reporting, SQLite | DNS is opt-in; imported auth headers are untrusted; tokens are hashed and list-scoped; no provider acceptance, inbox, DKIM crypto, or live-send claim; campaign one-click is blocked until a signer exists | Continue provider-specific credentialed qualification and real deliverability work only through a separate release decision; local synthetic acceptance is complete. |
-| 22. Integration Hub | **IMPLEMENTED LOCALLY / CONNECTED SYNTHETICALLY** | `application.integration_hub`, schema 22 clients/events/subscriptions/deliveries, fixed-origin HTTP Data Connections, browser/API/CLI/reporting, Automation enrollment, signed webhook transport, focused synthetic tests, and 029 browser/package evidence | Data Connections, Automation, Reporting, credential resolver, CampaignStore | GET-only bounded acquisition; no plaintext tokens; explicit scopes; external observations remain untrusted; HMAC at-least-once delivery; no hosted callback, arbitrary proxy, or live-send path | Local browser/package acceptance is recorded; independent review, external provider qualification, public callbacks, secret-store adapters, signing/notarization, and production scale remain separate decisions. |
-| 23. Mailbox operations and conversations | **RETIRED PRODUCT SCOPE / HISTORICAL COMPATIBILITY ONLY** | Historical `application.mailbox_operations`, mailbox tables, conversation projections, and action records remain readable for migration compatibility; active provider capabilities, browser/API mailbox routes, and operator navigation return retired-scope state | Outbound delivery-event parsing, suppression, unsubscribe handling, and reporting remain active through their canonical authorities | No mailbox synchronization, IMAP/POP3 access, conversation management, or mailbox mutation is supported; no historical data is deleted by this consolidation | Do not measure product completeness against mailbox operations; preserve schema/data for compatibility and backup/restore. |
-| 24. External HTML template interoperability | **IMPLEMENTED LOCALLY / SYNTHETICALLY VERIFIED** | `application.custom_html`, `MessageStudioService`, custom HTML API/browser controls, bounded HTML/ZIP import/export, source-preserving revisions, diagnostics, local assets, SHA-256 asset binding, personalization, exact loopback MIME/proof binding, CSP preview, focused tests, browser journey, and packaged browser journey | Message Studio revisions/assets, SafeTemplateRenderer, MessageComposer, outbound proof, local browser/package | No arbitrary execution or external fetch; CSS escape/resource-function rejection; context-safe final URL validation; immutable ID+digest asset binding; archive containment and active-content rejection; preview is CSP-constrained and sandboxed; source and MIME are integrity-bound | External-client compatibility, real-provider qualification, qualifying cross-model approval, and signing/notarization remain pending. |
-
-## Ownership map
-
-| Concern | Canonical modern owner | Compatibility or external boundary |
+| Workflow | Outcome | Evidence |
 | --- | --- | --- |
-| Address vocabulary | `src/mailforge/domain/email.py` | Legacy scripts call package helpers where migrated. |
-| Ingestion and sorting | `src/mailforge/application/ingest.py`, `sorting.py`, `interfaces/cli.py` | Preserved SORTER/MSORTER data/config/checkpoint/report paths; source wrappers retired. |
-| Campaign, policy, lifecycle, and inbound durable state | `src/mailforge/infrastructure/campaign_store.py` | Legacy MAILER files are not imported automatically. |
-| Content composition | `application/message_studio.py`, `templates.py`, `composition.py` | Legacy `MAILER` templates/config remain compatibility inputs; Message Studio owns new structured documents and revisions. |
-| Recipient eligibility and outbound policy/preparation | `application/eligibility.py`, `campaigns.py`, `policy.py`, `scheduling.py`, `outbound.py` | `infrastructure/smtp.py` is a transport boundary; `ProviderService` supplies configuration without becoming campaign authority. |
-| Delivery-event evidence | `application/inbound*.py`, `application/providers.py` | EML/MBOX and synthetic delivery-event parsing remain bounded compatibility inputs for bounce, complaint, unsubscribe, suppression, and reporting; IMAP/POP3 acquisition and mailbox synchronization are retired. |
-| Workflow orchestration | `application.automation.AutomationService`, schema 8, `interfaces.web`, `interfaces.cli` | Visual definitions are local orchestration only; campaign, eligibility, segmentation, and inbound authorities remain canonical. |
-| External source acquisition | `application.data_connections.DataConnectionsService`, schema 18, `interfaces.web`, `interfaces.cli` | SQLite/PostgreSQL/XLSX adapters are read-only acquisition boundaries; Data Studio owns transformation, SegmentationService owns Contacts, MessageStudioService owns content, CampaignService owns preparation, and AutomationService owns workflow execution. |
-| Integration clients, event observations, and webhooks | `application.integration_hub.IntegrationHubService`, schema 22, `interfaces.web`, `interfaces.cli` | Data Connections owns external reads; Automation owns workflow enrollment; Reporting owns aggregates; credential resolution owns secret values; outgoing delivery is durable at-least-once transport observation. |
-| Operator commands | `interfaces/cli.py` | Typer and script wrappers remain supported. |
+| Sort email | Classify providers/domains, validate, deduplicate, and export useful list artifacts. | Sorter regression, large-file workload, rendered browser checks. |
+| Compare lists | Compare files, saved lists, and selected successful submissions without mutation. | Comparison regression, large-file workload, rendered browser checks. |
+| Send | Prepare pasted/file recipients, HTML or text, optional personalization, controlled simulation, and loopback SMTP. | Campaign/message/provider regression, browser acceptance, packaged qualification. |
 
-## Competitor comparison
+## Shared architecture
 
-| Product family | Evidence-backed strength | Mailforge position |
-| --- | --- | --- |
-| Gammadyne Mailer | Broad desktop send/receive, merge, lists/databases, scheduling, throttling, tracking, bounce and automation controls | Mailforge intentionally targets outbound operations: local browser UX, preparation, durable synthetic state, delivery-event evidence, and automation exist; mailbox synchronization, real provider execution, tracking, and production automation do not. |
-| Mautic | Campaign workflows, lead nurturing, landing/forms, web tracking, analytics, integrations, API | A local structured Automation console and reports exist; no hosted behavioral marketing platform, landing/forms, web tracking, or public API service. |
-| ActiveCampaign | Multi-step automation, segmentation, CRM/integrations, A/B testing, reporting, webhooks/API | Local automation, segmentation, reporting, and signed webhook delivery exist; no CRM/ecommerce integration, A/B testing, external event tracking, or hosted dashboard/API. |
-| Brevo | Segments, consent groups, campaign/transactional/automation channels | Consent and segmentation are open product decisions; current suppression is local and explicit, not a hosted marketing platform. |
+`CampaignStore` remains the single SQLite authority. Python application
+services own ingestion, sorting, comparison, policy, campaigns, content,
+provider safety, SMTP transport, migration, backup, and recovery. FastAPI is a
+loopback-only boundary; the React console is a client of that boundary.
 
-## Gap register
+Typed recipient/list compatibility remains where it supports existing durable
+campaigns. It is not a separate operator product.
 
-| Gap | Blocking dependency | Risk if skipped | Exit evidence |
-| --- | --- | --- | --- |
-| Real recipient migration | Consent/identity/retention/rollback decision | Duplicate or unauthorized sends; unrecoverable state divergence | Rehearsal with synthetic production-shaped data and rollback proof. |
-| Live SMTP/provider adapter | Provider contract and phase-aware reconciliation | Duplicate delivery or false success after ambiguous DATA outcome | Loopback contract tests and two bounded Mailtrap SMTP submissions pass; dashboard inspection, broader provider evidence, and release gate remain. |
-| Mailbox acquisition | Retired outbound-only product scope | Expanding into mailbox-client behavior would dilute the authorized product purpose | No IMAP/POP3 implementation or qualification is required; preserve historical schema/data and delivery-event compatibility. |
-| Production scheduler/worker | Ownership, idempotency, supervision, recovery objectives | Lost or duplicated work | Failure-injected worker test and operational runbook. |
-| Consent/preferences | Business owner and jurisdiction | Compliance and reputational harm | Policy test matrix with audit/revocation behavior. |
-| Tracking/analytics | Privacy/retention and product decision | Unapproved personal data collection | Explicit opt-in design, event schema, retention test. |
-| Full visual HTML editing | Operators who need visual edits without source work | Existing custom source mode is editable and reusable; no visual WYSIWYG authority exists | Editor model, email-safe conversion, source fidelity and XSS boundary | Medium; separate product decision and spec required. |
-| HTML/CSS compatibility diagnostics | Operators need client-specific confidence before preparation | Bounded generic diagnostics exist; client matrix is not implemented | Approved client corpus and versioned rules | High; avoid unsupported universal claims; separate approval required. |
-| Personalized attachment workflows | Campaigns need recipient-specific files alongside imported designs | Existing structured recipient attachment mapping exists; custom UI/import mapping is not exposed | Asset policy, recipient mapping UX, proof binding | High privacy risk; separate approval required. |
-| External template migration | Operators need repeatable migration from legacy desktop/template systems | HTML plus local ZIP migration exists; provider-specific formats are not supported | Format inventory, ownership and conversion fidelity | Medium; separate migration scope. |
-| Sender identity diagnostics | Operators need to detect From/envelope/DKIM mismatches | Email Standards sender diagnostics exists locally | Provider and signing qualification | High; continue under existing standards/release gates. |
-| Pre-send content quality checks | Operators need actionable content warnings before preparation | Custom diagnostics cover safety/assets/basic compatibility; no broad quality scorer | Versioned rules, false-positive policy, accessibility corpus | Medium; do not infer deliverability or spam score. |
-| Native Windows packaging | Windows operators need a supported desktop package | macOS arm64 package only | Runtime, filesystem, signing/update approach | Medium; release decision required. |
-| Cross-platform credential security | Operators need durable secret storage across OSes | Local resolver/Keychain boundary is present; cross-platform qualification is incomplete | OS secret stores and recovery policy | High; release/security approval required. |
-| Installation and update continuity | Operators need safe upgrades without losing local state | macOS bundle and backup/restore exist; update continuity is not qualified | Installer, migration, rollback, signing | High; release approval required. |
-| UI/API/service boundary | Operator workflow and auth/tenant decision | Premature surface with no safe authorization model | Approved spec plus end-to-end authenticated workflow. |
-| Monitoring/deployment | Runtime target, SLOs, secret management | Silent failure and unsafe release | Health checks, structured metrics/logging, rollback rehearsal. |
+## Retired scope
 
-## Dependency-aware roadmap
+The following are removed from active source, routes, CLI, workers, tests,
+resources, and maintained documentation: Data Studio, external data
+connections, automation, Integration Hub, programmable extensions, email
+standards workspace, reporting workspace, inbound/mailbox operations, IMAP
+provider operations, and the former MAILER/SORTER/MSORTER runners.
 
-1. **Now — truth and guardrails:** keep the atlas, audit, boundary tests,
-   locked dependencies, synthetic tests, and fail-closed side-effect gates
-   green.
-2. **Next — policy qualification:** the local authority is implemented; qualify
-   business policy, jurisdiction, retention, provider trust, and approval
-   evidence. This unlocks safer production-shaped migration rehearsal but not
-   live sending by itself.
-3. **039 — outbound scope and controlled SMTP qualification:** retire mailbox
-   synchronization from the product boundary, then qualify the SMTP workflow
-   through the existing eligibility, proof, grant, transport, recovery, and
-   reporting authorities. Mailtrap sandbox acceptance remains synthetic and is
-   not recipient delivery.
-4. **Then — external release qualification:** deepen provider-specific SMTP
-   evidence only through a separately authorized release decision; no IMAP/POP3
-   or mailbox-client work is planned.
-5. **Then — operations:** choose CLI worker, desktop, or service topology;
-   add supervision, scheduling, monitoring, secret management, release gates,
-   and recovery objectives.
-6. **Now — product expansion:** audience segmentation, local automation,
-   reporting, and Integration Hub slices are implemented; tracking/analytics
-   and hosted UI/API surfaces remain separate decisions.
+Existing database tables and migration SQL for those areas may remain only as
+read/preservation compatibility for old user databases. Fresh databases do
+not create retired tables. No new implementation may depend on them.
 
-## Acceptance checklist
+## Owner and release boundaries
 
-- [x] Modern package ownership and legacy compatibility are explicitly mapped.
-- [x] Capability status is separated from provider or production readiness.
-- [x] Every row names evidence, dependency, security/operations concern, and
-  next acceptance action.
-- [x] Competitor comparison is based on official product documentation.
-- [x] Real recipients, credentials, SMTP, IMAP, and destructive cleanup remain
-  out of scope for this consolidation.
-- [x] The atlas links to the detailed sorting and MAILER inventories rather
-  than replacing their compatibility evidence.
+No real-recipient migration, external SMTP operation, inbox-delivery claim,
+hosted identity, signed distribution, or production capacity claim is implied.
+The practical acceptance procedure is
+[`MAILFORGE-044-OWNER-ACCEPTANCE.md`](../MAILFORGE-044-OWNER-ACCEPTANCE.md);
+the completion evidence is
+[`MAILFORGE-044-COMPLETION.md`](../MAILFORGE-044-COMPLETION.md).

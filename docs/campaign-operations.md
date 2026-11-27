@@ -1,56 +1,33 @@
 # Campaign operations
 
-Campaign Operations is the local operator workspace for creating, reviewing,
-preparing, scheduling, and supervising a campaign. It is a composition layer,
-not a second campaign engine: `CampaignService`, `SegmentationService`,
-`MessageStudioService`, `OutboundService`, `ProviderOperationsService`,
-`CampaignStore`, and `ReportingService` remain the authorities for lifecycle,
-eligibility, content, transport, accounts, durable records, and reporting.
+Campaign Operations is the shared authority behind the Send journey. It owns
+draft CAS updates, list-backed recipient selection, policy preflight, message
+preparation, schedule state, authorization, worker control, per-recipient
+evidence, exact-scope external authorization, and bounded exports. It is not a
+second persistence or sending engine.
 
 ## Boundaries
 
-- Campaigns are local drafts until an operator explicitly authorizes a
-  synthetic run.
-- Audience and published message revisions are pinned before preparation.
-- Provider accounts contribute configuration, readiness, pacing, and
-  concurrency facts; credentials and secret material never enter campaign
-  configuration or exports.
-- Schedules use IANA time zones and reject nonexistent local times. Ambiguous
-  local times require an explicit `fold`.
-- Pause, resume, cancel, preparation, and authorization are idempotent at the
-  operator-surface boundary. Temporary pre-submission restrictions persist as
-  automatic continuation boundaries for authorized campaigns, while an
-  operator pause remains a durable opt-out from that continuation. Ambiguous
-  and externally submitted deferred outcomes remain unresolved and are not
-  replayed automatically.
-- CSV/JSON exports are bounded, formula-safe, and exclude raw message bodies.
-- The local worker supports synthetic and trusted loopback execution. A
-  separate server-issued external campaign grant may select the same canonical
-  worker, but this document does not claim external provider qualification,
-  inbox delivery, or unrestricted live recipient sending.
+- Direct sending accepts pasted addresses or a supported file and creates
+  private local list/message records automatically.
+- Published message revisions and prepared recipient identities are immutable
+  for a run.
+- Simulation and controlled loopback SMTP require explicit authorization.
+- External authorization is a server-issued, expiring, exact-scope grant; the
+  browser review does not contact an external provider.
+- Ambiguous outcomes are durable and are never retried blindly.
+- Credentials stay behind the runtime credential resolver.
 
 ## Surfaces
 
-The browser API and CLI share `CampaignOperationsService`:
+The browser and CLI use the same application services for campaign creation,
+preparation, authorization, execution, pause/resume, history, recipients,
+attempts, and export. The active browser route is Send; historical campaign
+URLs are not navigation aliases.
 
-- `POST /api/v1/campaigns`, `PATCH /api/v1/campaigns/{id}`
-- `GET /api/v1/campaigns/{id}/workspace`
-- `POST /api/v1/campaigns/{id}/preflight`
-- `PUT /api/v1/campaigns/{id}/schedule`
-- prepare, authorize, synthetic, pause, resume, and cancel controls
-- exact-scope external authorization preparation and binding; the browser keeps
-  the server-issued reference internal and never asks the operator to copy it
-- bounded recipient/attempt drilldowns and JSON/CSV export
-- `mailforge campaign workspace|update|preflight|schedule|pause|resume|cancel|recipients|attempts|export`
+## Qualification
 
-The React console presents the same plan as an accessible responsive workspace:
-audience, content, sender, preflight findings, schedule, progress, recipients,
-attempts, controls, and the explicit no-network boundary.
-
-## Validation status
-
-The implementation is covered by focused service/API tests and the existing
-Python regression suite. Local browser automation, connected 48-step synthetic
-acceptance, independent post-fix review, measured render-failure rates, and
-backup/restore reconciliation remain follow-up evidence rather than claims of
-completion.
+Synthetic regression, rendered browser acceptance, controlled loopback SMTP,
+restart persistence, duplicate-send prevention, backup/restore, and outbound
+proof checks are maintained in the current test suite and owner guide. SMTP
+acceptance is not inbox delivery or production-provider readiness.

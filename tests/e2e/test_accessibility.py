@@ -37,7 +37,9 @@ def _wait_for_server(port: int) -> None:
     raise AssertionError("local Mailforge server did not start")
 
 
-def test_rationalized_console_routes_have_no_axe_critical_or_serious_findings(tmp_path: Path) -> None:
+def test_rationalized_console_routes_have_no_axe_critical_or_serious_findings(
+    tmp_path: Path,
+) -> None:
     executable = _chromium_executable()
     if executable is None:
         pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
@@ -51,7 +53,8 @@ def test_rationalized_console_routes_have_no_axe_critical_or_serious_findings(tm
     database = tmp_path / "accessibility.sqlite3"
     frontend = repo / "src" / "mailforge" / "web_assets"
     code = f"import uvicorn; from mailforge.interfaces.web import create_app; uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), host='127.0.0.1', port={port}, log_level='error')"
-    environment = os.environ.copy(); environment["PYTHONPATH"] = str(repo / "src")
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
     server = subprocess.Popen([sys.executable, "-c", code], env=environment)
     try:
         _wait_for_server(port)
@@ -61,9 +64,18 @@ def test_rationalized_console_routes_have_no_axe_critical_or_serious_findings(tm
             page.add_init_script(script=axe_source.read_text(encoding="utf-8"))
             for route in ("/", "/sort", "/compare", "/send", "/history", "/providers"):
                 page.goto(f"http://127.0.0.1:{port}{route}", wait_until="networkidle")
-                result = page.evaluate("""async () => await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } })""")
-                serious = [item for item in result["violations"] if item["impact"] in {"critical", "serious"}]
-                assert not serious, f"{route} has serious accessibility findings: {[{'id': item['id'], 'nodes': [node['html'] for node in item['nodes']]} for item in serious]}"
+                result = page.evaluate(
+                    """async () => await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } })"""
+                )
+                serious = [
+                    item
+                    for item in result["violations"]
+                    if item["impact"] in {"critical", "serious"}
+                ]
+                assert not serious, (
+                    f"{route} has serious accessibility findings: {[{'id': item['id'], 'nodes': [node['html'] for node in item['nodes']]} for item in serious]}"
+                )
             browser.close()
     finally:
-        server.terminate(); server.wait(timeout=5)
+        server.terminate()
+        server.wait(timeout=5)

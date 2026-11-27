@@ -354,7 +354,9 @@ def test_fresh_retry_preserves_checkpoint_when_results_are_not_empty(tmp_path):
     checkpoint_path = tmp_path / "checkpoint.json"
     Checkpoint(checkpoint_path).save(str(source), 1, 1)
     before = checkpoint_path.read_text(encoding="utf-8")
-    config = SortConfig(results_dir=results, checkpoint_path=checkpoint_path)
+    config = SortConfig(
+        results_dir=results, checkpoint_path=checkpoint_path, log_dir=tmp_path / "logs"
+    )
     with pytest.raises(RuntimeError):
         EmailSorter(config).sort_file(source, resume=False)
     assert checkpoint_path.read_text(encoding="utf-8") == before
@@ -370,9 +372,11 @@ def test_legacy_checkpoint_without_output_boundary_is_rejected_safely(tmp_path):
     checkpoint_path = tmp_path / "checkpoint.json"
     Checkpoint(checkpoint_path).save(str(source), 1, 1)
     with pytest.raises(RuntimeError, match="output-boundary metadata"):
-        EmailSorter(SortConfig(results_dir=results, checkpoint_path=checkpoint_path)).sort_file(
-            source, resume=True
-        )
+        EmailSorter(
+            SortConfig(
+                results_dir=results, checkpoint_path=checkpoint_path, log_dir=tmp_path / "logs"
+            )
+        ).sort_file(source, resume=True)
     assert output.read_text(encoding="utf-8") == "one@example.com\n"
 
 
@@ -381,6 +385,7 @@ def test_resume_truncates_uncheckpointed_output_after_write_failure(tmp_path):
     source.write_text("one@example.com\ntwo@example.com\n", encoding="utf-8")
     config = SortConfig(
         results_dir=tmp_path / "results",
+        log_dir=tmp_path / "logs",
         checkpoint_path=tmp_path / "checkpoint.json",
         checkpoint_interval=1,
     )

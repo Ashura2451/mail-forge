@@ -263,9 +263,7 @@ def test_workspace_explains_temporary_wait_and_manual_pause(tmp_path: Path) -> N
     try:
         workspace = runtime.campaign_operations.workspace(campaign_id)
         assert workspace["execution"]["state"]["key"] == "waiting"
-        assert workspace["execution"]["state"]["label"] == (
-            "Waiting for an execution restriction"
-        )
+        assert workspace["execution"]["state"]["label"] == ("Waiting for an execution restriction")
         runtime.store.request_pause(campaign_id)
         manual = runtime.campaign_operations.workspace(campaign_id)
         assert manual["execution"]["state"]["key"] == "manually_paused"

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from mailforge.infrastructure.campaign_store import CampaignStore
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "mailforge"
 LAYERS = ("domain", "application", "infrastructure", "interfaces")
@@ -116,6 +119,26 @@ def test_package_has_no_import_cycles() -> None:
                 graph[module].add(imported)
 
     _assert_no_cycles(graph)
+
+
+def test_fresh_campaign_database_does_not_create_retired_tables() -> None:
+    retired_fragments = (
+        "inbound",
+        "automation",
+        "data_studio",
+        "data_connection",
+        "programmable",
+        "email_standards",
+        "integration",
+    )
+    with TemporaryDirectory() as directory:
+        store = CampaignStore(Path(directory) / "fresh.sqlite3")
+        with store.connect() as connection:
+            tables = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+    assert not any(any(fragment in table for fragment in retired_fragments) for table in tables)
 
 
 def test_import_parser_handles_aliases_packages_and_relative_modules() -> None:

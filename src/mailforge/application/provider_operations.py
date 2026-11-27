@@ -45,6 +45,7 @@ from mailforge.infrastructure.smtp import (
     deliver,
 )
 
+
 def _loopback(host: str) -> bool:
     if host.lower() == "localhost":
         return True
@@ -118,8 +119,10 @@ def provider_capabilities() -> tuple[ProviderCapability, ...]:
             (TLSMode.STARTTLS,),
             (("host", "sandbox.smtp.mailtrap.io"), ("port", 2525)),
             restrictions=(
-                "Sandbox capture only; requires Business Owner authorization before any external submission.",
-                "Use synthetic sender/recipient identities and the bounded external attempt budget.",
+                "Sandbox capture only; requires Business Owner authorization "
+                "before any external submission.",
+                "Use synthetic sender/recipient identities and the bounded "
+                "external attempt budget.",
             ),
             docs=(
                 "https://docs.mailtrap.io/email-sandbox/setup/sandbox-smtp-integration",
@@ -145,8 +148,12 @@ def provider_capabilities() -> tuple[ProviderCapability, ...]:
             (TLSMode.IMPLICIT, TLSMode.STARTTLS),
             (("host", "smtp.office365.com"), ("port", 587)),
             scopes=("https://outlook.office.com/SMTP.Send", "offline_access"),
-            restrictions=("SMTP AUTH must be enabled; mailbox access is not part of Mailforge scope.",),
-            docs=("https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/authenticated-client-smtp-submission",),
+            restrictions=(
+                "SMTP AUTH must be enabled; mailbox access is not part of Mailforge scope.",
+            ),
+            docs=(
+                "https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/authenticated-client-smtp-submission",
+            ),
         ),
     )
 
@@ -305,7 +312,10 @@ class ProviderOperationsService:
         return [item.to_dict() for item in provider_capabilities()]
 
     def account(self, ref: str) -> dict[str, Any]:
-        return self.store.get_provider_account(ref)
+        account = self.store.get_provider_account(ref)
+        for key in ("mailbox", "inbound", "inbound_enabled"):
+            account.pop(key, None)
+        return account
 
     @staticmethod
     def _profile_fingerprint(profile: ProviderProfile) -> str:
@@ -336,6 +346,7 @@ class ProviderOperationsService:
         return [
             self._account_with_sandbox_state(item) for item in self.store.list_provider_accounts()
         ]
+
     def _account_with_sandbox_state(self, account: dict[str, Any]) -> dict[str, Any]:
         sandbox = account.get("sandbox")
         requested = isinstance(sandbox, dict) and sandbox.get("key") == CAPTURE_ONLY_SANDBOX_KEY

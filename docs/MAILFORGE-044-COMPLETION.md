@@ -40,12 +40,36 @@ runtime because no retained source path imports them.
 Historical SQLite tables, schema migrations, legacy MAILER/SORTER data, and
 bounded delivery-event compatibility records remain preserved where deleting
 them would risk user-data loss or make backup/restore/migration unsafe. They are
-not active product routes or new implementation authorities. The retired
-mailbox API returns an explicit 410 response.
+not active product routes or new implementation authorities. Fresh databases
+do not create retired capability tables.
+
+## Physical repository outcome
+
+The maintained checkout now contains only source, tests, current resources,
+current documentation, development tooling, private governance, and the one
+current local package deliverable:
+
+```text
+Mailforge-sanitized/
+├── .agents/ .aios/ .orchestra/   private governance and execution context
+├── docs/                         current product, migration, and owner docs
+├── scripts/                      package and safety tooling
+├── src/mailforge/                maintained Python package and web assets
+├── tests/                        retained regression and browser qualification
+├── web/                          maintained React source and Node tooling
+└── dist/Mailforge-044-final.app  current local qualification artifact
+```
+
+Old milestone packages, probes, SQLite scratch files, caches, root runtime
+directories, legacy MAILER/MSORTER directories, obsolete specs/reviews/
+performance notes, and private qualification evidence were removed from or
+relocated outside the source checkout. The development `.venv`, `web/node_modules`,
+`.agents`, `.aios`, `.orchestra` governance, and current `dist` package are
+intentional remaining local material.
 
 ## Qualification evidence
 
-- Python regression: 246 passed, 1 intentional packaged-test skip, 1 existing
+- Python regression: 240 passed, 1 intentional packaged-test skip, 1 existing
   Starlette/httpx deprecation warning.
 - Large workload qualification: 13,000 sorter records with 1,000 duplicates;
   20,000 comparison records against a 10,000-record reference. Both passed.
@@ -59,6 +83,8 @@ mailbox API returns an explicit 410 response.
 - Migration, backup/restore, provider safety, credentials, transport proof,
   and package identity checks are covered by the retained focused regression
   suites and the package build process.
+- Static analysis: Ruff format/check passed for all maintained Python source and
+  tests; Node 24 build and oxlint passed; lock and secret checks passed.
 
 ## Genuine limitations
 

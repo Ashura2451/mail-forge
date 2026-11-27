@@ -126,7 +126,8 @@ def _execution_state(
     elif (
         status is CampaignStatus.PAUSED
         and next_automatic_at is not None
-        and transition_reason in {
+        and transition_reason
+        in {
             "retry_after_temporary_restriction",
             "worker_waiting_for_temporary_restriction",
             "unresolved_delivery_state",
@@ -293,7 +294,9 @@ class CampaignOperationsService:
         candidate = base_name
         suffix = 2
         with self.store.connect() as connection:
-            while connection.execute("SELECT 1 FROM campaigns WHERE name = ?", (candidate,)).fetchone():
+            while connection.execute(
+                "SELECT 1 FROM campaigns WHERE name = ?", (candidate,)
+            ).fetchone():
                 candidate = f"{base_name} {suffix}"
                 suffix += 1
         return self.campaigns.create_campaign(
@@ -491,7 +494,8 @@ class CampaignOperationsService:
                 with self.store.connect() as connection:
                     contacts = list(
                         connection.execute(
-                            f"SELECT c.* FROM contacts c WHERE {compiled.sql} ORDER BY normalized_email LIMIT 100001",
+                            f"SELECT c.* FROM contacts c WHERE {compiled.sql} "
+                            "ORDER BY normalized_email LIMIT 100001",
                             compiled.parameters,
                         )
                     )
@@ -790,13 +794,19 @@ class CampaignOperationsService:
                 "provider_account_required",
             )
         account = self.provider_operations.account(provider_ref)
-        if account.get("sandbox") or account.get("host", "").lower() in {"localhost", "127.0.0.1", "::1"}:
+        if account.get("sandbox") or account.get("host", "").lower() in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
             raise CampaignOperationsError(
                 "external campaign authorization cannot use a local capture fixture",
                 "external_provider_required",
             )
         intents = self.store.list_intents(campaign_id)
-        if not intents or any(item["state"] not in {"prepared", "eligible_pending"} for item in intents):
+        if not intents or any(
+            item["state"] not in {"prepared", "eligible_pending"} for item in intents
+        ):
             raise CampaignOperationsError(
                 "prepare a campaign with immutable recipient and message snapshots first",
                 "campaign_not_prepared",
@@ -811,7 +821,9 @@ class CampaignOperationsService:
         for intent in intents:
             prepared = self.store.get_prepared_message(intent["id"])
             if prepared is None:
-                raise CampaignOperationsError("prepared MIME artifact is missing", "prepared_artifact_missing")
+                raise CampaignOperationsError(
+                    "prepared MIME artifact is missing", "prepared_artifact_missing"
+                )
             if len(bytes(prepared["mime_bytes"])) > 1_048_576:
                 raise CampaignOperationsError(
                     "prepared message exceeds the 1 MiB external qualification limit",
@@ -837,7 +849,9 @@ class CampaignOperationsService:
             "recipient_set_hash": _digest_values(recipients),
             "prepared_set_hash": _digest_values(prepared_values),
             "max_submissions": len(recipients),
-            "message_limit_bytes": min(int(account.get("max_message_bytes") or 1_048_576), 1_048_576),
+            "message_limit_bytes": min(
+                int(account.get("max_message_bytes") or 1_048_576), 1_048_576
+            ),
             "external_access": False,
             "stop_conditions": [
                 "authorization expiry",
@@ -859,7 +873,10 @@ class CampaignOperationsService:
         prepared_set_hash: str,
     ) -> dict[str, Any]:
         preview = self.external_authorization_preview(campaign_id)
-        if preview["recipient_set_hash"] != recipient_set_hash or preview["prepared_set_hash"] != prepared_set_hash:
+        if (
+            preview["recipient_set_hash"] != recipient_set_hash
+            or preview["prepared_set_hash"] != prepared_set_hash
+        ):
             raise CampaignOperationsError(
                 "authorization does not match the prepared campaign identity",
                 "campaign_identity_mismatch",
@@ -871,7 +888,9 @@ class CampaignOperationsService:
             expires_at=expires_at,
             prepared_set_hash=prepared_set_hash,
         )
-        configuration = json.loads(self.store.get_campaign(campaign_id)["configuration_json"] or "{}")
+        configuration = json.loads(
+            self.store.get_campaign(campaign_id)["configuration_json"] or "{}"
+        )
         configuration.update(
             {
                 "execution_mode": "external_smtp",
@@ -886,7 +905,11 @@ class CampaignOperationsService:
         with self.store.transaction(immediate=True) as connection:
             connection.execute(
                 "UPDATE campaigns SET configuration_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(configuration, sort_keys=True), datetime.now(UTC).isoformat(), campaign_id),
+                (
+                    json.dumps(configuration, sort_keys=True),
+                    datetime.now(UTC).isoformat(),
+                    campaign_id,
+                ),
             )
         return {"campaign_id": campaign_id, "authorized": True, "external_access": False}
 
@@ -1102,7 +1125,8 @@ class CampaignOperationsService:
     ) -> list[dict[str, Any]]:
         with self.store.connect() as connection:
             rows = connection.execute(
-                "SELECT a.*, i.normalized_email AS recipient FROM delivery_attempts a JOIN delivery_intents i "
+                "SELECT a.*, i.normalized_email AS recipient "
+                "FROM delivery_attempts a JOIN delivery_intents i "
                 "ON i.id=a.intent_id WHERE i.campaign_id=? "
                 "ORDER BY a.created_at DESC,a.id LIMIT ? OFFSET ?",
                 (campaign_id, max(1, min(limit, 500)), max(0, offset)),

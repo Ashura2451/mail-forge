@@ -14,9 +14,7 @@ def _addresses(prefix: str, count: int) -> str:
 
 def test_sorter_qualifies_a_representative_large_file(tmp_path: Path) -> None:
     source = tmp_path / "large-sort-input.txt"
-    source.write_text(
-        _addresses("user", 12_000) + _addresses("user", 1_000), encoding="utf-8"
-    )
+    source.write_text(_addresses("user", 12_000) + _addresses("user", 1_000), encoding="utf-8")
     config = SortConfig(
         results_dir=tmp_path / "results",
         config_dir=tmp_path / "config",

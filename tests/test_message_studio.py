@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import threading
-import time
 from email.parser import BytesParser
 from email.policy import SMTP
 from pathlib import Path
@@ -13,8 +12,8 @@ from fastapi.testclient import TestClient
 
 from mailforge.application.message_studio import MessageStudioError, MessageStudioService
 from mailforge.application.outbound import OutboundService
-from mailforge.domain.campaign import ContactCandidate, DeliveryState
-from mailforge.domain.outbound import SenderPolicy, TemplateDefinition
+from mailforge.domain.campaign import ContactCandidate
+from mailforge.domain.outbound import SenderPolicy
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.interfaces.web import create_app
 
@@ -183,7 +182,10 @@ def test_recipient_attachment_mime_isolation_and_hashes(tmp_path: Path) -> None:
     studio.map_recipient_attachment(published["published"]["id"], contacts[0]["id"], first["id"])
     studio.map_recipient_attachment(published["published"]["id"], contacts[1]["id"], second["id"])
     campaign_id = outbound.campaigns.create_campaign(
-        "Isolation campaign", list_id, sender_config_ref="isolation", template_ref="studio",
+        "Isolation campaign",
+        list_id,
+        sender_config_ref="isolation",
+        template_ref="studio",
         message_revision_id=published["published"]["id"],
     )
     report = studio.prepare_campaign(
@@ -239,7 +241,9 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
     list_id = store.create_list("Preview audience")
     outbound.campaigns.import_candidates(
         [
-            ContactCandidate("ada@example.com", "ada@example.com", "synthetic", 1, {"company": "A"}),
+            ContactCandidate(
+                "ada@example.com", "ada@example.com", "synthetic", 1, {"company": "A"}
+            ),
             ContactCandidate("grace@example.com", "grace@example.com", "synthetic", 2, {}),
         ],
         list_id,
@@ -264,7 +268,9 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
     assert report.prepared == 2
     contacts = store.list_contacts(list_id)
     mapped_asset = studio.create_asset("recipient.pdf", "application/pdf", b"recipient-specific")
-    studio.map_recipient_attachment(published["published"]["id"], contacts[0]["id"], mapped_asset["id"])
+    studio.map_recipient_attachment(
+        published["published"]["id"], contacts[0]["id"], mapped_asset["id"]
+    )
     app = create_app(database, allowed_hosts={"testserver"})
     with TestClient(app) as client:
         session = client.get("/api/v1/session")
@@ -272,7 +278,10 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
         batch = client.post(
             "/api/v1/message-studio/preview-batch",
             headers=headers,
-            json={"revision_id": published["published"]["id"], "contact_ids": [item["id"] for item in contacts]},
+            json={
+                "revision_id": published["published"]["id"],
+                "contact_ids": [item["id"] for item in contacts],
+            },
         )
         assert batch.status_code == 200
         assert len(batch.json()["items"]) == 2
@@ -287,9 +296,22 @@ def test_message_preview_batch_diagnostics_and_prepared_mime_export(tmp_path: Pa
         assert exported.headers["content-type"].startswith("message/rfc822")
         assert b"Subject:" in exported.content
         with store.transaction(immediate=True) as connection:
-            connection.execute("UPDATE prepared_messages SET mime_bytes=? WHERE intent_id=?", (b"tampered", intent["id"]))
-        assert client.get(f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}").status_code == 409
-        assert client.get(f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}/export").status_code == 409
+            connection.execute(
+                "UPDATE prepared_messages SET mime_bytes=? WHERE intent_id=?",
+                (b"tampered", intent["id"]),
+            )
+        assert (
+            client.get(
+                f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}"
+            ).status_code
+            == 409
+        )
+        assert (
+            client.get(
+                f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent['id']}/export"
+            ).status_code
+            == 409
+        )
     app.state.runtime.close()
 
 
@@ -327,4 +349,6 @@ def test_compatibility_diagnostics_flag_each_missing_image_alt(tmp_path: Path) -
         {"type": "image", "asset_id": image["id"], "alt": ""},
     ]
     preview = studio.preview(document=document)
-    assert any(item["code"] == "image_alt_missing" for item in preview["compatibility"]["confirmed"])
+    assert any(
+        item["code"] == "image_alt_missing" for item in preview["compatibility"]["confirmed"]
+    )

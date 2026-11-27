@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def format_email_file(input_path: Path, output_path: Path) -> None:
-    """Preserve SORTER's newline-collapse formatting contract."""
+    """Preserve the legacy newline-collapse formatting contract."""
 
     output_path.write_text(
         input_path.read_text(encoding="utf-8").replace("\n\n", "\n"), encoding="utf-8"
@@ -24,7 +24,7 @@ def remove_duplicate_lines(path: Path) -> int:
 
 
 def write_legacy_list(input_path: Path, output_path: Path) -> None:
-    """Write SORTER's historical Python-list representation."""
+    """Write the legacy Python-list representation."""
 
     values = input_path.read_text(encoding="utf-8").splitlines()
     output_path.write_text(str([value.strip() for value in values]), encoding="utf-8")

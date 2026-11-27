@@ -104,7 +104,9 @@ def test_draft_update_requires_current_version_and_schedule_rejects_dst_gap(tmp_
         )
 
 
-def test_duplicate_and_archive_preserve_history_without_copying_execution_state(tmp_path: Path) -> None:
+def test_duplicate_and_archive_preserve_history_without_copying_execution_state(
+    tmp_path: Path,
+) -> None:
     store, operations, list_id = _operations(tmp_path / "campaign.sqlite3")
     original = operations.create_draft(name="Reusable", list_id=list_id)
     operations.prepare(original)
@@ -118,6 +120,7 @@ def test_duplicate_and_archive_preserve_history_without_copying_execution_state(
     archived = operations.archive_campaign(original)
     assert archived["status"] == "archived"
     assert json.loads(store.get_campaign(original)["configuration_json"])["archived_at"]
+
 
 def test_browser_workspace_routes_share_the_operations_facade(tmp_path: Path) -> None:
     with TestClient(
@@ -164,10 +167,10 @@ def test_browser_workspace_routes_share_the_operations_facade(tmp_path: Path) ->
             client.get(f"/api/v1/campaigns/{campaign_id}/recipients").json()["items"][0]["email"]
             == "browser@example.com"
         )
-        intent_id = client.get(f"/api/v1/campaigns/{campaign_id}/recipients").json()["items"][0]["id"]
-        inspected = client.get(
-            f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent_id}"
-        )
+        intent_id = client.get(f"/api/v1/campaigns/{campaign_id}/recipients").json()["items"][0][
+            "id"
+        ]
+        inspected = client.get(f"/api/v1/campaigns/{campaign_id}/prepared-messages/{intent_id}")
         assert inspected.status_code == 200
         assert inspected.json()["recipient"] == "browser@example.com"
         assert inspected.json()["proof"]["content_hash"]
@@ -194,22 +197,34 @@ def test_recurring_campaign_creates_a_fresh_scheduled_run(tmp_path: Path) -> Non
         campaign_id = client.post(
             "/api/v1/campaigns", headers=headers, json={"name": "Recurring", "list_id": list_id}
         ).json()["id"]
-        assert client.post(
-            f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={}
-        ).status_code == 200
-        assert client.put(
-            f"/api/v1/campaigns/{campaign_id}/schedule",
-            headers=headers,
-            json={
-                "mode": "recurring",
-                "timezone": "UTC",
-                "scheduled_at": "2020-01-01T00:00:00",
-                "recurrence": "daily",
-                "catch_up_policy": "next_window",
-            },
-        ).status_code == 200
-        assert client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code == 200
-        assert client.post(f"/api/v1/campaigns/{campaign_id}/simulate", headers=headers).status_code == 200
+        assert (
+            client.post(
+                f"/api/v1/campaigns/{campaign_id}/prepare", headers=headers, json={}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                f"/api/v1/campaigns/{campaign_id}/schedule",
+                headers=headers,
+                json={
+                    "mode": "recurring",
+                    "timezone": "UTC",
+                    "scheduled_at": "2020-01-01T00:00:00",
+                    "recurrence": "daily",
+                    "catch_up_policy": "next_window",
+                },
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(f"/api/v1/campaigns/{campaign_id}/authorize", headers=headers).status_code
+            == 200
+        )
+        assert (
+            client.post(f"/api/v1/campaigns/{campaign_id}/simulate", headers=headers).status_code
+            == 200
+        )
         for _ in range(40):
             items = client.get("/api/v1/campaigns").json()["items"]
             if len(items) > 1 and any(item["status"] == "scheduled" for item in items):

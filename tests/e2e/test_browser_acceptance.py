@@ -44,10 +44,13 @@ def local_page(tmp_path: Path):
         pytest.skip("Chromium is not installed; set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run E2E")
     repo = Path(__file__).parents[2]
     with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]
-    database = tmp_path / "browser.sqlite3"; frontend = repo / "src" / "mailforge" / "web_assets"
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    database = tmp_path / "browser.sqlite3"
+    frontend = repo / "src" / "mailforge" / "web_assets"
     code = f"import uvicorn; from mailforge.interfaces.web import create_app; uvicorn.run(create_app(r'{database}', frontend_dir=r'{frontend}'), host='127.0.0.1', port={port}, log_level='error')"
-    environment = os.environ.copy(); environment["PYTHONPATH"] = str(repo / "src")
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
     server = subprocess.Popen([sys.executable, "-c", code], env=environment)
     _wait_for_server(port)
     with playwright.sync_playwright() as sync:
@@ -55,7 +58,8 @@ def local_page(tmp_path: Path):
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         yield page, f"http://127.0.0.1:{port}"
         browser.close()
-    server.terminate(); server.wait(timeout=5)
+    server.terminate()
+    server.wait(timeout=5)
 
 
 def test_sort_compare_and_history_workflows(local_page) -> None:
@@ -66,14 +70,30 @@ def test_sort_compare_and_history_workflows(local_page) -> None:
         assert page.get_by_role("button", name=label, exact=True).is_visible()
 
     page.get_by_role("button", name="Sort email", exact=True).click()
-    page.get_by_label("Email sorter input file").set_input_files({"name": "sort.txt", "mimeType": "text/plain", "buffer": b"ALICE@example.com\nalice@example.com\ninvalid\nbob@example.com"})
+    page.get_by_label("Email sorter input file").set_input_files(
+        {
+            "name": "sort.txt",
+            "mimeType": "text/plain",
+            "buffer": b"ALICE@example.com\nalice@example.com\ninvalid\nbob@example.com",
+        }
+    )
     page.get_by_role("button", name="Preview", exact=True).click()
     page.get_by_text("Accepted").wait_for()
     assert page.get_by_text("Duplicates", exact=True).is_visible()
 
-    page.get_by_role("navigation", name="Main navigation").get_by_role("button", name="Compare lists", exact=True).click()
-    page.get_by_label("Main comparison list").set_input_files({"name": "main.txt", "mimeType": "text/plain", "buffer": b"alice@example.com\nbob@example.com"})
-    page.get_by_label("Reference comparison lists").set_input_files({"name": "old.txt", "mimeType": "text/plain", "buffer": b"bob@example.com"})
+    page.get_by_role("navigation", name="Main navigation").get_by_role(
+        "button", name="Compare lists", exact=True
+    ).click()
+    page.get_by_label("Main comparison list").set_input_files(
+        {
+            "name": "main.txt",
+            "mimeType": "text/plain",
+            "buffer": b"alice@example.com\nbob@example.com",
+        }
+    )
+    page.get_by_label("Reference comparison lists").set_input_files(
+        {"name": "old.txt", "mimeType": "text/plain", "buffer": b"bob@example.com"}
+    )
     page.get_by_role("main").get_by_role("button", name="Compare lists", exact=True).click()
     page.get_by_role("heading", name="Comparison result").wait_for()
     assert page.get_by_text("alice@example.com").is_visible()
@@ -107,4 +127,6 @@ def test_narrow_navigation_keeps_labels_and_focus(local_page) -> None:
     assert page.get_by_role("heading", name="Compare lists").is_visible()
     page.get_by_role("button", name="Open navigation").click()
     page.keyboard.press("Escape")
-    assert page.get_by_role("button", name="Open navigation").get_attribute("aria-expanded") == "false"
+    assert (
+        page.get_by_role("button", name="Open navigation").get_attribute("aria-expanded") == "false"
+    )

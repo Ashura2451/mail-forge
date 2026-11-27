@@ -33,6 +33,7 @@ from mailforge.application.templates import SafeTemplateRenderer
 from mailforge.domain.email import normalize_email, validate_email
 from mailforge.domain.outbound import AttachmentSpec, SenderPolicy, TemplateDefinition
 from mailforge.infrastructure.campaign_store import CampaignStore
+
 MAX_DOCUMENT_BYTES = 256 * 1024
 MAX_BLOCKS = 100
 MAX_ASSET_BYTES = 10 * 1024 * 1024
@@ -382,6 +383,7 @@ class MessageStudioService:
                     raise MessageStudioError("column blocks are invalid")
                 for child in column:
                     self._validate_block(child, depth=depth + 1)
+
     def _validate_attachment_ref(self, attachment: Any) -> None:
         if not isinstance(attachment, Mapping) or not isinstance(attachment.get("asset_id"), str):
             raise MessageStudioError("attachments require an asset_id")
@@ -811,12 +813,16 @@ class MessageStudioService:
                 "WHERE m.revision_id=? AND m.contact_id=? AND m.asset_id=?",
                 (revision_id, contact_id, asset_id),
             ).fetchone()
-        return dict(row) if row is not None else {
-            "revision_id": revision_id,
-            "contact_id": contact_id,
-            "asset_id": asset_id,
-            "required": required,
-        }
+        return (
+            dict(row)
+            if row is not None
+            else {
+                "revision_id": revision_id,
+                "contact_id": contact_id,
+                "asset_id": asset_id,
+                "required": required,
+            }
+        )
 
     def list_recipient_attachments(self, revision_id: str) -> list[dict[str, Any]]:
         with self.store.connect() as connection:
@@ -904,6 +910,7 @@ class MessageStudioService:
             asset["data_blob"],
             asset["media_type"],
         )
+
     def _render_blocks(
         self,
         blocks: Sequence[Mapping[str, Any]],
@@ -1051,7 +1058,6 @@ class MessageStudioService:
         ).text
         for reference in source.get("attachments", []):
             attachments.append(
-
                 self._asset_attachment(
                     reference["asset_id"], content_id=reference.get("content_id")
                 )
@@ -1103,53 +1109,83 @@ class MessageStudioService:
         )
         source_text = str(source.get("plain_text_override") or rendered.get("text", ""))
         if not source_text.strip():
-            confirmed.append({
-                "severity": "ERROR", "category": "content", "code": "plain_text_missing",
-                "message": "The message has no plain-text alternative.", "confidence": "confirmed",
-            })
+            confirmed.append(
+                {
+                    "severity": "ERROR",
+                    "category": "content",
+                    "code": "plain_text_missing",
+                    "message": "The message has no plain-text alternative.",
+                    "confidence": "confirmed",
+                }
+            )
         image_tags = re.findall(r"<img\b[^>]*>", source_html, re.I)
         if any(
             (match := re.search(r"\balt\s*=\s*([\"'])(.*?)\1", tag, re.I)) is None
             or not match.group(2).strip()
             for tag in image_tags
         ):
-            confirmed.append({
-                "severity": "ERROR", "category": "accessibility", "code": "image_alt_missing",
-                "message": "At least one image is missing alternative text.", "confidence": "confirmed",
-            })
+            confirmed.append(
+                {
+                    "severity": "ERROR",
+                    "category": "accessibility",
+                    "code": "image_alt_missing",
+                    "message": "At least one image is missing alternative text.",
+                    "confidence": "confirmed",
+                }
+            )
         if re.search(r"\b(?:display\s*:\s*(?:flex|grid)|position\s*:)", source_html, re.I):
-            advisory.append({
-                "severity": "WARNING", "category": "compatibility", "code": "layout_feature_uncertain",
-                "message": "Advanced CSS layout may vary across email clients; inspect the source and test target clients.",
-                "confidence": "advisory",
-            })
+            advisory.append(
+                {
+                    "severity": "WARNING",
+                    "category": "compatibility",
+                    "code": "layout_feature_uncertain",
+                    "message": "Advanced CSS layout may vary across email clients; inspect the source and test target clients.",
+                    "confidence": "advisory",
+                }
+            )
         if re.search(r"<(?:video|audio|canvas)\b", source_html, re.I):
-            advisory.append({
-                "severity": "WARNING", "category": "compatibility", "code": "interactive_media_uncertain",
-                "message": "Interactive media is not uniformly supported in email clients.", "confidence": "advisory",
-            })
+            advisory.append(
+                {
+                    "severity": "WARNING",
+                    "category": "compatibility",
+                    "code": "interactive_media_uncertain",
+                    "message": "Interactive media is not uniformly supported in email clients.",
+                    "confidence": "advisory",
+                }
+            )
         if any(item.get("code") == "remote_resource" for item in rendered.get("diagnostics", [])):
-            advisory.append({
-                "severity": "WARNING", "category": "privacy", "code": "remote_resource_blocked",
-                "message": "Remote resources were not fetched; client-side privacy behavior remains unknown.",
-                "confidence": "advisory",
-            })
+            advisory.append(
+                {
+                    "severity": "WARNING",
+                    "category": "privacy",
+                    "code": "remote_resource_blocked",
+                    "message": "Remote resources were not fetched; client-side privacy behavior remains unknown.",
+                    "confidence": "advisory",
+                }
+            )
         if rendered.get("approximate_bytes", 0) > 100 * 1024:
-            advisory.append({
-                "severity": "WARNING", "category": "size", "code": "message_size_advisory",
-                "message": "The prepared message is larger than 100 KiB; clipping and transport limits may vary.",
-                "confidence": "advisory",
-            })
+            advisory.append(
+                {
+                    "severity": "WARNING",
+                    "category": "size",
+                    "code": "message_size_advisory",
+                    "message": "The prepared message is larger than 100 KiB; clipping and transport limits may vary.",
+                    "confidence": "advisory",
+                }
+            )
         return {
             "corpus_version": COMPATIBILITY_CORPUS_VERSION,
             "sources": list(COMPATIBILITY_SOURCES),
             "confirmed": confirmed,
             "advisory": advisory,
-            "unknown": [{
-                "category": "client_rendering", "code": "external_client_unverified",
-                "message": "Gmail, Outlook, and Apple Mail rendering was not exercised by this local diagnostic.",
-                "confidence": "unknown",
-            }],
+            "unknown": [
+                {
+                    "category": "client_rendering",
+                    "code": "external_client_unverified",
+                    "message": "Gmail, Outlook, and Apple Mail rendering was not exercised by this local diagnostic.",
+                    "confidence": "unknown",
+                }
+            ],
             "counts": {"confirmed": len(confirmed), "advisory": len(advisory), "unknown": 1},
         }
 
@@ -1245,6 +1281,7 @@ class MessageStudioService:
             f'content="{html.escape(_PREVIEW_CSP, quote=True)}">'
             f'<meta name="referrer" content="no-referrer">{html_source}'
         )
+
     def preview(
         self,
         document: Mapping[str, Any] | None = None,
@@ -1283,16 +1320,19 @@ class MessageStudioService:
                     "WHERE m.revision_id=? AND m.contact_id=? ORDER BY a.filename",
                     (revision_id, contact_id),
                 ).fetchall()
-            result["attachments"] = [*result.get("attachments", []), *[
-                {
-                    "filename": row["filename"],
-                    "content_type": row["media_type"],
-                    "content_id": None,
-                    "bytes": row["size_bytes"],
-                    "recipient_specific": True,
-                }
-                for row in mapped
-            ]]
+            result["attachments"] = [
+                *result.get("attachments", []),
+                *[
+                    {
+                        "filename": row["filename"],
+                        "content_type": row["media_type"],
+                        "content_id": None,
+                        "bytes": row["size_bytes"],
+                        "recipient_specific": True,
+                    }
+                    for row in mapped
+                ],
+            ]
             result["approximate_bytes"] += sum(row["size_bytes"] for row in mapped)
         result["html"] = self._preview_snapshot(result["html"])
         result.pop("_rendered", None)

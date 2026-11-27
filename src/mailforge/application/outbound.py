@@ -257,10 +257,18 @@ class OutboundService:
     ) -> OutboundPreparationReport:
         with self.store.campaign_operation_lock():
             with self.store.connect() as connection:
-                pinned = connection.execute(
-                    "SELECT 1 FROM data_studio_campaign_snapshots WHERE campaign_id=? LIMIT 1",
-                    (campaign_id,),
+                has_retired_snapshot_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='data_studio_campaign_snapshots'"
                 ).fetchone()
+                pinned = (
+                    connection.execute(
+                        "SELECT 1 FROM data_studio_campaign_snapshots WHERE campaign_id=? LIMIT 1",
+                        (campaign_id,),
+                    ).fetchone()
+                    if has_retired_snapshot_table
+                    else None
+                )
             if pinned is not None:
                 raise ValueError(
                     "campaign has a Data Studio recipient snapshot; use Message Studio preparation"
@@ -717,7 +725,10 @@ class OutboundService:
         with self.store.provider_operation_lock():
             profile = provider_service.profile(provider_ref)
             campaign = self.store.get_campaign(campaign_id)
-            if profile.sender_policy_ref and profile.sender_policy_ref != campaign["sender_config_ref"]:
+            if (
+                profile.sender_policy_ref
+                and profile.sender_policy_ref != campaign["sender_config_ref"]
+            ):
                 raise ValueError(
                     f"provider profile {provider_ref} is not associated with campaign sender "
                     f"policy {campaign['sender_config_ref']}"

@@ -133,7 +133,9 @@ class _SMTPHandler(socketserver.BaseRequestHandler):
                 if min_interval is not None:
                     with server.rate_lock:
                         now = time.monotonic()
-                        if server.last_data_at is not None and now - server.last_data_at < float(min_interval):
+                        if server.last_data_at is not None and now - server.last_data_at < float(
+                            min_interval
+                        ):
                             code = 550
                         server.last_data_at = now
                 self._send(connection, f"{code} final data response\r\n".encode())

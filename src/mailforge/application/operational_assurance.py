@@ -312,11 +312,7 @@ class OperationalAssuranceService:
             elif counts:
                 checks.append({"key": key, "state": "healthy", "counts": counts})
         if worker_status:
-            stopped = [
-                key
-                for key in ("scheduler",)
-                if worker_status.get(key) != "running"
-            ]
+            stopped = [key for key in ("scheduler",) if worker_status.get(key) != "running"]
             if stopped:
                 checks.append(
                     {"key": "supervisors", "state": "action_required", "stopped": stopped}

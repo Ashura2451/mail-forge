@@ -278,7 +278,6 @@ class ProviderInput(BaseModel):
     tls_mode: TLSMode
     auth_method: AuthenticationMethod = AuthenticationMethod.PASSWORD
     ca_file: str | None = None
-    mailbox: str = "INBOX"
     sender_policy_ref: str | None = None
     display_name: str | None = Field(default=None, max_length=160)
     sender_email: str | None = None
@@ -390,10 +389,7 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
         ):
             if request.cookies.get(SESSION_COOKIE) != self.session.session_id:
                 return _error(401, "session_required", "a local operator session is required")
-        if (
-            request.method in {"POST", "PUT", "PATCH", "DELETE"}
-            and not one_click_path
-        ):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not one_click_path:
             origin = request.headers.get("origin")
             if origin:
                 parsed = urlsplit(origin)
@@ -424,7 +420,12 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
 class WorkerSupervisor:
     """Bounded in-process worker supervisor; all state remains durable in SQLite."""
 
-    def __init__(self, outbound: OutboundService, credential_resolver: LocalCredentialResolver, provider_operations: ProviderOperationsService):
+    def __init__(
+        self,
+        outbound: OutboundService,
+        credential_resolver: LocalCredentialResolver,
+        provider_operations: ProviderOperationsService,
+    ):
         self.outbound = outbound
         self.credential_resolver = credential_resolver
         self.provider_operations = provider_operations
@@ -472,7 +473,13 @@ class WorkerSupervisor:
                     purpose = configuration.get("external_authorization_purpose")
                     expires_at = configuration.get("external_authorization_expires_at")
                     prepared_set_hash = configuration.get("external_prepared_set_hash")
-                    if not provider_ref or not authorization_ref or not purpose or not expires_at or not prepared_set_hash:
+                    if (
+                        not provider_ref
+                        or not authorization_ref
+                        or not purpose
+                        or not expires_at
+                        or not prepared_set_hash
+                    ):
                         raise PermissionError("external campaign authorization is incomplete")
                     grant = self.provider_operations.validate_campaign_grant(
                         provider_ref,
@@ -482,9 +489,14 @@ class WorkerSupervisor:
                         prepared_set_hash=prepared_set_hash,
                     )
 
-                    def consume_submission(_email: str, _intent_id: str) -> None:
+                    def consume_submission(
+                        _email: str,
+                        _intent_id: str,
+                        authorization_ref=grant.authorization_ref,
+                        account_ref=provider_ref,
+                    ) -> None:
                         self.outbound.store.consume_provider_operation_grant(
-                            grant.authorization_ref, account_ref=provider_ref
+                            authorization_ref, account_ref=account_ref
                         )
 
                     report, transport = self.outbound.execute_provider(
@@ -506,7 +518,9 @@ class WorkerSupervisor:
                         retry_deferred=True,
                     )
                 if report.campaign_status == "paused":
-                    pause_requested, cancel_requested = self.outbound.store.campaign_flags(campaign_id)
+                    pause_requested, cancel_requested = self.outbound.store.campaign_flags(
+                        campaign_id
+                    )
                     counts = self.outbound.store.counts(campaign_id)
                     unsafe_pending = any(
                         counts.get(state, 0)
@@ -528,18 +542,18 @@ class WorkerSupervisor:
                 after_counts = self.outbound.store.counts(campaign_id)
                 if before_counts == after_counts:
                     try:
-                        current = CampaignStatus(self.outbound.store.get_campaign(campaign_id)["status"])
+                        current = CampaignStatus(
+                            self.outbound.store.get_campaign(campaign_id)["status"]
+                        )
                         if current is CampaignStatus.RUNNING:
+                            next_automatic_at = self.outbound.store.campaign_next_automatic_at(
+                                campaign_id
+                            )
                             self.outbound.store.transition_campaign(
                                 campaign_id,
                                 CampaignStatus.COMPLETING,
                                 "worker_waiting_for_temporary_restriction",
-                                {
-                                    "next_automatic_at": self.outbound.store.campaign_next_automatic_at(
-
-                                        campaign_id
-                                    )
-                                },
+                                {"next_automatic_at": next_automatic_at},
                             )
                             self.outbound.store.transition_campaign(
                                 campaign_id,
@@ -565,7 +579,10 @@ class WorkerSupervisor:
                             "error": type(error).__name__,
                             "detail": (
                                 str(error)[:240]
-                                if not any(token in str(error).lower() for token in ("secret", "password", "token", "bearer"))
+                                if not any(
+                                    token in str(error).lower()
+                                    for token in ("secret", "password", "token", "bearer")
+                                )
                                 else "worker failure detail redacted"
                             ),
                             "status": campaign["status"],
@@ -615,7 +632,11 @@ class CampaignScheduleSupervisor:
                     ).fetchall()
                 for row in rows:
                     configuration = json.loads(row["configuration_json"] or "{}")
-                    if configuration.get("archived_at") or row["pause_requested"] or row["cancel_requested"]:
+                    if (
+                        configuration.get("archived_at")
+                        or row["pause_requested"]
+                        or row["cancel_requested"]
+                    ):
                         continue
                     now = self.outbound.now_fn()
                     due = False
@@ -642,7 +663,8 @@ class CampaignScheduleSupervisor:
                             next_at is not None
                             and next_at <= due_now
                             and last_transition is not None
-                            and last_transition["reason"] in {
+                            and last_transition["reason"]
+                            in {
                                 "retry_after_temporary_restriction",
                                 "worker_waiting_for_temporary_restriction",
                                 "unresolved_delivery_state",
@@ -698,7 +720,9 @@ class WebRuntime:
         self.providers = ProviderService(self.store)
         self.provider_operations = ProviderOperationsService(self.store)
         self.operational_assurance = OperationalAssuranceService(self.store, self.data_directory)
-        self.workers = WorkerSupervisor(self.outbound, self.credential_resolver, self.provider_operations)
+        self.workers = WorkerSupervisor(
+            self.outbound, self.credential_resolver, self.provider_operations
+        )
         self.campaign_scheduler = CampaignScheduleSupervisor(
             self.store, self.outbound, self.workers
         )
@@ -743,7 +767,7 @@ class WebRuntime:
     def _advance_recurring_campaign(self, campaign_id: str) -> None:
         try:
             self.campaign_operations.create_next_recurring_run(campaign_id)
-        except (CampaignOperationsError, KeyError, ValueError):
+        except CampaignOperationsError, KeyError, ValueError:
             # The completed run and its evidence remain durable; an operator
             # can inspect the failed recurrence in the campaign workspace.
             with self.store.transaction(immediate=True) as connection:
@@ -1054,7 +1078,6 @@ def create_app(
     @app.get(f"{API_PREFIX}/runtime/backups")
     async def runtime_backups():
         return {"items": list_backups(runtime.data_directory)}
-
 
     @app.post(f"{API_PREFIX}/runtime/backup")
     async def runtime_backup():
@@ -1433,7 +1456,9 @@ def create_app(
                 contact = runtime.store.get_contact(contact_id)
                 if payload.operation == "preference":
                     if payload.preference_state is None:
-                        return _error(400, "preference_state_required", "preference state is required")
+                        return _error(
+                            400, "preference_state_required", "preference state is required"
+                        )
                     value = runtime.campaigns.set_preference(
                         contact["normalized_email"],
                         purpose=payload.purpose,
@@ -1443,7 +1468,9 @@ def create_app(
                     results.append({"contact_id": contact_id, "preference_id": value})
                 elif payload.operation == "suppression":
                     if not payload.suppression_reason:
-                        return _error(400, "suppression_reason_required", "suppression reason is required")
+                        return _error(
+                            400, "suppression_reason_required", "suppression reason is required"
+                        )
                     value = runtime.campaigns.add_suppression(
                         contact["normalized_email"],
                         payload.suppression_category,
@@ -1454,7 +1481,9 @@ def create_app(
                     results.append({"contact_id": contact_id, "suppression_id": value})
                 else:
                     if not payload.evidence_source:
-                        return _error(400, "evidence_source_required", "evidence source is required")
+                        return _error(
+                            400, "evidence_source_required", "evidence source is required"
+                        )
                     value = runtime.campaigns.record_authorization_evidence(
                         contact["normalized_email"],
                         purpose=payload.purpose,
@@ -1522,14 +1551,16 @@ def create_app(
         )
         sources = _query(
             runtime.store,
-            "SELECT source_file, source_record_position, original_input, metadata_json, imported_at "
+            "SELECT source_file, source_record_position, original_input, metadata_json, "
+            "imported_at "
             "FROM contact_sources WHERE contact_id = ? ORDER BY imported_at DESC LIMIT 100",
             (contact_id,),
         )
         attributes = _query(
             runtime.store,
             "SELECT d.id, d.machine_key, d.label, d.field_type, v.text_value, v.number_value, "
-            "v.boolean_value, v.date_value, v.datetime_value, v.source_ref, v.source_record_position "
+            "v.boolean_value, v.date_value, v.datetime_value, v.source_ref, "
+            "v.source_record_position "
             "FROM contact_attribute_values v JOIN contact_field_definitions d ON d.id = v.field_id "
             "WHERE v.contact_id = ? ORDER BY d.machine_key",
             (contact_id,),
@@ -1539,10 +1570,22 @@ def create_app(
             "lists": lists,
             "sources": sources,
             "attributes": attributes,
-            "evidence": [_row(row) for row in runtime.store.list_authorization_evidence(contact_id=contact_id)],
-            "preferences": [_row(row) for row in runtime.store.list_preferences(contact_id=contact_id)],
-            "suppressions": [_row(row) for row in runtime.store.list_suppressions(normalized_email=contact["normalized_email"])],
-            "lifecycle": [_row(row) for row in runtime.store.list_lifecycle_records(contact_id=contact_id)],
+            "evidence": [
+                _row(row)
+                for row in runtime.store.list_authorization_evidence(contact_id=contact_id)
+            ],
+            "preferences": [
+                _row(row) for row in runtime.store.list_preferences(contact_id=contact_id)
+            ],
+            "suppressions": [
+                _row(row)
+                for row in runtime.store.list_suppressions(
+                    normalized_email=contact["normalized_email"]
+                )
+            ],
+            "lifecycle": [
+                _row(row) for row in runtime.store.list_lifecycle_records(contact_id=contact_id)
+            ],
         }
 
     @app.patch(f"{API_PREFIX}/contacts/{{contact_id}}")
@@ -1569,9 +1612,13 @@ def create_app(
             return _error(404, "contact_not_found", "contact was not found")
 
     @app.get(f"{API_PREFIX}/contacts/{{contact_id}}/policy")
-    async def contact_policy(contact_id: str, purpose: str = "marketing", list_id: str | None = None):
+    async def contact_policy(
+        contact_id: str, purpose: str = "marketing", list_id: str | None = None
+    ):
         try:
-            return runtime.campaigns.inspect_contact_policy(contact_id, purpose=purpose, list_id=list_id)
+            return runtime.campaigns.inspect_contact_policy(
+                contact_id, purpose=purpose, list_id=list_id
+            )
         except KeyError:
             return _error(404, "contact_not_found", "contact was not found")
 
@@ -1649,7 +1696,9 @@ def create_app(
                 result = runtime.campaigns.import_candidates(candidates, list_id, batch_id=batch_id)
                 runtime.store.finish_import_batch(batch_id, status="completed")
             except Exception as error:
-                runtime.store.finish_import_batch(batch_id, status="failed", error_message=str(error))
+                runtime.store.finish_import_batch(
+                    batch_id, status="failed", error_message=str(error)
+                )
                 raise
             return {**result, "preview": preview, "batch_id": batch_id}
         except KeyError:
@@ -1719,11 +1768,21 @@ def create_app(
                 selected_campaigns = json.loads(campaign_ids or "[]")
                 selected_lists = json.loads(reference_list_ids or "[]")
             except json.JSONDecodeError as error:
-                raise ListComparisonError("history and saved-list selections must be JSON arrays", "selection_invalid") from error
-            if not isinstance(selected_campaigns, list) or not all(isinstance(item, str) for item in selected_campaigns):
-                raise ListComparisonError("campaign_ids must be a list of identifiers", "selection_invalid")
-            if not isinstance(selected_lists, list) or not all(isinstance(item, str) for item in selected_lists):
-                raise ListComparisonError("reference_list_ids must be a list of identifiers", "selection_invalid")
+                raise ListComparisonError(
+                    "history and saved-list selections must be JSON arrays", "selection_invalid"
+                ) from error
+            if not isinstance(selected_campaigns, list) or not all(
+                isinstance(item, str) for item in selected_campaigns
+            ):
+                raise ListComparisonError(
+                    "campaign_ids must be a list of identifiers", "selection_invalid"
+                )
+            if not isinstance(selected_lists, list) or not all(
+                isinstance(item, str) for item in selected_lists
+            ):
+                raise ListComparisonError(
+                    "reference_list_ids must be a list of identifiers", "selection_invalid"
+                )
             if main_list_id:
                 result = runtime.list_comparison.compare_saved_lists(
                     main_list_id,
@@ -2030,7 +2089,9 @@ def create_app(
     async def execute_campaign(campaign_id: str, payload: CampaignExecutionInput):
         try:
             campaign = runtime.store.get_campaign(campaign_id)
-            if campaign["authorization"] != "simulation_authorized" or not runtime.store.has_execution_declaration(
+            if campaign[
+                "authorization"
+            ] != "simulation_authorized" or not runtime.store.has_execution_declaration(
                 campaign_id
             ):
                 return _error(
@@ -2050,7 +2111,9 @@ def create_app(
         try:
             return runtime.campaign_operations.external_authorization_preview(campaign_id)
         except (KeyError, ValueError, CampaignOperationsError) as error:
-            return _error(400, getattr(error, "code", "external_authorization_preview_failed"), str(error))
+            return _error(
+                400, getattr(error, "code", "external_authorization_preview_failed"), str(error)
+            )
 
     @app.post(f"{API_PREFIX}/campaigns/{{campaign_id}}/authorize-external")
     async def authorize_external_campaign(
@@ -2082,16 +2145,31 @@ def create_app(
     async def execute_external_campaign(campaign_id: str):
         try:
             campaign = runtime.store.get_campaign(campaign_id)
-            if campaign["authorization"] != "simulation_authorized" or not runtime.store.has_execution_declaration(
+            if campaign[
+                "authorization"
+            ] != "simulation_authorized" or not runtime.store.has_execution_declaration(
                 campaign_id
             ):
-                return _error(400, "execution_not_authorized", "authorize the campaign before external execution")
+                return _error(
+                    400,
+                    "execution_not_authorized",
+                    "authorize the campaign before external execution",
+                )
             configuration = json.loads(campaign["configuration_json"] or "{}")
             if configuration.get("execution_mode") != "external_smtp":
-                return _error(400, "external_authorization_required", "bind a server-issued external campaign authorization first")
+                return _error(
+                    400,
+                    "external_authorization_required",
+                    "bind a server-issued external campaign authorization first",
+                )
             runtime.store.clear_pause_request(campaign_id)
             started = runtime.workers.start(campaign_id)
-            return {"campaign_id": campaign_id, "started": started, "mode": "external_smtp", "external_access": False}
+            return {
+                "campaign_id": campaign_id,
+                "started": started,
+                "mode": "external_smtp",
+                "external_access": False,
+            }
         except (KeyError, ValueError, PermissionError) as error:
             return _error(400, "external_execution_failed", str(error))
 
@@ -2200,21 +2278,30 @@ def create_app(
 
     def _verify_prepared_artifact(prepared: Mapping[str, Any]) -> dict[str, Any]:
         prepared = dict(prepared)
-        proof_row = runtime.store.get_outbound_proof(prepared["proof_id"]) if prepared.get("proof_id") else None
+        proof_row = (
+            runtime.store.get_outbound_proof(prepared["proof_id"])
+            if prepared.get("proof_id")
+            else None
+        )
         if proof_row is None:
             raise ValueError("prepared message has no verifiable outbound proof")
         proof = make_proof(proof_row["id"], proof_row["proof"])
         verify_proof(proof, bytes(prepared["mime_bytes"]))
         if prepared["content_hash"] != proof.content_hash:
             raise ValueError("prepared message content identity does not match its proof")
-        return {"proof_id": proof.proof_id, "proof_hash": proof.proof_hash, "content_hash": proof.content_hash}
+        return {
+            "proof_id": proof.proof_id,
+            "proof_hash": proof.proof_hash,
+            "content_hash": proof.content_hash,
+        }
 
     @app.get(f"{API_PREFIX}/campaigns/{{campaign_id}}/prepared-messages/{{intent_id}}")
     async def prepared_message_inspection(campaign_id: str, intent_id: str):
         try:
             with runtime.store.connect() as connection:
                 intent = connection.execute(
-                    "SELECT id, normalized_email FROM delivery_intents WHERE id=? AND campaign_id=?",
+                    "SELECT id, normalized_email FROM delivery_intents "
+                    "WHERE id=? AND campaign_id=?",
                     (intent_id, campaign_id),
                 ).fetchone()
             if intent is None:
@@ -2250,7 +2337,15 @@ def create_app(
                 "mime_size_bytes": len(prepared["mime_bytes"]),
                 "headers": {
                     key: message.get(key)
-                    for key in ("From", "To", "Subject", "Date", "Message-ID", "MIME-Version", "Content-Type")
+                    for key in (
+                        "From",
+                        "To",
+                        "Subject",
+                        "Date",
+                        "Message-ID",
+                        "MIME-Version",
+                        "Content-Type",
+                    )
                     if message.get(key) is not None
                 },
                 "parts": parts,
@@ -2266,7 +2361,8 @@ def create_app(
         try:
             with runtime.store.connect() as connection:
                 intent = connection.execute(
-                    "SELECT id, normalized_email FROM delivery_intents WHERE id=? AND campaign_id=?",
+                    "SELECT id, normalized_email FROM delivery_intents "
+                    "WHERE id=? AND campaign_id=?",
                     (intent_id, campaign_id),
                 ).fetchone()
             if intent is None:
@@ -2279,7 +2375,9 @@ def create_app(
                 content=prepared["mime_bytes"],
                 media_type="message/rfc822",
                 headers={
-                    "content-disposition": f'attachment; filename="{intent["normalized_email"]}.eml"',
+                    "content-disposition": (
+                        f'attachment; filename="{intent["normalized_email"]}.eml"'
+                    ),
                     "cache-control": "no-store",
                 },
             )
@@ -2295,7 +2393,11 @@ def create_app(
         try:
             attempt = runtime.store.latest_attempt_for_campaign(campaign_id, attempt_id)
             runtime.store.reconcile_attempt(attempt_id, payload.decision)
-            return {"campaign_id": campaign_id, "attempt_id": attempt["id"], "decision": payload.decision}
+            return {
+                "campaign_id": campaign_id,
+                "attempt_id": attempt["id"],
+                "decision": payload.decision,
+            }
         except KeyError:
             return _error(404, "attempt_not_found", "campaign attempt was not found")
         except ValueError as error:
@@ -2321,14 +2423,6 @@ def create_app(
             return runtime.campaign_operations.control(campaign_id, "resume")
         except (KeyError, ValueError, PermissionError, CampaignOperationsError) as error:
             return _error(400, "resume_failed", str(error))
-
-    @app.get(f"{API_PREFIX}/providers/legacy/mailboxes")
-    async def retired_mailboxes():
-        return _error(
-            410,
-            "mailbox_scope_retired",
-            "Mailforge is outbound-only; mailbox synchronization and IMAP/POP3 operations are retired",
-        )
 
     @app.get(f"{API_PREFIX}/providers")
     async def providers():
@@ -2511,10 +2605,16 @@ def create_app(
         try:
             campaign = runtime.store.get_campaign(payload.campaign_id)
             if campaign["provider_account_ref"] != provider_ref:
-                return _error(400, "provider_campaign_mismatch", "campaign is not bound to this provider")
-            preview = runtime.campaign_operations.external_authorization_preview(payload.campaign_id)
+                return _error(
+                    400, "provider_campaign_mismatch", "campaign is not bound to this provider"
+                )
+            preview = runtime.campaign_operations.external_authorization_preview(
+                payload.campaign_id
+            )
             if preview["prepared_set_hash"] != payload.prepared_set_hash:
-                return _error(400, "campaign_identity_mismatch", "prepared campaign identity does not match")
+                return _error(
+                    400, "campaign_identity_mismatch", "prepared campaign identity does not match"
+                )
             return runtime.provider_operations.issue_campaign_grant(
                 provider_ref,
                 purpose=payload.purpose,

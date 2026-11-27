@@ -83,6 +83,7 @@ class ProviderService:
             }
             for row in self.store.list_provider_profiles(kind=kind.value if kind else None)
         ]
+
     def validate(self, ref: str) -> dict[str, object]:
         profile = self.profile(ref)
         profile.validate()

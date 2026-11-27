@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     transform.add_argument("output", type=Path, nargs="?")
 
     disposable = commands.add_parser("refresh-disposable", help="refresh disposable-domain data")
-    disposable.add_argument("--path", type=Path, default=Path("config/disposable.json"))
+    disposable.add_argument("--path", type=Path)
     disposable.add_argument("--url", required=True)
 
     campaign = commands.add_parser("campaign", help="manage retained local send compatibility")
@@ -131,7 +131,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _sort(args: argparse.Namespace) -> int:
     overrides = {}
-    for source, target in (("results_dir", "results_dir"), ("config_dir", "config_dir"), ("checkpoint", "checkpoint_path"), ("max_bytes", "max_bytes"), ("profile", "profile"), ("progress_every", "progress_every")):
+    for source, target in (
+        ("results_dir", "results_dir"),
+        ("config_dir", "config_dir"),
+        ("checkpoint", "checkpoint_path"),
+        ("max_bytes", "max_bytes"),
+        ("profile", "profile"),
+        ("progress_every", "progress_every"),
+    ):
         value = getattr(args, source, None)
         if value is not None:
             overrides[target] = value
@@ -161,14 +168,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sort":
         return _sort(args)
     if args.command == "summary":
-        summary = EmailSorter(SortConfig.from_environment(results_dir=args.results_dir) if args.results_dir else SortConfig.from_environment()).view_summary()
+        summary = EmailSorter(
+            SortConfig.from_environment(results_dir=args.results_dir)
+            if args.results_dir
+            else SortConfig.from_environment()
+        ).view_summary()
         if summary is None:
             print("No summary found")
             return 1
         print(json.dumps(summary, indent=2))
         return 0
     if args.command == "clean":
-        config = SortConfig.from_environment(results_dir=args.results_dir) if args.results_dir else SortConfig.from_environment()
+        config = (
+            SortConfig.from_environment(results_dir=args.results_dir)
+            if args.results_dir
+            else SortConfig.from_environment()
+        )
         removed = EmailSorter(config).delete_results(confirm=args.yes)
         return 0 if removed or not config.results_dir.exists() else 1
     if args.command == "extract-jsonl":
@@ -178,66 +193,127 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "transform":
         if args.operation == "format":
-            if args.output is None: raise SystemExit("transform format requires an output path")
+            if args.output is None:
+                raise SystemExit("transform format requires an output path")
             format_email_file(args.input, args.output)
         elif args.operation == "dedupe":
             print(f"Removed {remove_duplicate_lines(args.input)} duplicates")
         elif args.operation == "list":
-            if args.output is None: raise SystemExit("transform list requires an output path")
+            if args.output is None:
+                raise SystemExit("transform list requires an output path")
             write_legacy_list(args.input, args.output)
         else:
             print(count_legacy_list(args.input))
         return 0
     if args.command == "refresh-disposable":
-        print(f"Saved {DisposableDomainStore(args.path).refresh(args.url)} disposable domains to {args.path}")
+        path = args.path or SortConfig.from_environment().disposable_path
+        print(f"Saved {DisposableDomainStore(path).refresh(args.url)} disposable domains to {path}")
         return 0
     if args.command == "campaign":
         if args.campaign_command == "demo":
             print(json.dumps(run_synthetic_demo(args.database), indent=2, default=str))
             return 0
         from mailforge.infrastructure.campaign_store import CampaignStore
+
         if args.campaign_command == "backup":
             if not args.database.is_file():
                 raise FileNotFoundError(args.database)
-            print(json.dumps({"backup": str(CampaignStore(args.database).backup_to(args.destination))}))
+            print(
+                json.dumps(
+                    {"backup": str(CampaignStore(args.database).backup_to(args.destination))}
+                )
+            )
             return 0
         if args.campaign_command == "restore":
-            print(json.dumps({"restored": str(CampaignStore.restore_from(args.source, args.destination))}))
+            print(
+                json.dumps(
+                    {"restored": str(CampaignStore.restore_from(args.source, args.destination))}
+                )
+            )
             return 0
         if args.campaign_command == "translate-legacy":
             print(json.dumps(load_legacy_configuration(args.config), indent=2, default=str))
             return 0
         if args.campaign_command == "import-legacy":
-            print(json.dumps(migrate_legacy_state(args.database, args.config, args.campaign, args.targets), indent=2, default=str))
+            print(
+                json.dumps(
+                    migrate_legacy_state(args.database, args.config, args.campaign, args.targets),
+                    indent=2,
+                    default=str,
+                )
+            )
             return 0
-        print(json.dumps(rehearse_legacy_migration(args.database, args.config, args.campaign), indent=2, default=str))
+        print(
+            json.dumps(
+                rehearse_legacy_migration(args.database, args.config, args.campaign),
+                indent=2,
+                default=str,
+            )
+        )
         return 0
     if args.command == "app":
-        data = DataDirectory.from_path(args.data_dir if hasattr(args, "data_dir") else Path("state"))
+        data = DataDirectory.from_path(
+            args.data_dir if hasattr(args, "data_dir") else Path("state")
+        )
         if args.app_command == "init":
-            data.initialize(); print(json.dumps({"initialized": True, "data_directory_id": data.identity})); return 0
+            data.initialize()
+            print(json.dumps({"initialized": True, "data_directory_id": data.identity}))
+            return 0
         if args.app_command == "backup":
-            print(json.dumps({"backup": str(create_backup(data, args.destination))})); return 0
+            print(json.dumps({"backup": str(create_backup(data, args.destination))}))
+            return 0
         if args.app_command == "validate-backup":
-            print(json.dumps(validate_backup(args.backup), indent=2)); return 0
+            print(json.dumps(validate_backup(args.backup), indent=2))
+            return 0
         if args.app_command == "restore":
-            print(json.dumps({"restored": str(restore_backup(args.backup, args.destination, replace=args.replace))})); return 0
+            print(
+                json.dumps(
+                    {
+                        "restored": str(
+                            restore_backup(args.backup, args.destination, replace=args.replace)
+                        )
+                    }
+                )
+            )
+            return 0
         application = LocalApplication(data, port=args.port)
-        if args.app_command == "status": print(json.dumps(application.status(), indent=2))
-        elif args.app_command == "start": print(json.dumps(application.start(open_browser=not args.no_open), indent=2))
-        elif args.app_command == "stop": print(json.dumps(application.stop(), indent=2))
-        elif args.app_command == "restart": application.stop(); print(json.dumps(application.start(open_browser=not args.no_open), indent=2))
-        else: print(json.dumps(application.open(), indent=2))
+        if args.app_command == "status":
+            print(json.dumps(application.status(), indent=2))
+        elif args.app_command == "start":
+            print(json.dumps(application.start(open_browser=not args.no_open), indent=2))
+        elif args.app_command == "stop":
+            print(json.dumps(application.stop(), indent=2))
+        elif args.app_command == "restart":
+            application.stop()
+            print(json.dumps(application.start(open_browser=not args.no_open), indent=2))
+        else:
+            print(json.dumps(application.open(), indent=2))
         return 0
     if args.command == "serve":
         import uvicorn
+
         from mailforge.interfaces.web import create_app
-        database = args.database or ((args.data_dir / "mailforge.sqlite3") if args.data_dir else Path("state/mailforge.sqlite3"))
+
+        database = args.database or (
+            (args.data_dir / "mailforge.sqlite3")
+            if args.data_dir
+            else Path("state/mailforge.sqlite3")
+        )
         frontend = args.frontend_dir or Path(__file__).resolve().parents[1] / "web_assets"
-        if args.host not in {"127.0.0.1", "localhost", "::1"}: raise SystemExit("mailforge serve only binds to a loopback host")
+        if args.host not in {"127.0.0.1", "localhost", "::1"}:
+            raise SystemExit("mailforge serve only binds to a loopback host")
         try:
             with DatabaseProcessLock(database):
-                uvicorn.run(create_app(database, frontend_dir=frontend, data_directory=args.data_dir or database.parent), host=args.host, port=args.port, log_level="info")
+                uvicorn.run(
+                    create_app(
+                        database,
+                        frontend_dir=frontend,
+                        data_directory=args.data_dir or database.parent,
+                    ),
+                    host=args.host,
+                    port=args.port,
+                    log_level="info",
+                )
         except ProcessLockError as error:
             raise SystemExit(str(error)) from error
         return 0
