@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -81,6 +82,58 @@ def test_web_comparison_endpoint_accepts_multiple_files_without_persistence_side
 
     assert response.status_code == 200
     assert [item["email"] for item in response.json()["results"]] == ["alice@example.com"]
+
+
+def test_sorted_result_handoff_reuses_the_canonical_saved_list_authority(tmp_path: Path) -> None:
+    with TestClient(
+        create_app(tmp_path / "handoff.sqlite3", allowed_hosts={"testserver", "127.0.0.1"})
+    ) as client:
+        csrf = client.get("/api/v1/session").json()["csrf_token"]
+        headers = {"x-mailforge-csrf": csrf}
+        created = client.post(
+            "/api/v1/list-tools/jobs?profile=full&dns_mode=offline",
+            headers=headers,
+            files={"file": ("sorted.txt", b"alice@example.com\nbob@example.com\n", "text/plain")},
+        )
+        assert created.status_code == 200
+        job_id = created.json()["id"]
+        started = client.post(f"/api/v1/list-tools/jobs/{job_id}/start", headers=headers)
+        assert started.status_code == 200
+        for _ in range(100):
+            job = client.get(f"/api/v1/list-tools/jobs/{job_id}").json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert job["status"] == "completed"
+
+        handoff = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/handoff",
+            headers=headers,
+            json={},
+        )
+        assert handoff.status_code == 200, handoff.text
+        assert handoff.json()["records_imported"] == 2
+        list_id = handoff.json()["list"]["id"]
+
+        repeated = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/handoff",
+            headers=headers,
+            json={},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["reused"] is True
+        assert repeated.json()["list"]["id"] == list_id
+
+        comparison = client.post(
+            "/api/v1/list-comparison/preview",
+            headers=headers,
+            data={"main_list_id": list_id, "operation": "subtract"},
+        )
+        assert comparison.status_code == 200
+        assert [item["email"] for item in comparison.json()["results"]] == [
+            "alice@example.com",
+            "bob@example.com",
+        ]
 
 
 def test_direct_message_revision_can_bind_to_a_campaign_without_manual_template_setup(

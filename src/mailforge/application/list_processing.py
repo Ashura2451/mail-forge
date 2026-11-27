@@ -392,3 +392,20 @@ class ListProcessingService:
         if root not in path.parents or not path.is_file():
             raise ListProcessingError("artifact path is not allowed", "artifact_forbidden")
         return path, row["filename"]
+
+    def structured_result_path(self, job_id: str) -> Path:
+        job = self.get_job(job_id)
+        if job["status"] != "completed":
+            raise ListProcessingError("the sorted result is not ready to use yet", "job_not_ready")
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM list_processing_artifacts "
+                "WHERE job_id = ? AND filename = 'processing.jsonl'",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise ListProcessingError(
+                "the sorted result is not available for handoff", "handoff_unavailable"
+            )
+        path, _ = self.artifact_path(job_id, row["id"])
+        return path

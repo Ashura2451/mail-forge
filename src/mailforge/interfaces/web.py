@@ -89,6 +89,10 @@ class ListInput(BaseModel):
     description: str = Field(default="", max_length=500)
 
 
+class ListHandoffInput(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+
+
 class ContactUpdateInput(BaseModel):
     display_name: str | None = Field(default=None, max_length=240)
     metadata: dict[str, Any] | None = None
@@ -1850,8 +1854,29 @@ def create_app(
             return _error(404 if error.code == "job_not_found" else 400, error.code, str(error))
 
     @app.post(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/{{action}}")
-    async def list_tools_job_action(job_id: str, action: str):
+    async def list_tools_job_action(
+        job_id: str, action: str, payload: ListHandoffInput | None = None
+    ):
         try:
+            if action == "handoff":
+                result_path = runtime.list_processing.structured_result_path(job_id)
+                description = f"Sort email result from job {job_id}"
+                existing = _query(
+                    runtime.store,
+                    "SELECT id, name, description FROM lists WHERE description = ? LIMIT 1",
+                    (description,),
+                )
+                if existing:
+                    return {"list": existing[0], "reused": True}
+                name = payload.name.strip() if payload and payload.name else ""
+                name = name or f"Sorted result {job_id[:8]}"
+                list_id = runtime.store.create_list(name, description)
+                imported = runtime.campaigns.import_sort_results(result_path, list_id)
+                return {
+                    "list": {"id": list_id, "name": name, "description": description},
+                    "reused": False,
+                    **imported,
+                }
             if action == "start":
                 return runtime.list_processing.start(job_id)
             if action == "resume":
@@ -1867,6 +1892,8 @@ def create_app(
                 error.code,
                 str(error),
             )
+        except (OSError, ValueError, KeyError, sqlite3.IntegrityError) as error:
+            return _error(400, "handoff_failed", str(error))
 
     @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/artifacts/{{artifact_id}}")
     async def list_tools_artifact(job_id: str, artifact_id: str):

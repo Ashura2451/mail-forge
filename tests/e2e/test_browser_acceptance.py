@@ -97,7 +97,6 @@ def test_sort_compare_and_history_workflows(local_page) -> None:
     page.get_by_role("main").get_by_role("button", name="Compare lists", exact=True).click()
     page.get_by_role("heading", name="Comparison result").wait_for()
     assert page.get_by_text("alice@example.com").is_visible()
-
     page.get_by_role("button", name="History", exact=True).click()
     assert page.get_by_role("heading", name="History").is_visible()
 
@@ -114,6 +113,39 @@ def test_direct_send_accepts_pasted_addresses_and_html(local_page) -> None:
     page.get_by_text("Recipient set and message prepared").wait_for()
     page.get_by_role("button", name="Prepare exact scope").click()
     page.get_by_text("Send prepared").wait_for()
+
+
+def test_sorted_result_moves_into_compare_without_export(local_page) -> None:
+    page, base = local_page
+    page.goto(f"{base}/sort", wait_until="networkidle")
+    page.get_by_label("Email sorter input file").set_input_files(
+        {
+            "name": "handoff.txt",
+            "mimeType": "text/plain",
+            "buffer": b"alice@example.com\nbob@example.com\n",
+        }
+    )
+    page.get_by_role("button", name="Sort this file").click()
+    page.get_by_text("completed", exact=True).wait_for(timeout=10_000)
+    page.get_by_role("button", name="Compare this result").click()
+    page.wait_for_url("**/compare?list_id=*")
+    assert "list_id=" in page.url
+    page.get_by_text("Using the selected sorted result from this local workspace.").wait_for()
+    page.get_by_role("main").get_by_role("button", name="Compare lists", exact=True).click()
+    page.get_by_role("heading", name="Comparison result").wait_for()
+    assert page.get_by_text("alice@example.com").is_visible()
+    page.get_by_role("navigation", name="Main navigation").get_by_role(
+        "button", name="Sort email", exact=True
+    ).click()
+    page.get_by_text("handoff.txt").click()
+    page.get_by_role("button", name="Send this result").click()
+    page.wait_for_url("**/send?list_id=*")
+    page.get_by_text("Using the selected sorted result from this local workspace.").wait_for()
+    playwright.expect(
+        page.get_by_role("main").get_by_role("button", name="Review this send")
+    ).to_be_enabled()
+    page.get_by_role("main").get_by_role("button", name="Review this send").click()
+    page.get_by_text("Recipient set and message prepared").wait_for()
 
 
 def test_narrow_navigation_keeps_labels_and_focus(local_page) -> None:
