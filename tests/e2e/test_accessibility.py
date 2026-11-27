@@ -73,20 +73,22 @@ def test_console_routes_have_no_axe_critical_or_serious_findings(tmp_path: Path)
             page.get_by_label("List name").focus()
             page.keyboard.press("Tab")
             assert page.locator(":focus-visible").count() == 1
-            page.get_by_role("button", name="Dashboard", exact=True).click()
+            page.get_by_role("button", name="Home", exact=True).click()
             for label in (
-                "Dashboard",
+                "Home",
                 "Contacts",
                 "Data Studio",
-                "Message Studio",
-                "Campaigns",
+                "Messages",
+                "Send",
                 "Automations",
-                    "Delivery Events",
-                "Providers",
+                "Delivery Events",
+                "Email accounts",
                 "Reports & Insights",
                 "Activity",
             ):
-                if label != "Dashboard":
+                if label != "Home":
+                    if label in {"Data Studio", "Automations", "Delivery Events", "Email accounts", "Reports & Insights"} and page.get_by_role("button", name="More tools").get_attribute("aria-expanded") != "true":
+                        page.get_by_role("button", name="More tools").click()
                     page.get_by_role("button", name=label).click()
                 result = page.evaluate(
                     """async () => await axe.run(document, {

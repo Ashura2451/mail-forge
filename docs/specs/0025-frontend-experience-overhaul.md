@@ -79,3 +79,25 @@ read back.
 3. Normalize shared visual states and responsive behavior.
 4. Build, lint, and run focused rendered browser/accessibility checks; record
    remaining gaps honestly.
+
+## Product-wide discovery inventory
+
+Rendered route discovery at the local FastAPI boundary covered `/`,
+`/campaigns`, `/contacts`, `/message-studio`, `/list-tools`, `/activity`,
+`/segments`, `/data-studio`, `/data-connections`, `/automations`, `/functions`,
+`/providers`, `/integrations`, `/inbound`, `/reports`, `/email-standards`, and
+`/maintenance`. The inventory included route headings, forms, tables, empty
+states, navigation affordances, and available action controls.
+
+The first complete pass found three distinct product areas: ordinary work
+(Home, Send, Contacts, Messages, List cleaning, Activity), advanced data and
+automation tools (Segments, Data Studio, Data Connections, Automations,
+Functions), and safeguards/evidence (Email accounts, Delivery Events, Reports,
+Email Standards, Maintenance). The selected direction keeps those areas
+reachable while making ordinary work the default path.
+
+The current implementation has now applied the direction to the shared shell,
+Home, Send, Contacts, Messages, List cleaning, Activity, advanced navigation,
+account setup, reporting copy, audience copy, data preparation copy, workflow
+copy, delivery-record copy, and status labels. Remaining route-specific
+interaction simplification is still in progress and is not yet owner-accepted.

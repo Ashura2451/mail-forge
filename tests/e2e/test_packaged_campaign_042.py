@@ -117,7 +117,7 @@ def test_packaged_operator_campaign_journey_survives_restart_without_duplicate_c
                 page.get_by_role("button", name="Import to selected list").click()
                 page.get_by_text("Contacts imported").wait_for()
 
-                page.get_by_role("button", name="Campaigns").click()
+                page.get_by_role("button", name="Send").click()
                 page.get_by_label("Audience list").select_option(label="Packaged campaign audience")
                 page.get_by_label("Provider account").select_option("campaign-capture")
                 page.get_by_label("Campaign name").fill("Packaged operator campaign")

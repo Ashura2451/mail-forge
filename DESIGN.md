@@ -38,7 +38,7 @@ feeling like a spreadsheet.
 
 Use the system sans stack for reliable local operation. Headings are compact
 and confident; body copy is plain and direct. The implementation owns semantic
-tokens in `web/src/styles.css` rather than scattering raw colors through
+tokens in `web/src/App.css` rather than scattering raw colors through
 components.
 
 Core roles:
@@ -57,6 +57,9 @@ headings, and 32px page titles. Use `tabular-nums` for counts and timestamps.
   location. The primary path is Home, Send, Contacts, Messages, List cleaning,
   and Activity. Advanced capabilities remain available under an explicit More
   tools group and preserve their deep links.
+- More tools is collapsed on Home and expands on demand or when an advanced
+  route is opened directly. It is progressive disclosure, not a replacement
+  for removing redundant controls inside a workbench.
 - Status badges: always include text, never color alone. Use `Draft`, `Ready`,
   `Running`, `Paused`, `Completed`, `Needs review`, and `Unverified` exactly.
 - Cards: one clear title, one primary value, one supporting sentence, and an

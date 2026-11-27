@@ -76,19 +76,20 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             browser = sync.chromium.launch(headless=True, executable_path=executable)
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            assert page.get_by_role("heading", name="Dashboard").is_visible()
+            assert page.get_by_role("heading", name="Home").is_visible()
 
             page.goto(f"http://127.0.0.1:{port}/campaigns", wait_until="networkidle")
-            assert page.get_by_role("heading", name="Campaigns").is_visible()
+            assert page.get_by_role("heading", name="Send", exact=True).is_visible()
+            page.get_by_role("button", name="More tools").click()
             page.get_by_role("button", name="Reports & Insights").click()
             assert page.url.endswith("/reports")
             page.go_back(wait_until="networkidle")
-            assert page.get_by_role("heading", name="Campaigns").is_visible()
+            assert page.get_by_role("heading", name="Send", exact=True).is_visible()
             page.go_forward(wait_until="networkidle")
             assert page.locator("h1").filter(has_text="Reports & Insights").is_visible()
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
 
-            page.get_by_role("button", name="Message Studio").click()
+            page.get_by_role("button", name="Messages", exact=True).click()
             page.get_by_role("button", name="+ New message").click()
             page.get_by_role("heading", name="Compose message").wait_for()
             page.get_by_label("Subject").fill("Browser studio subject")
@@ -123,7 +124,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.get_by_role("button", name="Import to selected list").click()
             page.get_by_text("Contact records").wait_for()
 
-            page.get_by_role("button", name="Campaigns").click()
+            page.get_by_role("button", name="Send").click()
             page.get_by_label("Audience list").select_option(label="Browser acceptance audience")
             page.get_by_label("Campaign name").fill("Browser synthetic campaign")
             page.get_by_role("button", name="Create campaign").click()
@@ -138,11 +139,12 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.wait_for_timeout(500)
             assert page.get_by_text("Browser synthetic campaign").is_visible()
 
-            for label in ("Delivery Events", "Providers", "Activity"):
+            page.get_by_role("button", name="More tools").click()
+            for label in ("Delivery Events", "Email accounts", "Activity"):
                 page.get_by_role("button", name=label).click()
-                assert page.get_by_role("heading", name=label).is_visible()
+                assert page.get_by_role("heading", name=label, exact=True).is_visible()
 
-            page.get_by_role("button", name="Providers").click()
+            page.get_by_role("button", name="Email accounts").click()
             page.get_by_text(
                 "No email accounts yet. Add one here when you are ready to send."
             ).wait_for()
@@ -201,7 +203,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
                 == "-1"
             )
             page.get_by_role("button", name="Open navigation").click()
-            page.get_by_role("button", name="Campaigns").click()
+            page.get_by_role("button", name="Send").click()
             page.get_by_label("Communication purpose").select_option("marketing")
             page.get_by_label("Audience list").select_option(label="Browser acceptance audience")
             page.get_by_label("Campaign name").fill("Browser mobile marketing campaign")
@@ -278,6 +280,7 @@ def test_browser_audience_management_policy_journey(tmp_path: Path) -> None:
             assert page.get_by_text("excluded").is_visible()
             page.get_by_role("button", name="Deactivate contact").click()
             page.get_by_text("Contact deactivated").wait_for()
+            page.get_by_role("button", name="More tools").click()
             page.get_by_role("button", name="Segments").click()
             page.get_by_label("Segment name").fill("Audience 036 segment")
             page.get_by_label("Value").fill("alice@example.com")
@@ -290,7 +293,7 @@ def test_browser_audience_management_policy_journey(tmp_path: Path) -> None:
             page.get_by_text("Segment revision saved").wait_for()
             page.get_by_role("button", name="Preview →").click()
             page.get_by_text("1 matching contacts").wait_for()
-            page.get_by_role("button", name="Campaigns").click()
+            page.get_by_role("button", name="Send").click()
             page.get_by_label("Or dynamic segment").select_option(label="Audience 036 segment")
             page.get_by_label("Campaign name").fill("Audience 036 readiness campaign")
             page.get_by_role("button", name="Create draft").click()
@@ -415,7 +418,8 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                     page.get_by_text("Message draft saved").wait_for()
                     page.get_by_role("button", name="Publish revision").click()
                     page.get_by_text("Message revision published").wait_for()
-                page.get_by_role("button", name="Providers").click()
+                page.get_by_role("button", name="More tools").click()
+                page.get_by_role("button", name="Email accounts").click()
                 page.get_by_label("Provider profile").select_option("local_capture_only_smtp")
                 page.get_by_label("Account name").fill("capture")
                 page.get_by_label("SMTP port").fill(str(smtp.server_address[1]))
@@ -525,7 +529,7 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
             page = browser.new_page(viewport={"width": 1440, "height": 900})
             page.set_default_timeout(5000)
             page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
-            page.get_by_role("heading", name="Dashboard").wait_for()
+            page.get_by_role("heading", name="Home").wait_for()
             page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
             page.get_by_label("Provider profile").wait_for()
             page.get_by_label("Provider profile").locator("option[value='generic_smtp']").wait_for(
@@ -720,6 +724,7 @@ def test_data_studio_browser_recipe_preview(tmp_path: Path) -> None:
             browser = sync.chromium.launch(headless=True, executable_path=executable)
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="More tools").click()
             page.get_by_role("button", name="Data Studio", exact=True).click()
             page.locator("input[aria-label='Data Studio source file']").set_input_files(
                 {
@@ -760,7 +765,7 @@ def test_data_studio_browser_recipe_preview(tmp_path: Path) -> None:
             page.get_by_role("heading", name="Completed output").wait_for()
             assert page.get_by_role("link", name="Download data-studio-output.csv").is_visible()
             page.set_viewport_size({"width": 390, "height": 844})
-            assert page.get_by_role("heading", name="Source and recipe").is_visible()
+            assert page.get_by_role("heading", name="Input and steps").is_visible()
             browser.close()
     finally:
         server.terminate()
@@ -810,7 +815,7 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
             page.get_by_text("8 accepted").wait_for()
             page.get_by_role("button", name="Closure audience").click()
             page.get_by_role("button", name="Import to selected list").click()
-            page.get_by_role("button", name="Campaigns").click()
+            page.get_by_role("button", name="Send").click()
             page.get_by_label("Audience list").select_option(label="Closure audience")
             page.get_by_label("Campaign name").fill("Closure campaign")
             page.get_by_role("button", name="Create campaign").click()
@@ -827,15 +832,16 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
 
             reopened = context.new_page()
             reopened.goto(base, wait_until="networkidle")
-            reopened.get_by_role("button", name="Campaigns", exact=True).click()
+            reopened.get_by_role("button", name="Send", exact=True).click()
             reopened.get_by_text("Closure campaign").wait_for()
             for _ in range(80):
                 reopened.get_by_role("button", name="Refresh").click()
-                if reopened.get_by_text("completed", exact=True).is_visible():
+                if reopened.get_by_text("Completed", exact=True).is_visible():
                     break
                 reopened.wait_for_timeout(25)
-            assert reopened.get_by_text("completed", exact=True).is_visible()
+            assert reopened.get_by_text("Completed", exact=True).is_visible()
 
+            reopened.get_by_role("button", name="More tools").click()
             reopened.get_by_role("button", name="Delivery Events").click()
             reopened.locator("input[type=file]").set_input_files(
                 {
@@ -849,7 +855,7 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
                     ).encode(),
                 }
             )
-            reopened.get_by_role("button", name="Import delivery-event evidence").click()
+            reopened.get_by_role("button", name="Import records").click()
             reopened.get_by_text("Delivery-event evidence imported").wait_for()
             reopened.get_by_text("create_unsubscribe").wait_for()
             reopened.get_by_label("Search delivery events").fill("unsubscribe")
@@ -871,6 +877,7 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
             fresh_page = fresh_context.new_page()
             fresh_page.goto(base, wait_until="networkidle")
             fresh_page.get_by_role("button", name="Open navigation").click()
+            fresh_page.get_by_role("button", name="More tools").click()
             fresh_page.get_by_role("button", name="Delivery Events").click()
             assert fresh_page.get_by_text("No delivery-event actions need review.").is_visible()
             fresh_context.close()
@@ -906,6 +913,7 @@ def test_browser_visual_automation_revision_lifecycle(tmp_path: Path) -> None:
             browser = sync.chromium.launch(headless=True, executable_path=executable)
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="More tools").click()
             page.get_by_role("button", name="Automations", exact=True).click()
             page.get_by_label("Automation name").fill("Browser visual automation")
             page.get_by_role("button", name="+ New automation").click()
@@ -920,7 +928,7 @@ def test_browser_visual_automation_revision_lifecycle(tmp_path: Path) -> None:
             page.get_by_role("button", name="Activate").click()
             page.get_by_text("Workflow activated").wait_for()
             assert page.get_by_text("active", exact=True).is_visible()
-            page.get_by_role("button", name="Dashboard", exact=True).click()
+            page.get_by_role("button", name="Home", exact=True).click()
             page.get_by_role("button", name="Automations", exact=True).click()
             page.get_by_text("Browser visual automation", exact=True).wait_for()
             browser.close()
@@ -1083,14 +1091,14 @@ def test_browser_unified_workspace_operational_controls(tmp_path: Path) -> None:
             page.get_by_text("one_click_not_fully_verified").wait_for()
 
             page.get_by_role("button", name="Maintenance").click()
-            page.get_by_role("heading", name="Operational assurance").wait_for()
+            page.get_by_role("heading", name="Service health").wait_for()
             assert page.locator(".operational-panel .status-chip").is_visible()
             page.get_by_role("button", name="Run health check").click()
             page.get_by_text("Operational health check recorded").wait_for()
             page.get_by_role("button", name="Open diagnostic export").wait_for()
             page.get_by_label("Application timezone").fill("America/New_York")
             page.get_by_role("button", name="Save application preferences").click()
-            page.get_by_text("Application preferences saved").wait_for()
+            page.get_by_text("Workspace preferences saved").wait_for()
             page.get_by_role("button", name="Reports & Insights").click()
             page.get_by_role("button", name="Maintenance").click()
             timezone = page.get_by_label("Application timezone")
@@ -1144,7 +1152,7 @@ def test_custom_html_import_edit_export_and_safe_preview(tmp_path: Path) -> None
             browser = sync.chromium.launch(headless=True, executable_path=executable)
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            page.get_by_role("button", name="Message Studio").click()
+            page.get_by_role("button", name="Messages", exact=True).click()
             page.get_by_role("button", name="Custom HTML", exact=True).click()
             page.locator("input[aria-label='Custom HTML file']").set_input_files(
                 {
@@ -1268,7 +1276,7 @@ def test_message_studio_structured_personalization_recovery_and_attachment_isola
             page.get_by_text("Recipient attachment mapping saved").wait_for()
             page.locator(".list-row").filter(has_text="ada-report.pdf").last.wait_for()
             page.locator(".list-row").filter(has_text="grace-report.pdf").last.wait_for()
-            recipient_panel = page.locator("section.panel").filter(has_text="Recipient inspection").last
+            recipient_panel = page.locator("section.panel").filter(has_text="Personalization preview").last
             recipient_panel.get_by_role("checkbox").nth(0).check()
             recipient_panel.get_by_role("checkbox").nth(1).check()
             page.get_by_role("button", name="Inspect selected recipients").click()
