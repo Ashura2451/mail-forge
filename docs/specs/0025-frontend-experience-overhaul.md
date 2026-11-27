@@ -1,6 +1,6 @@
 # 0025 · Frontend experience overhaul
 
-**Status**: In Progress
+**Status**: Ready for Business Owner acceptance
 **Outcome**: MAILFORGE-043
 **Date**: 2026-11-27
 
@@ -96,8 +96,27 @@ Functions), and safeguards/evidence (Email accounts, Delivery Events, Reports,
 Email Standards, Maintenance). The selected direction keeps those areas
 reachable while making ordinary work the default path.
 
-The current implementation has now applied the direction to the shared shell,
-Home, Send, Contacts, Messages, List cleaning, Activity, advanced navigation,
+The final implementation applies the direction to the shared shell, Home,
+Send, Contacts, Messages, List cleaning, Activity, advanced navigation,
 account setup, reporting copy, audience copy, data preparation copy, workflow
-copy, delivery-record copy, and status labels. Remaining route-specific
-interaction simplification is still in progress and is not yet owner-accepted.
+copy, delivery-record copy, and status labels. The consolidated Send workspace
+also retains loopback execution for local capture accounts and exposes external
+authorization as a collapsed, exact-scope approval step. External grants are
+still issued and bound by the server authority; the UI does not ask operators
+to copy authorization references or hashes.
+
+The acceptance guide records the practical inspection path and the remaining
+limits. Business Owner acceptance is not implied by this status, and no human
+participant usability study was performed by the agent.
+
+## Independent review follow-up
+
+An independent read-only browser review exercised first-use, populated, mobile,
+account, and safeguard surfaces. It identified transient empty-state flashes,
+an unexplained disabled first-send action, unnamed collapsed mobile controls,
+scattered safeguard discovery, and technical wording in ordinary surfaces.
+The candidate was remediated with an explicit initial loading state, audience
+recovery guidance, mobile navigation labels/titles, a Home safety-and-recovery
+entry point, stronger Home hierarchy, and human-readable status/evidence copy.
+The review was rerun as an expert browser assessment only; it does not claim
+human participant validation.

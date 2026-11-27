@@ -127,8 +127,8 @@ def test_packaged_operator_campaign_journey_survives_restart_without_duplicate_c
                 page.get_by_text("Campaign prepared").wait_for()
                 page.get_by_role("button", name="Confirm local send").click()
                 page.get_by_text("Synthetic execution authorized").wait_for()
-                page.get_by_role("button", name="Run trusted loopback SMTP").click()
-                page.get_by_text("Loopback campaign worker started.").wait_for()
+                page.get_by_role("button", name="Start local send").click()
+                page.get_by_text("Synthetic worker started").wait_for()
                 page.get_by_text("Completed successfully", exact=True).wait_for(timeout=10_000)
                 assert len(smtp.received_messages) == 1
                 page.get_by_role("button", name="Attempts").click()

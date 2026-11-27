@@ -162,7 +162,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.get_by_role("button", name="Open test").click()
             page.get_by_label("Owner-controlled recipient").fill("owned@example.com")
             page.get_by_label("Published message revision").select_option(index=1)
-            page.locator("details").filter(has_text="Advanced authorization").locator(
+            page.locator("details").filter(has_text="Server-issued approval details").locator(
                 "summary"
             ).click()
             page.get_by_label("Purpose").fill("browser synthetic authorization")
@@ -432,13 +432,13 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 page.get_by_role("button", name="Save account").click()
                 page.get_by_text("Email account saved locally; no connection made").wait_for()
                 row = page.locator("table tbody tr").filter(has_text="capture")
-                row.get_by_text("Sandbox: active").wait_for()
+                row.get_by_text("Sandbox status: Active").wait_for()
                 row.get_by_role("button", name="Open test").click()
                 page.get_by_label("Owner-controlled recipient").fill(recipient)
                 revision_selector = page.get_by_label("Published message revision")
                 revision_selector.select_option(index=2)
                 selected_revision = revision_selector.input_value()
-                page.locator("details").filter(has_text="Advanced authorization").locator(
+                page.locator("details").filter(has_text="Server-issued approval details").locator(
                     "summary"
                 ).click()
                 page.get_by_label("Purpose").fill("sandbox_qualification")
@@ -818,13 +818,18 @@ def test_browser_closure_and_inbound_review_survive_service_runtime(tmp_path: Pa
             page.get_by_role("button", name="Send").click()
             page.get_by_label("Audience list").select_option(label="Closure audience")
             page.get_by_label("Campaign name").fill("Closure campaign")
-                page.get_by_role("button", name="Create draft").click()
+            page.get_by_role("button", name="Create draft").click()
             page.get_by_role("button", name="Prepare").click()
             page.get_by_text("Campaign prepared").wait_for()
             page.get_by_role("button", name="Preview").click()
             page.get_by_role("heading", name="Message preview").wait_for()
-            preview = json.loads(page.locator(".preview-json").inner_text())
-            message_id = preview["messages"][0]["message_id"]
+            campaigns = page.request.get(f"{base}api/v1/campaigns").json()["items"]
+            campaign = next(item for item in campaigns if item["name"] == "Closure campaign")
+            workspace = page.request.get(f"{base}api/v1/campaigns/{campaign['id']}/workspace").json()
+            intent_id = workspace["preview"][0]["id"]
+            message_id = page.request.get(
+                f"{base}api/v1/campaigns/{campaign['id']}/prepared-messages/{intent_id}"
+            ).json()["message_id"]
             page.get_by_role("button", name="Confirm local send").click()
             page.get_by_role("button", name="Start local send").click()
             page.get_by_text("Synthetic worker started").wait_for()
