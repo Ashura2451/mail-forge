@@ -144,20 +144,20 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
 
             page.get_by_role("button", name="Providers").click()
             page.get_by_text(
-                "No provider accounts yet. Choose a profile and add a local SMTP account."
+                "No email accounts yet. Add one here when you are ready to send."
             ).wait_for()
             assert not page.get_by_role("heading", name="Controlled test message").is_visible()
             page.get_by_label("Provider profile").select_option("generic_smtp")
             page.get_by_label("Authentication method").select_option("password")
-            page.get_by_role("button", name="Save account configuration").click()
-            page.get_by_text("Provider account saved without a network connection").wait_for()
+            page.get_by_role("button", name="Save account").click()
+            page.get_by_text("Email account saved locally; no connection made").wait_for()
             page.locator("table tbody tr").filter(has_text="local-smtp").get_by_role(
                 "cell"
             ).first.wait_for()
-            page.get_by_role("button", name="Validate config").click()
+            page.get_by_role("button", name="Check settings").click()
             page.get_by_text("Configuration validated without network contact").wait_for()
             page.get_by_text("configuration_validated", exact=True).wait_for()
-            page.get_by_role("button", name="Open operations").click()
+            page.get_by_role("button", name="Open test").click()
             page.get_by_label("Owner-controlled recipient").fill("owned@example.com")
             page.get_by_label("Published message revision").select_option(index=1)
             page.locator("details").filter(has_text="Advanced authorization").locator(
@@ -417,18 +417,19 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                     page.get_by_text("Message revision published").wait_for()
                 page.get_by_role("button", name="Providers").click()
                 page.get_by_label("Provider profile").select_option("local_capture_only_smtp")
-                page.get_by_label("Account reference").fill("capture")
-                page.get_by_label("Port").fill(str(smtp.server_address[1]))
-                page.get_by_label("Username or sender identity").fill(sender)
+                page.get_by_label("Account name").fill("capture")
+                page.get_by_label("SMTP port").fill(str(smtp.server_address[1]))
+                page.get_by_label("SMTP username").fill(sender)
                 page.get_by_label("Sender email").fill(sender)
+                page.get_by_text("Advanced storage settings").click()
                 page.get_by_label("Credential reference").fill("env:MAILFORGE_CAPTURE_PASSWORD")
                 page.get_by_label("CA file reference").fill(str(cert))
-                page.get_by_label("TLS mode").select_option("implicit_tls")
-                page.get_by_role("button", name="Save account configuration").click()
-                page.get_by_text("Provider account saved without a network connection").wait_for()
+                page.get_by_label("Encryption").select_option("implicit_tls")
+                page.get_by_role("button", name="Save account").click()
+                page.get_by_text("Email account saved locally; no connection made").wait_for()
                 row = page.locator("table tbody tr").filter(has_text="capture")
                 row.get_by_text("Sandbox: active").wait_for()
-                row.get_by_role("button", name="Open operations").click()
+                row.get_by_role("button", name="Open test").click()
                 page.get_by_label("Owner-controlled recipient").fill(recipient)
                 revision_selector = page.get_by_label("Published message revision")
                 revision_selector.select_option(index=2)
@@ -490,7 +491,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 page = browser.new_page(viewport={"width": 1440, "height": 1100})
                 page.goto(f"http://127.0.0.1:{port}/providers", wait_until="networkidle")
                 page.locator("table tbody tr").filter(has_text="capture").get_by_role(
-                    "button", name="Open operations"
+                    "button", name="Open test"
                 ).click()
                 page.get_by_text("provider_accepted").wait_for()
                 browser.close()
@@ -532,11 +533,12 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
             )
             page.get_by_label("Provider profile").select_option("generic_smtp")
             page.get_by_label("Authentication method").select_option("password")
-            page.get_by_label("Account reference").fill("scroll-account")
-            page.get_by_label("Username or sender identity").fill("operator@example.com")
+            page.get_by_label("Account name").fill("scroll-account")
+            page.get_by_label("SMTP username").fill("operator@example.com")
+            page.get_by_text("Advanced storage settings").click()
             page.get_by_label("Credential reference").fill("test:provider")
-            page.get_by_role("button", name="Save account configuration").click()
-            page.get_by_text("Provider account saved without a network connection").wait_for()
+            page.get_by_role("button", name="Save account").click()
+            page.get_by_text("Email account saved locally; no connection made").wait_for()
 
             rail = page.locator(".rail")
             main = page.locator(".main")
@@ -609,7 +611,7 @@ def test_shared_shell_scroll_ownership_and_navigation_overflow(tmp_path: Path) -
             page.set_viewport_size({"width": 390, "height": 844})
             page.goto(f"http://127.0.0.1:{port}/providers", wait_until="domcontentloaded")
             page.get_by_label("Provider profile").wait_for()
-            preserved = page.get_by_label("Account reference")
+            preserved = page.get_by_label("Account name")
             preserved.fill("preserved-mobile-value")
             main_before_drawer = main.evaluate("e => e.scrollTop")
             menu = page.get_by_role("button", name="Open navigation")
@@ -684,7 +686,7 @@ def test_direct_providers_route_bootstraps_capabilities(tmp_path: Path) -> None:
                 == 1
             )
             page.get_by_label("Provider profile").select_option("local_capture_only_smtp")
-            assert page.get_by_label("Host").input_value() == "127.0.0.1"
+            assert page.get_by_label("SMTP server").input_value() == "127.0.0.1"
             assert page.get_by_label("Provider profile").locator("option").count() >= 4
             assert not page_errors
             browser.close()

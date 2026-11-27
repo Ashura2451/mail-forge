@@ -54,8 +54,9 @@ headings, and 32px page titles. Use `tabular-nums` for counts and timestamps.
 ## Components and interaction states
 
 - Navigation: icon-free text labels with an active rail and a visible current
-  location; labels are Dashboard, Contacts, Campaigns, Inbound, Providers,
-  Activity.
+  location. The primary path is Home, Send, Contacts, Messages, List cleaning,
+  and Activity. Advanced capabilities remain available under an explicit More
+  tools group and preserve their deep links.
 - Status badges: always include text, never color alone. Use `Draft`, `Ready`,
   `Running`, `Paused`, `Completed`, `Needs review`, and `Unverified` exactly.
 - Cards: one clear title, one primary value, one supporting sentence, and an
@@ -90,6 +91,10 @@ and a narrow viewport.
 
 React components live under `web/src/`; API calls are centralized in
 `web/src/api/client.ts`; backend business rules remain in `src/mailforge`.
+The home route is task-led and must not require SMTP setup for standalone list
+cleaning. Account setup uses plain labels for sender email, SMTP server,
+username, password, port, and encryption; credential references are advanced
+storage details rather than first-use concepts.
 Production assets are built by Vite into the backend-owned static directory
 and served by FastAPI. Read this contract before adding screens, and verify
 the rendered app at desktop and narrow widths before declaring the slice done.
