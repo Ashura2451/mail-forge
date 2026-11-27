@@ -38,6 +38,8 @@ The browser API and CLI share `CampaignOperationsService`:
 - `POST /api/v1/campaigns/{id}/preflight`
 - `PUT /api/v1/campaigns/{id}/schedule`
 - prepare, authorize, synthetic, pause, resume, and cancel controls
+- exact-scope external authorization preparation and binding; the browser keeps
+  the server-issued reference internal and never asks the operator to copy it
 - bounded recipient/attempt drilldowns and JSON/CSV export
 - `mailforge campaign workspace|update|preflight|schedule|pause|resume|cancel|recipients|attempts|export`
 
