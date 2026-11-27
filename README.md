@@ -67,10 +67,11 @@ known exclusions. An address-only import remains usable and is reported as
 The policy implementation and its explicit non-claims are recorded in
 [`docs/policy-authority-011.md`](docs/policy-authority-011.md).
 
-Provider profiles and local-only SMTP/IMAP diagnostics are available through
-the canonical `provider` commands. Profiles store symbolic credential
-references, never plaintext credentials; local diagnostics reject non-loopback
-endpoints and no provider send command exists. See
+Provider profiles and local-only SMTP diagnostics are available through the
+canonical `provider` commands. Profiles store symbolic credential references,
+never plaintext credentials; IMAP/POP3 and mailbox operations are retired, and
+local diagnostics reject non-loopback endpoints. Controlled loopback execution
+is available only through the prepared campaign safety boundary. See
 [`docs/provider-interoperability-012.md`](docs/provider-interoperability-012.md).
 
 The product claim ledger and dependency-aware roadmap are in

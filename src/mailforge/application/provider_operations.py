@@ -336,7 +336,6 @@ class ProviderOperationsService:
         return [
             self._account_with_sandbox_state(item) for item in self.store.list_provider_accounts()
         ]
-
     def _account_with_sandbox_state(self, account: dict[str, Any]) -> dict[str, Any]:
         sandbox = account.get("sandbox")
         requested = isinstance(sandbox, dict) and sandbox.get("key") == CAPTURE_ONLY_SANDBOX_KEY
@@ -649,18 +648,12 @@ class ProviderOperationsService:
             diagnostic = ProviderDiagnostic(
                 ref, status, "readiness", detail, operation=operation, external_access=external
             )
-        elif operation is ProviderOperation.INBOUND_READINESS:
-            profile.validate()
-            if profile.kind is not ProviderKind.IMAP:
-                raise ValueError("inbound readiness requires an IMAP account")
-            diagnostic = ProviderDiagnostic(
-                ref,
-                ProviderDiagnosticStatus.CONFIGURATION_VALID,
-                "readiness",
-                "inbound mailbox configuration is valid; no message content fetched",
-                operation=operation,
-                external_access=external,
-            )
+        elif operation in {
+            ProviderOperation.INBOUND_READINESS,
+            ProviderOperation.INBOUND_SYNC,
+            ProviderOperation.INBOUND_MUTATION,
+        }:
+            raise ValueError("inbound provider operations are retired")
         else:
             result = (
                 self.providers.local_protocol_diagnostic(
@@ -677,18 +670,6 @@ class ProviderOperationsService:
             return result
         self.store.record_provider_diagnostic(diagnostic)
         return diagnostic.to_dict()
-
-    def inbound_source(
-        self, ref: str, resolver: CredentialResolver, *, grant: ExternalOperationGrant | None = None
-    ):
-        """Return the canonical read-only IMAP source after an explicit grant."""
-        with self.store.provider_operation_lock():
-            profile = self.providers.profile(ref)
-            if profile.kind is not ProviderKind.IMAP:
-                raise ValueError("inbound acquisition requires an IMAP account")
-            if not _loopback(profile.host):
-                self._require_grant(ref, ProviderOperation.INBOUND_READINESS, grant)
-            return self.providers.imap_source(ref, resolver, profile=profile)
 
     def _external_diagnostic(
         self,
@@ -714,10 +695,7 @@ class ProviderOperationsService:
                     finally:
                         pool.close()
                 else:
-                    source = self.providers.imap_source(ref, resolver, profile=profile)
-                    list(source.messages(limit=0))
-                    caps = source.last_capabilities
-                    passed = True
+                    raise ValueError("IMAP provider profiles are retired; use SMTP")
                 status = (
                     ProviderDiagnosticStatus.AUTHENTICATION_VERIFIED
                     if passed
@@ -763,23 +741,6 @@ class ProviderOperationsService:
             else "failed",
         )
         return diagnostic.to_dict()
-
-    def configure_inbound(
-        self,
-        ref: str,
-        *,
-        mailbox: str,
-        max_fetch: int = 100,
-        sync_enabled: bool = True,
-        mutation_enabled: bool = False,
-    ) -> dict[str, object]:
-        return self.store.upsert_provider_inbound_settings(
-            ref,
-            mailbox=mailbox,
-            max_fetch=max_fetch,
-            sync_enabled=sync_enabled,
-            mutation_enabled=mutation_enabled,
-        )
 
     def controlled_test_send(
         self,

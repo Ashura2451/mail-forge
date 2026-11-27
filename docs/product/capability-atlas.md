@@ -6,6 +6,16 @@
 and evidence exist. It does not mean provider approval, inbox delivery,
 production operations, or business authorization.
 
+**MAILFORGE-044 final consolidation:** The historical capability rows below
+are retained as decision history, but they are not current product scope. The
+current product is Sort email, Compare lists, and Send, plus optional accounts,
+saved lists, history, recovery, and shared recipient-policy infrastructure.
+Standalone Data Studio, data connections, automation, integration hub, email
+standards, reporting, inbound/mailbox, and programmable surfaces are retired.
+Their active routes and implementation authorities were removed; durable
+historical records and schema compatibility remain only where required for
+preservation and migration. See [`MAILFORGE-044 completion`](../MAILFORGE-044-COMPLETION.md).
+
 ## Status vocabulary
 
 - **IMPLEMENTED AND VERIFIED** — local behavior is covered by focused tests and

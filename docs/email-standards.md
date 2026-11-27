@@ -1,5 +1,9 @@
 # Email Standards and Sender Diagnostics
 
+> Historical specification. The standalone Email Standards workspace is
+> retired by MAILFORGE-044. Preserve only the safety boundaries still owned by
+> the outbound/provider authorities.
+
 Mailforge's Email Standards workspace is local-first diagnostic evidence. It
 does not test provider reputation, inbox placement, consent, or delivery.
 DNS access is opt-in (`--network` on the CLI or the equivalent API request),

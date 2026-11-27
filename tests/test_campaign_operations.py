@@ -13,7 +13,6 @@ from mailforge.application.campaigns import CampaignService
 from mailforge.application.message_studio import MessageStudioService
 from mailforge.application.outbound import OutboundService
 from mailforge.application.provider_operations import ProviderOperationsService
-from mailforge.application.reporting import ReportingService
 from mailforge.application.segmentation import SegmentationService
 from mailforge.domain.outbound import ScheduleMode, ScheduleSpec
 from mailforge.infrastructure.campaign_store import CampaignStore
@@ -33,7 +32,7 @@ def _operations(path: Path) -> tuple[CampaignStore, CampaignOperationsService, s
     campaigns = CampaignService(store)
     outbound = OutboundService(store)
     segmentation = SegmentationService(store)
-    message_studio = MessageStudioService(store, outbound=outbound, segmentation=segmentation)
+    message_studio = MessageStudioService(store, outbound=outbound)
     operations = CampaignOperationsService(
         store,
         campaigns=campaigns,
@@ -41,7 +40,6 @@ def _operations(path: Path) -> tuple[CampaignStore, CampaignOperationsService, s
         message_studio=message_studio,
         segmentation=segmentation,
         provider_operations=ProviderOperationsService(store),
-        reporting=ReportingService(store),
     )
     return store, operations, list_id
 

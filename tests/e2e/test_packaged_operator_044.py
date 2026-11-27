@@ -1,0 +1,148 @@
+"""Packaged qualification for the rationalized operator journeys."""
+
+from __future__ import annotations
+
+import os
+import socket
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.test_provider_interoperability import _ServerContext, _SMTPServer, _certificate
+from tests.e2e.test_browser_acceptance import _chromium_executable, _wait_for_server
+
+playwright = pytest.importorskip("playwright.sync_api")
+
+
+def test_packaged_send_uses_controlled_smtp_and_does_not_duplicate_after_restart(
+    tmp_path: Path,
+) -> None:
+    executable = _chromium_executable()
+    packaged_launcher = os.environ.get("MAILFORGE_PACKAGED_LAUNCHER")
+    if executable is None or not packaged_launcher:
+        pytest.skip("requires Chromium and MAILFORGE_PACKAGED_LAUNCHER")
+
+    cert, key = _certificate(tmp_path, common_name="127.0.0.1", san="IP:127.0.0.1")
+    smtp = _SMTPServer(cert, key, implicit_tls=True)
+    data_dir = tmp_path / "packaged-operator-data"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "MAILFORGE_ENABLE_LOCAL_FIXTURES": "1",
+            "MAILFORGE_LOCAL_CAPTURE_ENDPOINT": f"127.0.0.1:{smtp.server_address[1]}",
+            "MAILFORGE_CAPTURE_PASSWORD": "synthetic-capture-password",
+        }
+    )
+    launcher = Path(packaged_launcher).resolve()
+    contents = launcher.parents[1]
+
+    def start() -> None:
+        result = subprocess.run(
+            [str(launcher), "--data-dir", str(data_dir), "--port", str(port)],
+            env={**environment, "BROWSER": "true"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        _wait_for_server(port)
+
+    def stop() -> None:
+        package_environment = {
+            **environment,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHOME": str(contents / "Resources" / "python"),
+            "PYTHONPATH": str(contents / "Resources" / "site-packages"),
+        }
+        result = subprocess.run(
+            [
+                str(contents / "Resources" / "python" / "bin" / "python3.15"),
+                "-m",
+                "mailforge",
+                "app",
+                "stop",
+                "--data-dir",
+                str(data_dir),
+                "--port",
+                str(port),
+            ],
+            env=package_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+
+    def register_capture(page, base: str) -> None:
+        payload = {
+            "ref": "capture",
+            "display_name": "Local capture fixture",
+            "sender_email": "sender@sandbox.example.com",
+            "kind": "smtp",
+            "host": "127.0.0.1",
+            "port": smtp.server_address[1],
+            "username": "sender@sandbox.example.com",
+            "credential_ref": "env:MAILFORGE_CAPTURE_PASSWORD",
+            "tls_mode": "implicit_tls",
+            "auth_method": "password",
+            "ca_file": str(cert),
+            "pacing_per_minute": 60,
+            "max_concurrency": 1,
+            "sandbox_key": "local_capture_only",
+        }
+        response = page.evaluate(
+            """async ({path, payload}) => {
+                const csrf = document.cookie.split('; ').find(item => item.startsWith('mailforge_csrf='))?.split('=')[1] || '';
+                const response = await fetch(path, {method: 'POST', headers: {'content-type': 'application/json', 'x-mailforge-csrf': decodeURIComponent(csrf)}, body: JSON.stringify(payload)});
+                return {status: response.status, body: await response.json()};
+            }""",
+            {"path": f"{base}/api/v1/providers", "payload": payload},
+        )
+        assert response["status"] == 200, response
+
+    with _ServerContext(smtp):
+        start()
+        try:
+            with playwright.sync_playwright() as sync:
+                browser = sync.chromium.launch(headless=True, executable_path=executable)
+                page = browser.new_page(viewport={"width": 1440, "height": 1100})
+                base = f"http://127.0.0.1:{port}"
+                page.goto(f"{base}/send", wait_until="networkidle")
+                register_capture(page, base)
+                page.reload(wait_until="networkidle")
+                page.get_by_label("Paste addresses").fill("one@sandbox.example.com")
+                page.get_by_label("Sender email").fill("sender@sandbox.example.com")
+                page.get_by_label("Subject").fill("Packaged qualification")
+                page.get_by_label("HTML message").fill("<p>Hello {{ email }}</p>")
+                page.get_by_label("Email account").select_option("capture")
+                page.get_by_role("button", name="Review this send").click()
+                page.get_by_text("Recipient set and message prepared").wait_for()
+                page.get_by_role("button", name="Prepare exact scope").click()
+                page.get_by_text("Send prepared").wait_for()
+                page.get_by_role("button", name="Authorize local simulation").click()
+                page.get_by_text("Local simulation authorized").wait_for()
+                page.get_by_role("button", name="Start local send").click()
+                page.get_by_text("Local send started").wait_for()
+                page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
+                assert len(smtp.received_messages) == 1
+                assert page.get_by_text("accepted", exact=True).is_visible()
+                browser.close()
+        finally:
+            stop()
+
+        start()
+        try:
+            with playwright.sync_playwright() as sync:
+                browser = sync.chromium.launch(headless=True, executable_path=executable)
+                page = browser.new_page(viewport={"width": 1440, "height": 1100})
+                page.goto(f"http://127.0.0.1:{port}/history", wait_until="networkidle")
+                page.get_by_text("Packaged qualification").wait_for()
+                assert page.get_by_text("completed", exact=True).is_visible()
+                assert len(smtp.received_messages) == 1
+                browser.close()
+        finally:
+            stop()

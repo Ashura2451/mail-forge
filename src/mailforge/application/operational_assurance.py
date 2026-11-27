@@ -107,31 +107,7 @@ class OperationalAssuranceService:
         tables = (
             ("campaigns", "campaigns", "failure_reason", "created_at", "updated_at"),
             ("list_processing_jobs", "list_tools", "error_message", "created_at", "updated_at"),
-            ("data_studio_jobs", "data_studio", "error_message", "created_at", "updated_at"),
-            (
-                "data_connection_snapshots",
-                "data_connections",
-                "error_message",
-                "created_at",
-                "updated_at",
-            ),
-            ("automation_runs", "automation", "failure_reason", "created_at", "updated_at"),
-            (
-                "integration_webhook_deliveries",
-                "integration",
-                "last_error",
-                "created_at",
-                "updated_at",
-            ),
             ("provider_test_submissions", "providers", "detail", "created_at", "updated_at"),
-            (
-                "inbound_runs",
-                "inbound",
-                "error_message",
-                "started_at",
-                "COALESCE(finished_at, started_at)",
-            ),
-            ("inbound_mailbox_actions", "inbound", "error_message", "created_at", "updated_at"),
         )
         try:
             connection = self.store.connect()
@@ -161,13 +137,8 @@ class OperationalAssuranceService:
                         "error": self._safe_error(row["error"]),
                         "workbench": {
                             "list_tools": "list-tools",
-                            "data_studio": "data-studio",
-                            "data_connections": "data-connections",
-                            "automation": "automations",
-                            "integration": "integrations",
                             "campaigns": "campaigns",
                             "providers": "providers",
-                            "inbound": "inbound",
                         }[subsystem],
                     }
                     for row in result
@@ -287,10 +258,6 @@ class OperationalAssuranceService:
             "provider_tests": self._all_counts(
                 "provider_test_submissions", failures=source_failures
             ),
-            "mailbox_sync": self._all_counts("inbound_runs", failures=source_failures),
-            "mailbox_actions": self._all_counts(
-                "inbound_mailbox_actions", failures=source_failures
-            ),
         }
         provider_resources: list[dict[str, Any]] = []
         try:
@@ -347,7 +314,7 @@ class OperationalAssuranceService:
         if worker_status:
             stopped = [
                 key
-                for key in ("scheduler", "automation_scheduler")
+                for key in ("scheduler",)
                 if worker_status.get(key) != "running"
             ]
             if stopped:

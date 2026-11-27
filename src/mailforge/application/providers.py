@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import imaplib
 import ipaddress
 import json
 import smtplib
 import ssl
 
-from mailforge.application.inbound_sources import IMAPConnectionConfig, ImapSource
 from mailforge.domain.provider import (
     AuthenticationMethod,
     ProviderDiagnostic,
@@ -85,7 +83,6 @@ class ProviderService:
             }
             for row in self.store.list_provider_profiles(kind=kind.value if kind else None)
         ]
-
     def validate(self, ref: str) -> dict[str, object]:
         profile = self.profile(ref)
         profile.validate()
@@ -168,42 +165,6 @@ class ProviderService:
             credential_resolver=resolver,
         )
 
-    def imap_source(
-        self,
-        ref: str,
-        resolver: CredentialResolver,
-        *,
-        mailbox: str | None = None,
-        source_ref: str | None = None,
-        profile: ProviderProfile | None = None,
-    ) -> ImapSource:
-        if profile is None:
-            profile = self.profile(ref)
-        elif self.profile(ref) != profile:
-            raise ValueError(f"provider profile snapshot is stale or not authoritative: {ref}")
-        if profile.ref != ref:
-            raise ValueError(f"provider profile snapshot does not match account: {ref}")
-        if profile.kind is not ProviderKind.IMAP:
-            raise ValueError(f"provider profile is not IMAP: {ref}")
-        if not profile.enabled:
-            raise ValueError(f"provider profile is disabled: {ref}")
-        return ImapSource(
-            source_ref or profile.ref,
-            IMAPConnectionConfig(
-                host=profile.host,
-                port=profile.port,
-                username=profile.username,
-                credential_ref=profile.credential_ref,
-                auth_method=profile.auth_method,
-                mailbox=mailbox or profile.mailbox,
-                timeout=profile.timeout,
-                ca_file=profile.ca_file,
-                max_message_bytes=profile.max_message_bytes,
-            ),
-            credential_resolver=resolver,
-            account_ref=profile.ref,
-        )
-
     def local_protocol_diagnostic(
         self,
         ref: str,
@@ -237,15 +198,7 @@ class ProviderService:
                     capabilities,
                 )
             else:
-                source = self.imap_source(ref, resolver, profile=profile)
-                list(source.messages(limit=0))
-                diagnostic = ProviderDiagnostic(
-                    ref,
-                    ProviderDiagnosticStatus.LOCAL_PROTOCOL_PASSED,
-                    "local_protocol",
-                    "loopback IMAP TLS/authentication/read-only selection passed",
-                    source.last_capabilities,
-                )
+                raise ValueError("IMAP provider profiles are retired; use SMTP")
         except UnsupportedAuthenticationMechanism as error:
             diagnostic = ProviderDiagnostic(
                 ref,
@@ -253,7 +206,7 @@ class ProviderService:
                 "local_protocol",
                 type(error).__name__,
             )
-        except (imaplib.IMAP4.error, smtplib.SMTPAuthenticationError) as error:
+        except smtplib.SMTPAuthenticationError as error:
             diagnostic = ProviderDiagnostic(
                 ref,
                 ProviderDiagnosticStatus.AUTHENTICATION_FAILED,

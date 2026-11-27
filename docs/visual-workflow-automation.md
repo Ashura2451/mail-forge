@@ -1,5 +1,8 @@
 # Visual workflow automation
 
+> Historical specification. Standalone workflow automation is retired by
+> MAILFORGE-044; this document is preserved for repository history only.
+
 Mailforge workflows are local, revisioned, synthetic-only automations. They
 connect trusted local events to conditions, waits, and allowlisted actions while
 leaving contact eligibility, segmentation, campaign policy, and inbound trust

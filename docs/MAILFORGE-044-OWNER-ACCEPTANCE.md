@@ -24,6 +24,15 @@ credentials or perform an external SMTP operation during acceptance.
 7. Repeat Home, Sort email, Compare lists, and Send at a narrow viewport.
    Confirm the drawer has labeled controls, focus is visible, tables scroll
    without clipping, and loading/empty/error states remain understandable.
+8. For the controlled qualification only, use a fresh loopback TLS SMTP
+   fixture and a capture-only provider account. Confirm that Send reaches
+   `accepted` through the real SMTP submission path, records the per-recipient
+   outcome, survives an application restart, and does not submit a second
+   message. No external provider or real recipient is authorized by this guide.
+9. In a prepared send, open “Use an external sending account”. Review the
+   exact provider, recipient count, expiry, and submission budget. Confirm the
+   exact-scope checkbox is required and that the panel does not make an
+   external connection by itself.
 
 ## Limits
 

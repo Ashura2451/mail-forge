@@ -1,5 +1,9 @@
 # Mailforge Data Studio
 
+> Historical specification. Data Studio is retired by MAILFORGE-044 and is
+> not an active product direction. Do not add routes or implementation against
+> this document; use the Sort email, Compare lists, and Send workflows instead.
+
 Data Studio is the canonical local structured-data processing workbench. It
 uses `DataStudioService` for schema inspection, typed recipes, bounded previews,
 pinned revisions, durable jobs, and app-owned export/error artifacts.

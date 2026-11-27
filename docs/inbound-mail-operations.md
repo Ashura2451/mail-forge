@@ -1,5 +1,9 @@
 # Inbound mail operations
 
+> Historical specification. Inbound acquisition and mailbox operations are
+> retired by MAILFORGE-044. Delivery-event compatibility and preserved data are
+> documented in the completion report.
+
 Mailforge's Inbound workspace is a local evidence workbench. It can import
 EML/MBOX files and deterministic fixtures, acquire from a configured IMAP
 account through the existing provider authority, and use the bounded POP3S

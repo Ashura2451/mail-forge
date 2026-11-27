@@ -1,5 +1,8 @@
 # Integration Hub
 
+> Historical specification. The Integration Hub is retired by MAILFORGE-044;
+> no new implementation should be based on this document.
+
 The Integration Hub is a local-first boundary for bounded external observations
 and durable operational notifications. It does not become a generic proxy,
 workflow engine, hosted callback service, or live-email path.

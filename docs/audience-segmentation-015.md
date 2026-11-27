@@ -1,5 +1,9 @@
 # Audience segmentation 015
 
+> Historical standalone surface. The former segmentation product workflow is
+> retired by MAILFORGE-044; shared recipient/list compatibility code may remain
+> only where required by existing durable campaigns.
+
 This document records the shipped local operator contract for
 `MAILFORGE-AUDIENCE-SEGMENTATION-015`. It is synthetic/local evidence, not
 provider qualification, consent evidence, inbox-delivery evidence, or hosted

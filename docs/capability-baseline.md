@@ -1,5 +1,12 @@
 # Mailforge capability baseline
 
+> Current scope is governed by MAILFORGE-044: Sort email, Compare lists, and
+> Send. The older rows in this historical baseline describe prior product
+> slices and must not be used to plan new Data Studio, automation, integration,
+> reporting, email-standards, inbound, mailbox, or programmable work. See
+> [the completion report](MAILFORGE-044-COMPLETION.md) and
+> [the owner acceptance guide](MAILFORGE-044-OWNER-ACCEPTANCE.md).
+
 This is an evidence register, not a parity claim. Status reflects repository
 inspection and synthetic checks through inbound operations task
 `MAILFORGE-INBOUND-OPERATIONS-020`. The detailed product claim ledger

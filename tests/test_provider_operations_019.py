@@ -116,33 +116,6 @@ class _FakePool:
         return None
 
 
-def test_schema_11_accounts_capabilities_and_inbound_settings_are_durable(tmp_path):
-    store = CampaignStore(tmp_path / "operations.sqlite3")
-    service = ProviderOperationsService(store)
-    account = service.register(
-        _profile(),
-        display_name="Local fixture",
-        sender_email="sender@example.com",
-        inbound_enabled=True,
-        pacing_per_minute=12,
-        max_concurrency=2,
-    )
-
-    assert store.schema_version() == 28
-    assert account["display_name"] == "Local fixture"
-    assert account["inbound_enabled"] is True
-    assert any(item["key"] == "google_workspace" for item in service.capabilities())
-    assert not any(item["key"] == "generic_imap" for item in service.capabilities())
-    assert all(item["protocols"] == ["smtp"] for item in service.capabilities())
-    assert (
-        service.configure_inbound("local", mailbox="Qualification", max_fetch=4)["mailbox"]
-        == "Qualification"
-    )
-    assert service.validate("local")["external_access"] is False
-    reopened = CampaignStore(tmp_path / "operations.sqlite3")
-    assert reopened.get_provider_account("local")["inbound"]["mailbox"] == "Qualification"
-
-
 def test_server_issued_grant_is_required_for_provider_test_send(tmp_path):
     store = CampaignStore(tmp_path / "grants.sqlite3")
     service = ProviderOperationsService(store)

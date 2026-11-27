@@ -1,5 +1,8 @@
 # Mailforge Data Connections
 
+> Historical specification. External data connections are retired by
+> MAILFORGE-044 and remain only as migration/data-preservation context.
+
 Data Connections is the local, read-only bridge from a bounded external data
 source into Data Studio. It supports SQLite files, PostgreSQL profiles, and
 normal `.xlsx` workbooks. Mailforge never writes to a connected source and
