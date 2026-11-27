@@ -116,7 +116,7 @@ def test_direct_send_accepts_pasted_addresses_and_html(local_page) -> None:
     page.get_by_role("button", name="Authorize local simulation").click()
     page.get_by_role("button", name="Start local send").click()
     page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
-    assert page.get_by_text("accepted", exact=True).is_visible()
+    assert page.get_by_role("cell", name="accepted", exact=True).first.is_visible()
 
 
 def test_sorted_result_moves_into_compare_without_export(local_page) -> None:

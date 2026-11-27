@@ -212,6 +212,12 @@ class InputReader:
     def iter_emails_with_metadata(
         path: str | Path, *, max_bytes: int = 1_073_741_824
     ) -> Iterator[tuple[int, str, dict[str, Any]]]:
+        if Path(path).suffix.lower() != ".csv":
+            for position, candidate in InputReader.iter_emails(
+                path, max_bytes=max_bytes, with_positions=True
+            ):
+                yield position, candidate, {}
+            return
         for position, raw, metadata in iter_structured_records(Path(path), max_bytes=max_bytes):
             for candidate in extract_addresses(raw):
                 yield position, candidate, metadata
