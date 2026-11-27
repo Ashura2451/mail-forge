@@ -134,7 +134,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.get_by_text("Campaign preview loaded").wait_for()
             page.get_by_role("button", name="Authorize").click()
             page.get_by_text("Simulation authorized").wait_for()
-            page.get_by_role("button", name="Run synthetic").click()
+            page.get_by_role("button", name="Start local send").click()
             page.get_by_text("Synthetic worker started").wait_for()
             page.wait_for_timeout(500)
             assert page.get_by_text("Browser synthetic campaign").is_visible()
@@ -161,7 +161,7 @@ def test_local_operator_console_desktop_and_narrow(tmp_path: Path) -> None:
             page.get_by_text("configuration_validated", exact=True).wait_for()
             page.get_by_role("button", name="Open test").click()
             page.get_by_label("Owner-controlled recipient").fill("owned@example.com")
-            page.get_by_label("Published message revision").select_option(index=1)
+            page.get_by_label("Saved message").select_option(index=1)
             page.locator("details").filter(has_text="Advanced authorization").locator(
                 "summary"
             ).click()
@@ -298,13 +298,13 @@ def test_browser_audience_management_policy_journey(tmp_path: Path) -> None:
             page.get_by_label("Campaign name").fill("Audience 036 readiness campaign")
             page.get_by_role("button", name="Create draft").click()
             page.get_by_text("Campaign draft created").wait_for()
-            page.get_by_role("button", name="Prepare snapshots").click()
+            page.get_by_role("button", name="Prepare send").click()
             page.get_by_text("Campaign prepared").wait_for()
             page.get_by_label("Mode").select_option("recurring")
             page.get_by_label("Scheduled local time").fill("2099-01-01T09:00:00")
             page.get_by_label("Recurrence").select_option("daily")
             page.get_by_label("Missed run policy").select_option("skip")
-            page.get_by_role("button", name="Save schedule").click()
+            page.get_by_role("button", name="Save timing").click()
             page.get_by_text("Schedule saved").wait_for()
             browser.close()
     finally:
@@ -435,7 +435,7 @@ def test_browser_controlled_sandbox_capture_journey(tmp_path: Path) -> None:
                 row.get_by_text("Sandbox: active").wait_for()
                 row.get_by_role("button", name="Open test").click()
                 page.get_by_label("Owner-controlled recipient").fill(recipient)
-                revision_selector = page.get_by_label("Published message revision")
+                revision_selector = page.get_by_label("Saved message")
                 revision_selector.select_option(index=2)
                 selected_revision = revision_selector.input_value()
                 page.locator("details").filter(has_text="Advanced authorization").locator(
