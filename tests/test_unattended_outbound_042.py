@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mailforge.application.campaigns import CampaignService, ScriptedTransport
 from mailforge.application.outbound import OutboundService
-from mailforge.domain.campaign import CampaignStatus, DeliveryState
+from mailforge.domain.campaign import AttemptOutcome, CampaignStatus, DeliveryState
 from mailforge.domain.outbound import ScheduleMode, ScheduleSpec
 from mailforge.infrastructure.campaign_store import CampaignStore
 from mailforge.interfaces.web import CampaignScheduleSupervisor, WebRuntime
@@ -87,6 +87,57 @@ def test_temporary_wait_does_not_cross_the_transport_boundary(tmp_path: Path) ->
     assert report.campaign_status == CampaignStatus.PAUSED.value
     assert transport.calls == []
     assert store.campaign_next_automatic_at(campaign_id) == retry_at
+
+
+def test_external_uncertain_outcome_stops_the_current_submission_run(tmp_path: Path) -> None:
+    store = CampaignStore(tmp_path / "uncertain-run.sqlite3")
+    campaign_id = _paused_campaign(store, name="uncertain-run")
+    campaign = store.get_campaign(campaign_id)
+    second_contact = store.upsert_contact(
+        "second-uncertain-run@example.com",
+        source_file="test-fixture",
+        source_record_position=2,
+        original_input="second-uncertain-run@example.com",
+    )
+    store.add_to_list(campaign["audience_list_id"], second_contact)
+    store.prepare_intent(
+        campaign_id=campaign_id,
+        contact_id=second_contact,
+        normalized_email="second-uncertain-run@example.com",
+        state=DeliveryState.PREPARED,
+        eligibility_reason="fixture prepared",
+    )
+    third_contact = store.upsert_contact(
+        "third-uncertain-run@example.com",
+        source_file="test-fixture",
+        source_record_position=3,
+        original_input="third-uncertain-run@example.com",
+    )
+    store.add_to_list(campaign["audience_list_id"], third_contact)
+    store.prepare_intent(
+        campaign_id=campaign_id,
+        contact_id=third_contact,
+        normalized_email="third-uncertain-run@example.com",
+        state=DeliveryState.PREPARED,
+        eligibility_reason="fixture prepared",
+    )
+    transport = ScriptedTransport(
+        {
+            "uncertain-run@example.com": AttemptOutcome.ACCEPTED,
+            "second-uncertain-run@example.com": AttemptOutcome.TRANSIENT_FAILURE,
+            "third-uncertain-run@example.com": AttemptOutcome.ACCEPTED,
+        }
+    )
+    report = CampaignService(store).execute(
+        campaign_id,
+        transport,
+        stop_on_uncertain=True,
+    )
+
+    assert report.campaign_status == CampaignStatus.PAUSED.value
+    assert len(transport.calls) == 1
+    assert {call[0] for call in transport.calls} == {"second-uncertain-run@example.com"}
+    assert report.counts[DeliveryState.DEFERRED.value] == 1
 
 
 def test_scheduler_started_worker_cannot_clear_a_new_operator_pause(tmp_path: Path) -> None:

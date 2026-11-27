@@ -605,6 +605,7 @@ class CampaignService:
         start_existing: bool = False,
         worker_id: str = "simulation-worker",
         allow_pause_clear: bool = True,
+        stop_on_uncertain: bool = False,
     ) -> CampaignReport:
         campaign = self.store.get_campaign(campaign_id)
         if getattr(transport, "requires_policy_guard", False):
@@ -748,6 +749,21 @@ class CampaignService:
                 transport_phase=result.transport_phase,
                 response_code=result.response_code,
             )
+            if stop_on_uncertain and result.outcome in {
+                AttemptOutcome.TRANSIENT_FAILURE,
+                AttemptOutcome.AMBIGUOUS,
+            }:
+                self.store.transition_campaign(
+                    campaign_id,
+                    CampaignStatus.COMPLETING,
+                    "uncertain_external_outcome",
+                )
+                self.store.transition_campaign(
+                    campaign_id,
+                    CampaignStatus.PAUSED,
+                    "reconciliation_required",
+                )
+                return self.report(campaign_id, recovered=recovered)
             processed += 1
             if stop_after is not None and processed >= stop_after:
                 self.store.transition_campaign(
