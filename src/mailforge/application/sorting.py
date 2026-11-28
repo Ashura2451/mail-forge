@@ -203,10 +203,14 @@ class InputReader:
         *,
         max_bytes: int = 1_073_741_824,
         with_positions: bool = False,
+        include_unmatched: bool = False,
     ) -> Iterator[str | tuple[int, str]]:
         for position, raw in InputReader.iter_records(path, max_bytes=max_bytes):
-            for candidate in extract_addresses(raw):
+            candidates = list(extract_addresses(raw))
+            for candidate in candidates:
                 yield (position, candidate) if with_positions else candidate
+            if include_unmatched and not candidates:
+                yield (position, raw) if with_positions else raw
 
     @staticmethod
     def iter_emails_with_metadata(
@@ -214,13 +218,20 @@ class InputReader:
     ) -> Iterator[tuple[int, str, dict[str, Any]]]:
         if Path(path).suffix.lower() != ".csv":
             for position, candidate in InputReader.iter_emails(
-                path, max_bytes=max_bytes, with_positions=True
+                path,
+                max_bytes=max_bytes,
+                with_positions=True,
+                include_unmatched=True,
             ):
                 yield position, candidate, {}
             return
         for position, raw, metadata in iter_structured_records(Path(path), max_bytes=max_bytes):
-            for candidate in extract_addresses(raw):
-                yield position, candidate, metadata
+            candidates = list(extract_addresses(raw))
+            if candidates:
+                for candidate in candidates:
+                    yield position, candidate, metadata
+            else:
+                yield position, raw, metadata
 
     @staticmethod
     def iter_records(

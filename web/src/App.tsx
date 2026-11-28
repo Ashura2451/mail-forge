@@ -2689,7 +2689,13 @@ function Settings({ data, onRun }: { data: ApiRecord; onRun: Action }) {
             </div>
             <div>
               <dt>Database integrity</dt>
-              <dd>{data.database_integrity || "Not checked"}</dd>
+              <dd>
+                {data.database_integrity === true
+                  ? "Healthy"
+                  : data.database_integrity === false
+                    ? "Needs review"
+                    : "Not checked"}
+              </dd>
             </div>
             <div>
               <dt>Delivery claim</dt>

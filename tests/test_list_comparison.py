@@ -300,7 +300,7 @@ def test_sorted_record_selection_preserves_exact_membership_and_row_projection(
             files={
                 "file": (
                     "records.txt",
-                    b"alice@gmail.com\nbob@example.com\ncarol@proton.me\nhello@notgmail.example\n",
+                    b"alice@gmail.com\nbob@example.com\ncarol@proton.me\nhello@notgmail.example\nbad-address\n",
                     "text/plain",
                 )
             },
@@ -321,6 +321,8 @@ def test_sorted_record_selection_preserves_exact_membership_and_row_projection(
         assert by_email["carol@proton.me"]["provider"] == "proton"
         assert by_email["hello@notgmail.example"]["provider"] == "custom"
         assert by_email["bob@example.com"]["mail_host_state"] == "Unknown"
+        assert by_email["bad-address"]["status"] == "malformed"
+        assert job["summary"]["counts"]["invalid"] == 1
 
         selected_key = by_email["bob@example.com"]["record_key"]
         handoff = client.post(

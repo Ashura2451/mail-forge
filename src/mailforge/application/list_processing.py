@@ -535,7 +535,10 @@ class ListProcessingService:
         with self.structured_result_path(job_id).open("r", encoding="utf-8") as handle:
             for line in handle:
                 record = json.loads(line)
-                if record.get("processing_disposition") != "accepted":
+                if (
+                    selection_mode != "records"
+                    and record.get("processing_disposition") != "accepted"
+                ):
                     continue
                 classification = record.get("classification_result") or {}
                 provider = str(classification.get("provider") or "unknown")
