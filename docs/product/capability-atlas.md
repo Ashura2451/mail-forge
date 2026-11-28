@@ -38,6 +38,6 @@ not create retired tables. No new implementation may depend on them.
 No real-recipient migration, external SMTP operation, inbox-delivery claim,
 hosted identity, signed distribution, or production capacity claim is implied.
 The practical acceptance procedure is
-[`MAILFORGE-044-OWNER-ACCEPTANCE.md`](../MAILFORGE-044-OWNER-ACCEPTANCE.md);
+[`MAILFORGE-045-OWNER-ACCEPTANCE.md`](../MAILFORGE-045-OWNER-ACCEPTANCE.md);
 the completion evidence is
 [`MAILFORGE-044-COMPLETION.md`](../MAILFORGE-044-COMPLETION.md).
