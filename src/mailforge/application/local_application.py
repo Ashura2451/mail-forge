@@ -18,6 +18,7 @@ import urllib.request
 import uuid
 import webbrowser
 import zipfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -176,7 +177,7 @@ def complete_onboarding(
 def current_schema_version(database: Path) -> int:
     if not database.is_file():
         return 0
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection:
         row = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
         ).fetchone()
@@ -192,10 +193,10 @@ def backup_database_snapshot(database: Path, destination: Path) -> Path:
     """Take a SQLite snapshot before an in-place compatible migration."""
 
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with sqlite3.connect(database) as source, sqlite3.connect(destination) as target:
+    with closing(sqlite3.connect(database)) as source, closing(sqlite3.connect(destination)) as target:
         source.backup(target)
         target.commit()
-    with sqlite3.connect(destination) as connection:
+    with closing(sqlite3.connect(destination)) as connection:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("pre-migration SQLite snapshot failed integrity validation")
     os.chmod(destination, 0o600)
@@ -398,7 +399,7 @@ def validate_backup(source: str | Path) -> dict[str, Any]:
                 database.open("wb") as target_handle,
             ):
                 shutil.copyfileobj(source_handle, target_handle)
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 result = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if result != "ok":
                 raise ValueError(f"backup SQLite integrity check failed: {result}")
