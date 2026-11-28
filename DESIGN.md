@@ -21,15 +21,22 @@ attention and coral marks destructive or unresolved outcomes. The visual
 language is inspired by accessible documentation and operations products such
 as GitHub Primer, but Mailforge uses its own palette and terminology.
 
-The design research compared two directions. A dense persistent operations rail
-would preserve the previous service-oriented console, but made 17 destinations
-compete before a user chose a job. A task-first workspace, informed by the
-GOV.UK task-list guidance (short task names, visible sentence-case status, and
-user-controlled order), keeps Sort email, Compare lists, and Send visible while
-placing account and recovery utilities behind More tools. This direction was
-selected because the primary operations are independent and do not require a
-fixed wizard. WCAG 2.2 label guidance and Primer's skip/navigation patterns
-reinforce persistent labels, visible focus, and explicit state text.
+The approved direction is a direct-manipulation productivity utility. A prior
+task-led workbench was rejected because it made users manage work items before
+touching their files. The retained experience treats address files, provider
+groups, lists, message content, and recipients as the primary objects. Addresses,
+Compare, and Compose are independent top-level tools; Activity, Accounts, Saved
+lists, and Settings are supporting utilities revealed contextually. Provenance,
+preparation, persistence, authorization, and recovery remain automatic service
+mechanisms and appear only when they help a decision.
+
+The object-first layout draws on file managers, spreadsheet tables, document
+editors, and email composition utilities: dense, readable data in the main
+workspace; selection controls beside the data they affect; and contextual
+inspection panels rather than permanent multi-pane administration. Provider
+groups are a first-class Sorter object, not a summary metric. WCAG 2.2 label
+guidance and visible focus remain required, but the information hierarchy is
+set by the operator's data and immediate next action.
 
 Avoid glossy gradients, oversized hero art, decorative charts, and competitor
 branding. Density should support scanning tables and status cards without
@@ -37,11 +44,16 @@ feeling like a spreadsheet.
 
 ## Layout and responsive behavior
 
-- Desktop: persistent 248px navigation rail, 32px page gutter, content capped
-  at 1440px, and two-column dashboard panels where data supports it.
-- Tablet: navigation compresses to a top bar; cards become one or two columns.
-- Small screens: one-column flow, horizontally scrollable dense tables, and
-  full-width primary actions. Never hide a required action only behind hover.
+- Desktop: compact 218px navigation rail, 20–52px page gutter, content capped
+  at 1440px. Sorter gives provider groups a contextual side panel and the
+  address table the largest workspace. Compare and Compose use layouts suited
+  to their sources and message content rather than inheriting Sorter's panes.
+- Tablet: navigation becomes a dismissible top-bar drawer; tables retain their
+  headers and scroll as a data surface; supporting panels stack below the main
+  operation.
+- Small screens: one-column task layouts, horizontally scrollable dense tables,
+  collapsible supporting content, and full-width primary actions. No required
+  action is only available through hover.
 - Use an 8px spacing scale with 16px default card padding and 24px section
   rhythm.
 
@@ -65,20 +77,25 @@ headings, and 32px page titles. Use `tabular-nums` for counts and timestamps.
 ## Components and interaction states
 
 - Navigation: icon-free text labels with an active rail and a visible current
-  location. The primary path is Home, Sort email, Compare lists, Send, and
-  History. Email accounts, Saved lists, and Settings remain available under an
-  explicit More tools group.
+  location. The primary path is Addresses, Compare, and Compose. Activity,
+  Accounts, Saved lists, and Settings remain available under an explicit More
+  tools group. Home is a compact files-and-lists starting surface, not an
+  administrative dashboard.
 - More tools is collapsed on Home and expands on demand or when a utility route
   is opened directly. It is progressive disclosure for optional conveniences,
   not a second product area.
 - Status badges: always include text, never color alone. Use `Draft`, `Ready`,
   `Running`, `Paused`, `Completed`, `Needs review`, and `Unverified` exactly.
-- Cards: one clear title, one primary value, one supporting sentence, and an
-  optional action. Do not invent metrics when the API has no value.
+- Cards: use only for an object or decision that benefits from grouping. One
+  clear title, one primary value, one supporting sentence, and an optional
+  action. Do not invent metrics when the API has no value. Dense tables are the
+  default for address records, lists, activity and prepared recipients.
 - Forms: labels above controls, help text below, inline field errors, and a
   summary error at the top for failed submissions.
-- Tables: meaningful column headings, row focus, stable empty states, and
-  explicit loading/error/retry states.
+- Tables: meaningful column headings, row focus, exact selection semantics,
+  stable empty states, bounded loading/error/retry states, and an explicit
+  strategy for large files. Filtering visible rows never silently changes a
+  saved or transferred selection.
 - Confirmations: use a dialog for cancellation and other consequential state
   changes; simulation authorization must name the mode.
 
@@ -105,8 +122,8 @@ and a narrow viewport.
 
 React components live under `web/src/`; API calls are centralized in
 `web/src/api/client.ts`; backend business rules remain in `src/mailforge`.
-The home route is task-led and must not require SMTP setup for standalone list
-cleaning. Account setup uses plain labels for sender email, SMTP server,
+The home route is a compact files-and-lists start surface and must not require
+SMTP setup for standalone list cleaning. Account setup uses plain labels for sender email, SMTP server,
 username, password, port, and encryption; credential references are advanced
 storage details rather than first-use concepts.
 Production assets are built by Vite into the backend-owned static directory

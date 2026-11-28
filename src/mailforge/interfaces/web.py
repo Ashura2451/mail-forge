@@ -94,16 +94,19 @@ class ListInput(BaseModel):
 class ListHandoffInput(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     provider_keys: list[str] = Field(default_factory=list, max_length=200)
-    selection_mode: Literal["all", "selected", "none"] | None = None
+    record_keys: list[str] = Field(default_factory=list, max_length=100_000)
+    selection_mode: Literal["all", "selected", "none", "records"] | None = None
 
 
 class ListSelectionInput(BaseModel):
     provider_keys: list[str] = Field(default_factory=list, max_length=200)
-    selection_mode: Literal["all", "selected", "none"] | None = None
+    record_keys: list[str] = Field(default_factory=list, max_length=100_000)
+    selection_mode: Literal["all", "selected", "none", "records"] | None = None
 
 
 class ComparisonHandoffInput(BaseModel):
     results: list[dict[str, Any]] = Field(min_length=1, max_length=250_000)
+    selected_emails: list[str] = Field(default_factory=list, max_length=250_000)
     name: str | None = Field(default=None, max_length=120)
 
 
@@ -1834,6 +1837,20 @@ def create_app(
     @app.post(f"{API_PREFIX}/list-comparison/export")
     async def list_comparison_export(payload: dict[str, Any]):
         try:
+            selected_emails = {
+                str(item).strip().casefold()
+                for item in payload.get("selected_emails", [])
+                if str(item).strip()
+            }
+            if selected_emails:
+                payload = {
+                    **payload,
+                    "results": [
+                        item
+                        for item in payload.get("results", [])
+                        if str(item.get("email", "")).strip().casefold() in selected_emails
+                    ],
+                }
             content = runtime.list_comparison.export_csv(payload)
         except (TypeError, KeyError) as error:
             return _error(400, "export_invalid", str(error))
@@ -1846,8 +1863,22 @@ def create_app(
     @app.post(f"{API_PREFIX}/list-comparison/handoff")
     async def list_comparison_handoff(payload: ComparisonHandoffInput):
         try:
+            selected_emails = {
+                item.strip().casefold() for item in payload.selected_emails if item.strip()
+            }
+            results = (
+                [
+                    item
+                    for item in payload.results
+                    if str(item.get("email", "")).strip().casefold() in selected_emails
+                ]
+                if selected_emails
+                else payload.results
+            )
+            if not results:
+                return _error(400, "selection_empty", "choose at least one comparison result")
             result_hash = hashlib.sha256(
-                json.dumps(payload.results, sort_keys=True, separators=(",", ":")).encode()
+                json.dumps(results, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             description = f"List comparison result {result_hash}"
             existing = _query(
@@ -1860,7 +1891,7 @@ def create_app(
             name = payload.name.strip() if payload.name else ""
             name = name or f"Comparison result {result_hash[:8]}"
             list_id = runtime.store.create_list(name, description)
-            imported = runtime.campaigns.import_comparison_results(payload.results, list_id)
+            imported = runtime.campaigns.import_comparison_results(results, list_id)
             return {
                 "list": {"id": list_id, "name": name, "description": description},
                 "reused": False,
@@ -1893,6 +1924,33 @@ def create_app(
         except ListProcessingError as error:
             return _error(404 if error.code == "job_not_found" else 400, error.code, str(error))
 
+    @app.get(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/rows")
+    async def list_tools_job_rows(
+        job_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        provider: str | None = None,
+        disposition: str | None = None,
+        mail_host_state: str | None = None,
+        q: str = "",
+    ):
+        try:
+            return runtime.list_processing.rows(
+                job_id,
+                limit=limit,
+                offset=offset,
+                provider=provider,
+                disposition=disposition,
+                mail_host_state=mail_host_state,
+                query=q,
+            )
+        except ListProcessingError as error:
+            return _error(
+                404 if error.code == "job_not_found" else 409 if error.code == "job_not_ready" else 400,
+                error.code,
+                str(error),
+            )
+
     @app.post(f"{API_PREFIX}/list-tools/jobs/{{job_id}}/{{action}}")
     async def list_tools_job_action(
         job_id: str, action: str, payload: ListHandoffInput | None = None
@@ -1903,6 +1961,8 @@ def create_app(
                 selection_mode = (
                     payload.selection_mode
                     if payload and payload.selection_mode
+                    else "records"
+                    if payload and payload.record_keys
                     else "selected"
                     if payload and payload.provider_keys
                     else "all"
@@ -1912,6 +1972,7 @@ def create_app(
                         {
                             "mode": selection_mode,
                             "providers": sorted(payload.provider_keys if payload else []),
+                            "records": sorted(payload.record_keys if payload else []),
                         },
                         sort_keys=True,
                         separators=(",", ":"),
@@ -1932,9 +1993,12 @@ def create_app(
                     result_path,
                     list_id,
                     provider_keys=(payload.provider_keys if payload else None),
+                    record_keys=(payload.record_keys if payload else None),
                     selection_mode=(
                         payload.selection_mode
                         if payload and payload.selection_mode
+                        else "records"
+                        if payload and payload.record_keys
                         else "selected"
                         if payload and payload.provider_keys
                         else "all"
@@ -1952,10 +2016,13 @@ def create_app(
                     selection_mode=(
                         payload.selection_mode
                         if payload and payload.selection_mode
+                        else "records"
+                        if payload and payload.record_keys
                         else "selected"
                         if payload and payload.provider_keys
                         else "all"
                     ),
+                    record_keys=(payload.record_keys if payload else None),
                 )
                 return Response(
                     content=content,
@@ -1987,6 +2054,7 @@ def create_app(
             job = runtime.list_processing.get_job(job_id)
             result_path = runtime.list_processing.structured_result_path(job_id)
             selected = {item.strip() for item in payload.provider_keys if item.strip()}
+            selected_records = {item.strip() for item in payload.record_keys if item.strip()}
             output = io.StringIO(newline="")
             writer = csv.DictWriter(
                 output,
@@ -2008,7 +2076,9 @@ def create_app(
                         continue
                     classification = record.get("classification_result") or {}
                     provider = str(classification.get("provider") or "unknown")
-                    if selected and provider not in selected:
+                    if payload.selection_mode == "records" and runtime.list_processing.record_key(record) not in selected_records:
+                        continue
+                    if payload.selection_mode != "records" and selected and provider not in selected:
                         continue
                     associated = (record.get("metadata") or {}).get("associated_data") or {}
                     writer.writerow(
@@ -2024,7 +2094,7 @@ def create_app(
                             ),
                         }
                     )
-            suffix = "selected" if selected else "all"
+            suffix = "selected" if selected or selected_records else "all"
             return Response(
                 content=output.getvalue(),
                 media_type="text/csv",

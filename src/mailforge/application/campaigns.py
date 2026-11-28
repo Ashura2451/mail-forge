@@ -219,16 +219,20 @@ class CampaignService:
         *,
         provider_keys: Iterable[str] | None = None,
         selection_mode: str = "all",
+        record_keys: Iterable[str] | None = None,
     ) -> dict[str, int]:
         """Import the documented sorting result schema, not legacy output files."""
 
         candidates: list[ContactCandidate] = []
-        if selection_mode not in {"all", "selected", "none"}:
+        if selection_mode not in {"all", "selected", "none", "records"}:
             raise ValueError("unsupported provider selection mode")
         selected = {str(item).strip() for item in (provider_keys or ()) if str(item).strip()}
+        selected_records = {str(item).strip() for item in (record_keys or ()) if str(item).strip()}
         if selection_mode == "none":
             return self.import_candidates([], list_id)
         if selection_mode == "selected" and not selected:
+            return self.import_candidates([], list_id)
+        if selection_mode == "records" and not selected_records:
             return self.import_candidates([], list_id)
         with Path(processing_jsonl).open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -237,6 +241,9 @@ class CampaignService:
                     continue
                 provider = str((record.get("classification_result") or {}).get("provider") or "unknown")
                 if selection_mode == "selected" and provider not in selected:
+                    continue
+                record_key = f"{int(record.get('source_record_position', 0))}:{normalize_email(str(record.get('normalized_address') or record.get('original_input') or ''))}"
+                if selection_mode == "records" and record_key not in selected_records:
                     continue
                 normalized = record.get("normalized_address")
                 if not isinstance(normalized, str) or not validate_email(normalized).valid:

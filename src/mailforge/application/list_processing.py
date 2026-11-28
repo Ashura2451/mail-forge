@@ -413,14 +413,116 @@ class ListProcessingService:
         path, _ = self.artifact_path(job_id, row["id"])
         return path
 
+    @staticmethod
+    def record_key(record: dict[str, Any]) -> str:
+        """Return a stable operator-selection key for one structured result row."""
+
+        position = int(record.get("source_record_position", 0))
+        address = str(record.get("normalized_address") or record.get("original_input") or "")
+        return f"{position}:{normalize_email(address)}"
+
+    def rows(
+        self,
+        job_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        provider: str | None = None,
+        disposition: str | None = None,
+        mail_host_state: str | None = None,
+        query: str = "",
+    ) -> dict[str, Any]:
+        """Return a bounded, safe projection of completed structured result rows."""
+
+        job = self.get_job(job_id)
+        if job["status"] != "completed":
+            raise ListProcessingError(
+                "the sorted rows are not ready to inspect yet", "job_not_ready"
+            )
+        safe_limit = max(1, min(limit, 500))
+        safe_offset = max(0, offset)
+        normalized_query = query.strip().casefold()
+        provider_filter = provider.strip().casefold() if provider else ""
+        disposition_filter = disposition.strip().casefold() if disposition else ""
+        mail_host_filter = mail_host_state.strip().casefold() if mail_host_state else ""
+        matched: list[dict[str, Any]] = []
+        total = 0
+        with self.structured_result_path(job_id).open("r", encoding="utf-8") as handle:
+            for line in handle:
+                record = json.loads(line)
+                row = self._operator_row(record)
+                total += 1
+                if provider_filter and row["provider"].casefold() != provider_filter:
+                    continue
+                if disposition_filter and row["disposition"].casefold() != disposition_filter:
+                    continue
+                if mail_host_filter and row["mail_host_state"].casefold() != mail_host_filter:
+                    continue
+                haystack = " ".join(
+                    str(row.get(field, ""))
+                    for field in ("email", "original_input", "source_file", "provider", "domain")
+                ).casefold()
+                if normalized_query and normalized_query not in haystack:
+                    continue
+                matched.append(row)
+        return {
+            "items": matched[safe_offset : safe_offset + safe_limit],
+            "total": total,
+            "filtered_total": len(matched),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "has_more": safe_offset + safe_limit < len(matched),
+        }
+
+    def _operator_row(self, record: dict[str, Any]) -> dict[str, Any]:
+        classification = record.get("classification_result") or {}
+        validation = record.get("validation_result") or {}
+        metadata = record.get("metadata") or {}
+        disposition = str(record.get("processing_disposition") or "rejected")
+        dns_status = str(record.get("dns_evidence_status") or "not_requested")
+        if dns_status in {"unavailable", "pending"}:
+            mail_host_state = "Unknown" if dns_status == "unavailable" else "Pending"
+        elif dns_status == "not_needed":
+            mail_host_state = "Not checked"
+        else:
+            mail_host_state = dns_status.replace("_", " ").title()
+        if disposition == "accepted":
+            status = "usable"
+        elif disposition == "duplicate":
+            status = "duplicate"
+        else:
+            status = "malformed" if not validation.get("valid", False) else disposition
+        return {
+            "record_key": self.record_key(record),
+            "email": record.get("normalized_address") or record.get("original_input") or "",
+            "original_input": record.get("original_input") or "",
+            "source_file": record.get("source_file") or "",
+            "source_record_position": record.get("source_record_position") or 0,
+            "associated_data": metadata.get("associated_data") or {},
+            "provider": str(classification.get("provider") or "unknown"),
+            "domain": classification.get("domain") or "",
+            "registered_domain": classification.get("registered_domain") or "",
+            "mail_host_state": mail_host_state,
+            "disposition": disposition,
+            "status": status,
+            "valid": bool(validation.get("valid", False)),
+            "reason_codes": record.get("diagnostic_reason_codes") or [],
+        }
+
     def export_selected(
-        self, job_id: str, provider_keys: list[str], *, selection_mode: str = "all"
+        self,
+        job_id: str,
+        provider_keys: list[str],
+        *,
+        selection_mode: str = "all",
+        record_keys: list[str] | None = None,
     ) -> tuple[str, str]:
         """Project selected accepted rows while retaining structured source fields."""
-        if selection_mode not in {"all", "selected", "none"}:
+        if selection_mode not in {"all", "selected", "none", "records"}:
             raise ListProcessingError("unsupported provider selection mode", "selection_invalid")
         job = self.get_job(job_id)
         selected = {item.strip() for item in provider_keys if item.strip()}
+        selected_records = {item.strip() for item in (record_keys or []) if item.strip()}
         output = io.StringIO(newline="")
         writer = csv.DictWriter(
             output,
@@ -440,6 +542,8 @@ class ListProcessingService:
                 if selection_mode == "none":
                     continue
                 if selection_mode == "selected" and provider not in selected:
+                    continue
+                if selection_mode == "records" and self.record_key(record) not in selected_records:
                     continue
                 associated = (record.get("metadata") or {}).get("associated_data") or {}
                 writer.writerow(

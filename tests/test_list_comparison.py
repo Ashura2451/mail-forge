@@ -286,6 +286,75 @@ def test_sorted_provider_selection_filters_handoff_and_structured_export(tmp_pat
         assert "alice@gmail.com" not in empty_export.text
 
 
+def test_sorted_record_selection_preserves_exact_membership_and_row_projection(
+    tmp_path: Path,
+) -> None:
+    with TestClient(
+        create_app(tmp_path / "record-selection.sqlite3", allowed_hosts={"testserver"})
+    ) as client:
+        csrf = client.get("/api/v1/session").json()["csrf_token"]
+        headers = {"x-mailforge-csrf": csrf}
+        created = client.post(
+            "/api/v1/list-tools/jobs?profile=full&dns_mode=offline",
+            headers=headers,
+            files={
+                "file": (
+                    "records.txt",
+                    b"alice@gmail.com\nbob@example.com\ncarol@proton.me\nhello@notgmail.example\n",
+                    "text/plain",
+                )
+            },
+        )
+        assert created.status_code == 200, created.text
+        job_id = created.json()["id"]
+        assert client.post(f"/api/v1/list-tools/jobs/{job_id}/start", headers=headers).status_code == 200
+        for _ in range(100):
+            job = client.get(f"/api/v1/list-tools/jobs/{job_id}").json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert job["status"] == "completed"
+
+        rows = client.get(f"/api/v1/list-tools/jobs/{job_id}/rows", headers=headers)
+        assert rows.status_code == 200, rows.text
+        by_email = {item["email"]: item for item in rows.json()["items"]}
+        assert by_email["carol@proton.me"]["provider"] == "proton"
+        assert by_email["hello@notgmail.example"]["provider"] == "custom"
+        assert by_email["bob@example.com"]["mail_host_state"] == "Unknown"
+
+        selected_key = by_email["bob@example.com"]["record_key"]
+        handoff = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/handoff",
+            headers=headers,
+            json={"record_keys": [selected_key], "selection_mode": "records"},
+        )
+        assert handoff.status_code == 200, handoff.text
+        list_id = handoff.json()["list"]["id"]
+        contacts = client.get(f"/api/v1/lists/{list_id}/history", headers=headers)
+        assert contacts.status_code == 200, contacts.text
+        comparison = client.post(
+            "/api/v1/list-comparison/preview",
+            headers=headers,
+            data={"main_list_id": list_id, "operation": "subtract"},
+        )
+        assert comparison.status_code == 200, comparison.text
+        assert [item["email"] for item in comparison.json()["results"]] == [
+            "bob@example.com"
+        ]
+
+        exported = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/export-selected",
+            headers=headers,
+            json={
+                "record_keys": [selected_key],
+                "selection_mode": "records",
+            },
+        )
+        assert exported.status_code == 200, exported.text
+        assert "bob@example.com" in exported.text
+        assert "alice@gmail.com" not in exported.text
+
+
 def test_direct_message_revision_can_bind_to_a_campaign_without_manual_template_setup(
     tmp_path: Path,
 ) -> None:

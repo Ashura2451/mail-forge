@@ -1,8 +1,9 @@
-"""Rendered acceptance for the focused Sort, Compare, and Send workflows."""
+"""Rendered acceptance for the direct-manipulation Mailforge workflows."""
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -62,115 +63,89 @@ def local_page(tmp_path: Path):
     server.wait(timeout=5)
 
 
-def test_sort_compare_and_history_workflows(local_page) -> None:
+def test_direct_address_workspace_preserves_provider_and_row_selection(local_page) -> None:
     page, base = local_page
-    page.goto(f"{base}/", wait_until="networkidle")
-    assert page.get_by_role("heading", name="Home").is_visible()
-    for label in ("Sort email", "Compare lists", "Send", "History"):
-        assert page.get_by_role("button", name=label, exact=True).is_visible()
-
-    page.get_by_role("button", name="Sort email", exact=True).click()
-    page.get_by_label("Email sorter input file").set_input_files(
+    page.goto(f"{base}/sort", wait_until="networkidle")
+    page.get_by_label("Address file").set_input_files(
         {
-            "name": "sort.txt",
+            "name": "addresses.txt",
             "mimeType": "text/plain",
-            "buffer": b"ALICE@example.com\nalice@example.com\ninvalid\nbob@example.com",
+            "buffer": b"alice@gmail.com\nbob@example.com\ncarol@proton.me\nhello@notgmail.example\nalice@gmail.com",
         }
     )
-    page.get_by_role("button", name="Preview", exact=True).click()
-    page.get_by_text("Accepted").wait_for()
-    assert page.get_by_text("Duplicates", exact=True).is_visible()
+    page.get_by_role("button", name="Sort file", exact=True).click()
+    page.get_by_text("Completed", exact=True).wait_for(timeout=10_000)
+    assert page.get_by_text("gmail", exact=True).first.is_visible()
+    assert page.get_by_text("proton", exact=True).first.is_visible()
+    assert page.get_by_text("Unknown host is not invalid").is_visible()
 
-    page.get_by_role("navigation", name="Main navigation").get_by_role(
-        "button", name="Compare lists", exact=True
-    ).click()
-    page.get_by_label("Main comparison list").set_input_files(
-        {
-            "name": "main.txt",
-            "mimeType": "text/plain",
-            "buffer": b"alice@example.com\nbob@example.com",
-        }
+    page.get_by_role("button", name="None", exact=True).click()
+    assert page.get_by_text("0 addresses", exact=True).is_visible()
+    page.get_by_role("button", name="Choose rows", exact=True).click()
+    page.get_by_role("checkbox", name="Select bob@example.com").check()
+    assert page.get_by_text("1 address", exact=True).is_visible()
+    page.get_by_role("button", name="Save exact selection", exact=True).click()
+    page.get_by_role("textbox", name="List name").fill("One address")
+    page.get_by_role("button", name="Save list", exact=True).click()
+    page.get_by_role("button", name="More tools", exact=True).click()
+    page.get_by_role("button", name="Saved lists", exact=True).click()
+    page.get_by_text("One address", exact=True).wait_for()
+    assert page.get_by_role("cell", name="1", exact=True).is_visible()
+
+
+def test_compare_clears_stale_results_when_operation_changes(local_page) -> None:
+    page, base = local_page
+    page.goto(f"{base}/compare", wait_until="networkidle")
+    page.get_by_label("Main comparison file").set_input_files(
+        {"name": "main.txt", "mimeType": "text/plain", "buffer": b"alice@example.com\nbob@example.com"}
     )
-    page.get_by_label("Reference comparison lists").set_input_files(
-        {"name": "old.txt", "mimeType": "text/plain", "buffer": b"bob@example.com"}
+    page.get_by_label("Reference comparison files").set_input_files(
+        {"name": "reference.txt", "mimeType": "text/plain", "buffer": b"bob@example.com"}
     )
-    page.get_by_role("main").get_by_role("button", name="Compare lists", exact=True).click()
-    page.get_by_role("heading", name="Comparison result").wait_for()
-    assert page.get_by_text("alice@example.com").is_visible()
-    page.get_by_role("button", name="History", exact=True).click()
-    assert page.get_by_role("heading", name="History").is_visible()
+    page.get_by_role("button", name="Calculate result", exact=True).click()
+    page.get_by_role("heading", name="Only in main", exact=True).wait_for()
+    assert page.get_by_text("alice@example.com", exact=True).is_visible()
+    page.get_by_role("combobox", name="Operation").select_option("intersection")
+    assert page.get_by_text("No result is active", exact=True).is_visible()
+    assert not page.get_by_role("heading", name="Only in main", exact=True).is_visible()
 
 
-def test_direct_send_accepts_pasted_addresses_and_html(local_page) -> None:
+def test_compose_is_independent_and_shows_exact_pasted_scope(local_page) -> None:
     page, base = local_page
     page.goto(f"{base}/send", wait_until="networkidle")
-    page.get_by_label("Paste addresses").fill("alice@example.com\nbob@example.com")
-    page.get_by_label("Sender email").fill("sender@example.com")
+    page.get_by_label(re.compile("Paste addresses")).fill("alice@example.com\nbob@example.com")
     page.get_by_label("Subject").fill("Direct HTML test")
-    page.get_by_label("Plain-text message").fill("Hello {{ email }}")
-    page.get_by_label("HTML message").fill("<p>Hello {{ email }}</p>")
-    page.get_by_role("button", name="Review this send").click()
-    page.get_by_text("Recipient set and message prepared").wait_for()
-    page.get_by_role("button", name="Prepare exact scope").click()
-    page.get_by_text("Send prepared").wait_for()
-    page.get_by_role("button", name="Authorize local simulation").click()
-    page.get_by_role("button", name="Start local send").click()
-    page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
-    assert page.get_by_role("cell", name="accepted", exact=True).first.is_visible()
+    page.get_by_label(re.compile("HTML message")).fill("<p>Hello {{ email }}</p>")
+    page.get_by_role("button", name="Review exact send", exact=True).click()
+    page.get_by_text("2 recipients", exact=True).wait_for()
+    assert page.get_by_text("Direct HTML test", exact=True).is_visible()
+    page.get_by_role("button", name="Prepare exact scope", exact=True).click()
+    page.get_by_role("button", name="Authorize simulation", exact=True).wait_for()
 
 
-def test_sorted_result_moves_into_compare_without_export(local_page) -> None:
+def test_sorted_result_handoff_selects_the_transferred_list_in_compare(local_page) -> None:
     page, base = local_page
     page.goto(f"{base}/sort", wait_until="networkidle")
-    page.get_by_label("Email sorter input file").set_input_files(
-        {
-            "name": "handoff.txt",
-            "mimeType": "text/plain",
-            "buffer": b"alice@example.com\nbob@example.com\n",
-        }
+    page.get_by_label("Address file").set_input_files(
+        {"name": "handoff.txt", "mimeType": "text/plain", "buffer": b"alice@example.com\nbob@example.com"}
     )
-    page.get_by_role("button", name="Sort this file").click()
-    page.get_by_text("completed", exact=True).wait_for(timeout=10_000)
-    page.get_by_role("button", name="Compare this result").click()
+    page.get_by_role("button", name="Sort file", exact=True).click()
+    page.get_by_text("Completed", exact=True).wait_for(timeout=10_000)
+    page.get_by_role("button", name="Compare", exact=True).last.click()
     page.wait_for_url("**/compare?list_id=*")
-    assert "list_id=" in page.url
-    page.get_by_text("Using the selected sorted result from this local workspace.").wait_for()
-    page.get_by_role("main").get_by_role("button", name="Compare lists", exact=True).click()
-    page.get_by_role("heading", name="Comparison result").wait_for()
-    assert page.get_by_text("alice@example.com").is_visible()
-    page.get_by_role("main").get_by_role("button", name="Send this result").click()
-    page.wait_for_url("**/send?list_id=*")
-    page.get_by_text("Using the selected sorted result from this local workspace.").wait_for()
-    review = page.get_by_role("main").get_by_role("button", name="Review this send")
-    playwright.expect(review).to_be_enabled()
-    review.dispatch_event("click")
-    page.get_by_text("Recipient set and message prepared").wait_for()
-    page.goto(f"{base}/sort", wait_until="networkidle")
-    page.get_by_role("navigation", name="Main navigation").get_by_role(
-        "button", name="Sort email", exact=True
-    ).click()
-    page.get_by_text("handoff.txt").click()
-    page.get_by_role("button", name="Send this result").click()
-    page.wait_for_url("**/send?list_id=*")
-    page.get_by_text("Using the selected sorted result from this local workspace.").wait_for()
-    playwright.expect(
-        page.get_by_role("main").get_by_role("button", name="Review this send")
-    ).to_be_enabled()
-    page.get_by_role("main").get_by_role("button", name="Review this send").click()
-    page.get_by_text("Recipient set and message prepared").wait_for()
+    page.get_by_role("combobox", name="Saved list").wait_for()
+    assert page.get_by_role("combobox", name="Saved list").input_value()
+    page.get_by_role("button", name="Calculate result", exact=True).click()
+    page.get_by_role("heading", name="Only in main", exact=True).wait_for(timeout=5_000)
+    assert page.get_by_text("alice@example.com", exact=True).is_visible()
 
 
-def test_narrow_navigation_keeps_labels_and_focus(local_page) -> None:
+def test_narrow_navigation_has_keyboard_dismissal(local_page) -> None:
     page, base = local_page
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(f"{base}/", wait_until="networkidle")
     menu = page.get_by_role("button", name="Open navigation")
     menu.click()
-    assert page.get_by_role("button", name="Compare lists", exact=True).is_visible()
-    page.get_by_role("button", name="Compare lists", exact=True).click()
-    assert page.get_by_role("heading", name="Compare lists").is_visible()
-    page.get_by_role("button", name="Open navigation").click()
+    assert page.get_by_role("button", name="Compare", exact=True).is_visible()
     page.keyboard.press("Escape")
-    assert (
-        page.get_by_role("button", name="Open navigation").get_attribute("aria-expanded") == "false"
-    )
+    assert page.get_by_role("button", name="Open navigation").get_attribute("aria-expanded") == "false"

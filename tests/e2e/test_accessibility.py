@@ -62,7 +62,7 @@ def test_rationalized_console_routes_have_no_axe_critical_or_serious_findings(
             browser = sync.chromium.launch(headless=True, executable_path=executable)
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             page.add_init_script(script=axe_source.read_text(encoding="utf-8"))
-            for route in ("/", "/sort", "/compare", "/send", "/history", "/providers"):
+            for route in ("/", "/sort", "/compare", "/send", "/history", "/accounts", "/saved", "/settings"):
                 page.goto(f"http://127.0.0.1:{port}{route}", wait_until="networkidle")
                 result = page.evaluate(
                     """async () => await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } })"""
