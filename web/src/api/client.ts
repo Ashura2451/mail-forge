@@ -70,9 +70,9 @@ export async function uploadAsset(file: File, kind: 'attachment' | 'image' = 'at
   return uploadFiles('/message-studio/assets', { file }, { kind })
 }
 
-export async function exportSortSelection(jobId: string, providerKeys: string[]) {
+export async function exportSortSelection(jobId: string, providerKeys: string[], selectionMode: 'all' | 'selected' | 'none') {
   const response = await fetch(`/api/v1/list-tools/jobs/${jobId}/export-selected`, {
-    method: 'POST', body: JSON.stringify({ provider_keys: providerKeys }), credentials: 'same-origin',
+    method: 'POST', body: JSON.stringify({ provider_keys: providerKeys, selection_mode: selectionMode }), credentials: 'same-origin',
     headers: { 'content-type': 'application/json', 'x-mailforge-csrf': csrf },
   })
   if (!response.ok) {

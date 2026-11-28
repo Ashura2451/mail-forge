@@ -218,18 +218,25 @@ class CampaignService:
         list_id: str,
         *,
         provider_keys: Iterable[str] | None = None,
+        selection_mode: str = "all",
     ) -> dict[str, int]:
         """Import the documented sorting result schema, not legacy output files."""
 
         candidates: list[ContactCandidate] = []
+        if selection_mode not in {"all", "selected", "none"}:
+            raise ValueError("unsupported provider selection mode")
         selected = {str(item).strip() for item in (provider_keys or ()) if str(item).strip()}
+        if selection_mode == "none":
+            return self.import_candidates([], list_id)
+        if selection_mode == "selected" and not selected:
+            return self.import_candidates([], list_id)
         with Path(processing_jsonl).open("r", encoding="utf-8") as handle:
             for line in handle:
                 record = json.loads(line)
                 if record.get("processing_disposition") != "accepted":
                     continue
                 provider = str((record.get("classification_result") or {}).get("provider") or "unknown")
-                if selected and provider not in selected:
+                if selection_mode == "selected" and provider not in selected:
                     continue
                 normalized = record.get("normalized_address")
                 if not isinstance(normalized, str) or not validate_email(normalized).valid:

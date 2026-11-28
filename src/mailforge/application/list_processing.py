@@ -413,8 +413,12 @@ class ListProcessingService:
         path, _ = self.artifact_path(job_id, row["id"])
         return path
 
-    def export_selected(self, job_id: str, provider_keys: list[str]) -> tuple[str, str]:
+    def export_selected(
+        self, job_id: str, provider_keys: list[str], *, selection_mode: str = "all"
+    ) -> tuple[str, str]:
         """Project selected accepted rows while retaining structured source fields."""
+        if selection_mode not in {"all", "selected", "none"}:
+            raise ListProcessingError("unsupported provider selection mode", "selection_invalid")
         job = self.get_job(job_id)
         selected = {item.strip() for item in provider_keys if item.strip()}
         output = io.StringIO(newline="")
@@ -433,7 +437,9 @@ class ListProcessingService:
                     continue
                 classification = record.get("classification_result") or {}
                 provider = str(classification.get("provider") or "unknown")
-                if selected and provider not in selected:
+                if selection_mode == "none":
+                    continue
+                if selection_mode == "selected" and provider not in selected:
                     continue
                 associated = (record.get("metadata") or {}).get("associated_data") or {}
                 writer.writerow(

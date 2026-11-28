@@ -263,6 +263,28 @@ def test_sorted_provider_selection_filters_handoff_and_structured_export(tmp_pat
         assert "Alice" in exported.text
         assert "bob@example.com" not in exported.text
 
+        none_handoff = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/handoff",
+            headers=headers,
+            json={"provider_keys": [], "selection_mode": "none"},
+        )
+        assert none_handoff.status_code == 200, none_handoff.text
+        assert none_handoff.json()["records_imported"] == 0
+        empty_compare = client.post(
+            "/api/v1/list-comparison/preview",
+            headers=headers,
+            data={"main_list_id": none_handoff.json()["list"]["id"], "operation": "subtract"},
+        )
+        assert empty_compare.status_code == 200
+        assert empty_compare.json()["results"] == []
+        empty_export = client.post(
+            f"/api/v1/list-tools/jobs/{job_id}/export-selected",
+            headers=headers,
+            json={"provider_keys": [], "selection_mode": "none"},
+        )
+        assert empty_export.status_code == 200, empty_export.text
+        assert "alice@gmail.com" not in empty_export.text
+
 
 def test_direct_message_revision_can_bind_to_a_campaign_without_manual_template_setup(
     tmp_path: Path,

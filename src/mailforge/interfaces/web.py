@@ -94,10 +94,12 @@ class ListInput(BaseModel):
 class ListHandoffInput(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     provider_keys: list[str] = Field(default_factory=list, max_length=200)
+    selection_mode: Literal["all", "selected", "none"] | None = None
 
 
 class ListSelectionInput(BaseModel):
     provider_keys: list[str] = Field(default_factory=list, max_length=200)
+    selection_mode: Literal["all", "selected", "none"] | None = None
 
 
 class ComparisonHandoffInput(BaseModel):
@@ -1898,7 +1900,24 @@ def create_app(
         try:
             if action == "handoff":
                 result_path = runtime.list_processing.structured_result_path(job_id)
-                description = f"Sort email result from job {job_id}"
+                selection_mode = (
+                    payload.selection_mode
+                    if payload and payload.selection_mode
+                    else "selected"
+                    if payload and payload.provider_keys
+                    else "all"
+                )
+                selection_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "mode": selection_mode,
+                            "providers": sorted(payload.provider_keys if payload else []),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()[:16]
+                description = f"Sort email result from job {job_id} selection {selection_hash}"
                 existing = _query(
                     runtime.store,
                     "SELECT id, name, description FROM lists WHERE description = ? LIMIT 1",
@@ -1907,12 +1926,19 @@ def create_app(
                 if existing:
                     return {"list": existing[0], "reused": True}
                 name = payload.name.strip() if payload and payload.name else ""
-                name = name or f"Sorted result {job_id[:8]}"
+                name = name or f"Sorted result {job_id[:8]} {selection_hash}"
                 list_id = runtime.store.create_list(name, description)
                 imported = runtime.campaigns.import_sort_results(
                     result_path,
                     list_id,
                     provider_keys=(payload.provider_keys if payload else None),
+                    selection_mode=(
+                        payload.selection_mode
+                        if payload and payload.selection_mode
+                        else "selected"
+                        if payload and payload.provider_keys
+                        else "all"
+                    ),
                 )
                 return {
                     "list": {"id": list_id, "name": name, "description": description},
@@ -1921,7 +1947,15 @@ def create_app(
                 }
             if action == "export-selected":
                 content, filename = runtime.list_processing.export_selected(
-                    job_id, payload.provider_keys if payload else []
+                    job_id,
+                    payload.provider_keys if payload else [],
+                    selection_mode=(
+                        payload.selection_mode
+                        if payload and payload.selection_mode
+                        else "selected"
+                        if payload and payload.provider_keys
+                        else "all"
+                    ),
                 )
                 return Response(
                     content=content,
