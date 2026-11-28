@@ -17,7 +17,47 @@ from mailforge.application.local_application import (
     restore_backup,
     validate_backup,
 )
+from mailforge.interfaces.cli import build_parser
 from mailforge.infrastructure.campaign_store import CampaignStore
+
+
+def test_app_lifecycle_defaults_to_platform_data_directory() -> None:
+    args = build_parser().parse_args(["app", "open"])
+    assert args.data_dir is None
+    assert args.port == 8765
+
+
+def test_mac_browser_open_uses_launchservices(monkeypatch) -> None:
+    import mailforge.application.local_application as local_application
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(local_application.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        local_application.subprocess,
+        "Popen",
+        lambda command, **_kwargs: calls.append(command),
+    )
+    local_application._open_browser("http://127.0.0.1:8765/")
+    assert calls == [["/usr/bin/open", "http://127.0.0.1:8765/"]]
+
+
+def test_start_recovers_a_live_instance_when_runtime_record_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mailforge.application.local_application as local_application
+
+    data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
+    app = local_application.LocalApplication(data)
+    health = {"application": "Mailforge", "runtime_id": "live", "started_at": "now"}
+    monkeypatch.setattr(local_application, "_health", lambda _port: health)
+    monkeypatch.setattr(local_application, "_listening_pid", lambda _port: 4321)
+    monkeypatch.setattr(local_application, "_process_start_time", lambda _pid: "start")
+    monkeypatch.setattr(local_application, "_open_browser", lambda _url: None)
+    recovered = app.start()
+    assert recovered["already_running"] is True
+    assert recovered["recovered_record"] is True
+    assert recovered["pid"] == 4321
+    assert app.record_path.is_file()
 
 
 def test_local_data_directory_onboarding_and_full_backup_restore(tmp_path: Path) -> None:

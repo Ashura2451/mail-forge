@@ -106,7 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     app_commands = app.add_subparsers(dest="app_command", required=True)
     for name in ("init", "status", "start", "stop", "restart", "open"):
         item = app_commands.add_parser(name)
-        item.add_argument("--data-dir", type=Path, required=True)
+        item.add_argument(
+            "--data-dir",
+            type=Path,
+            default=None,
+            help="user data directory (defaults to the platform application-support directory)",
+        )
         item.add_argument("--port", type=int, default=8765)
         item.add_argument("--no-open", action="store_true")
     app_backup = app_commands.add_parser("backup")

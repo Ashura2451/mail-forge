@@ -80,10 +80,28 @@ cat > "$OUTPUT/Contents/MacOS/Mailforge" <<'LAUNCHER'
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 RESOURCES="$HERE/Resources"
+DATA_ROOT="${HOME}/Library/Application Support/Mailforge"
+LOG_ROOT="$DATA_ROOT/logs"
+LOG_PATH="$LOG_ROOT/application.log"
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONHOME="$RESOURCES/python"
 export PYTHONPATH="$RESOURCES/site-packages"
-exec "$RESOURCES/python/bin/python3.15" -m mailforge app open "$@"
+mkdir -p "$LOG_ROOT"
+set +e
+"$RESOURCES/python/bin/python3.15" -m mailforge app open "$@" >>"$LOG_PATH" 2>&1
+STATUS=$?
+set -e
+if [ "$STATUS" -ne 0 ]; then
+  DETAIL=$(tail -n 1 "$LOG_PATH" 2>/dev/null || true)
+  DETAIL=$(printf '%s' "$DETAIL" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  if [ -z "$DETAIL" ]; then
+    DETAIL="Mailforge could not start. Check the application log for details."
+  fi
+  /usr/bin/osascript \
+    -e "display alert \"Mailforge could not start\" message \"$DETAIL\" buttons {\"OK\"} default button \"OK\"" \
+    >/dev/null 2>&1 || true
+fi
+exit "$STATUS"
 LAUNCHER
 chmod 755 "$OUTPUT/Contents/MacOS/Mailforge"
 

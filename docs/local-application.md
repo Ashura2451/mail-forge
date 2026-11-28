@@ -7,8 +7,13 @@ bundle from a clean checkout:
 
 ```sh
 bash scripts/package-macos.sh
-open dist/Mailforge.app
+open dist/Mailforge-045-candidate.app
 ```
+
+This is the same LaunchServices path used by Finder double-click. No terminal,
+environment variable, Python installation, or development dependency is needed
+by the operator. The bundle opens the default browser at the local console and
+uses the platform application-support directory automatically.
 
 The bundle includes the locked CPython 3.15.2 runtime, Python dependencies,
 Mailforge package, migrations, provider resources, and compiled React assets.
@@ -30,6 +35,9 @@ root is explicitly selected.
 ## Lifecycle controls
 
 The bundled launcher opens the browser and starts the local service if needed.
+Repeated Finder launches reuse the healthy existing instance instead of
+starting a second listener. If startup fails, the launcher records the
+diagnostic in `logs/application.log` and presents a macOS alert.
 The Python CLI controls are:
 
 ```sh

@@ -523,6 +523,61 @@ def _process_start_time(pid: int) -> str | None:
     return value or None
 
 
+def _process_command(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _listening_pid(port: int) -> int | None:
+    """Find the local listener owning a port so a lost runtime record is recoverable."""
+
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for value in result.stdout.splitlines():
+        try:
+            return int(value.strip())
+        except ValueError:
+            continue
+    return None
+
+
+def _open_browser(url: str) -> None:
+    """Open the operator URL through the platform's default browser authority."""
+
+    if platform.system() == "Darwin":
+        try:
+            subprocess.Popen(
+                ["/usr/bin/open", url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            return
+        except OSError:
+            pass
+    webbrowser.open(url)
+
+
 class LocalApplication:
     """Own the normal local launch path without owning domain state."""
 
@@ -548,12 +603,41 @@ class LocalApplication:
 
     def _live_record(self) -> dict[str, Any] | None:
         record = self._record()
-        if not record:
-            return None
-        health = _health(int(record.get("port", self.port)))
-        if health and health.get("runtime_id") == record.get("runtime_id"):
-            return {**record, **health, "running": True}
-        self.record_path.unlink(missing_ok=True)
+        if record:
+            health = _health(int(record.get("port", self.port)))
+            if health and health.get("runtime_id") == record.get("runtime_id"):
+                return {**record, **health, "running": True}
+            pid = int(record.get("pid", 0) or 0)
+            expected_start = record.get("process_start")
+            if pid and expected_start and _process_start_time(pid) == expected_start:
+                return {**record, **(health or {}), "running": True, "health_pending": True}
+            self.record_path.unlink(missing_ok=True)
+        health = _health(self.port)
+        if health:
+            pid = _listening_pid(self.port)
+            recovered = {
+                "pid": pid,
+                "port": self.port,
+                "runtime_id": health.get("runtime_id"),
+                "started_at": health.get("started_at"),
+                "process_start": _process_start_time(pid) if pid else None,
+            }
+            if pid:
+                _write_json(self.record_path, recovered)
+                return {**recovered, **health, "running": True, "recovered_record": True}
+            return {**health, "port": self.port, "running": True, "recovered_record": True}
+        pid = _listening_pid(self.port)
+        command = _process_command(pid) if pid else None
+        if pid and command and "mailforge" in command and " serve " in f" {command} ":
+            recovered = {
+                "pid": pid,
+                "port": self.port,
+                "runtime_id": None,
+                "started_at": None,
+                "process_start": _process_start_time(pid),
+            }
+            _write_json(self.record_path, recovered)
+            return {**recovered, "running": True, "health_pending": True, "recovered_record": True}
         return None
 
     def start(self, *, open_browser: bool = True) -> dict[str, Any]:
@@ -561,7 +645,7 @@ class LocalApplication:
         existing = self._live_record()
         if existing:
             if open_browser:
-                webbrowser.open(f"http://127.0.0.1:{existing['port']}/")
+                _open_browser(f"http://127.0.0.1:{existing['port']}/")
             return {**existing, "already_running": True}
         if _port_is_open(self.port):
             raise RuntimeError(
@@ -608,7 +692,7 @@ class LocalApplication:
                     }
                     _write_json(self.record_path, record)
                     if open_browser:
-                        webbrowser.open(f"http://127.0.0.1:{self.port}/")
+                        _open_browser(f"http://127.0.0.1:{self.port}/")
                     return {**record, **health, "already_running": False}
                 if process.poll() is not None:
                     break
@@ -663,5 +747,5 @@ class LocalApplication:
         status = self._live_record()
         if not status:
             status = self.start(open_browser=False)
-        webbrowser.open(f"http://127.0.0.1:{status['port']}/")
+        _open_browser(f"http://127.0.0.1:{status['port']}/")
         return status
