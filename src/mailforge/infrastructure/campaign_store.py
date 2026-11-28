@@ -1595,6 +1595,16 @@ def _validated_email(value: str) -> str:
     return normalized
 
 
+class _ClosingSQLiteConnection(sqlite3.Connection):
+    """Close connections when callers use SQLite's transaction context syntax."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class CampaignStore:
     """Small explicit SQLite adapter with one schema version and safe defaults."""
 
@@ -1613,6 +1623,7 @@ class CampaignStore:
             timeout=5.0,
             isolation_level=None,
             check_same_thread=True,
+            factory=_ClosingSQLiteConnection,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")

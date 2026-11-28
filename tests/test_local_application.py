@@ -86,6 +86,14 @@ def test_local_data_directory_onboarding_and_full_backup_restore(tmp_path: Path)
     assert not list(replacement.root.parent.glob(".mailforge-old-*"))
 
 
+def test_store_connection_context_closes_sqlite_connection(tmp_path: Path) -> None:
+    store = CampaignStore(tmp_path / "connections.sqlite3")
+    with store.connect() as connection:
+        connection.execute("SELECT 1").fetchone()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+
+
 def test_tampered_backup_is_refused(tmp_path: Path) -> None:
     data = DataDirectory.from_path(tmp_path / "operator-data").initialize()
     CampaignStore(data.database)
