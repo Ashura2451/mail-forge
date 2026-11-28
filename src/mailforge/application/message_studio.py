@@ -1610,13 +1610,6 @@ class MessageStudioService:
             raise MessageStudioError("outbound service is not configured")
         snapshot = self.campaign_snapshot(campaign_id, revision_id, run_key=run_key)
         document = json.loads(snapshot["document_json"])
-        static = []
-        for reference in document.get("attachments", []):
-            static.append(
-                self._asset_attachment(
-                    reference["asset_id"], content_id=reference.get("content_id")
-                )
-            )
         per_contact: dict[str, tuple[ResolvedAttachment, ...]] = {}
         with self.store.connect() as connection:
             mappings = connection.execute(
@@ -1639,7 +1632,6 @@ class MessageStudioService:
             template=template,
             sender=sender,
             campaign_variables=campaign_variables,
-            resolved_attachments=tuple(static),
             resolved_attachments_by_contact=per_contact,
             refresh_prepared=False,
             render_callback=render,
