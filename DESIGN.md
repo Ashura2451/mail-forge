@@ -38,6 +38,16 @@ groups are a first-class Sorter object, not a summary metric. WCAG 2.2 label
 guidance and visible focus remain required, but the information hierarchy is
 set by the operator's data and immediate next action.
 
+Compose automatically prepares the selected audience and message before the
+review appears. The review shows the rendered message, recipient scope,
+account, sender, timing, attachments, and meaningful restrictions, then offers
+one explicit count-bearing send action with a confirmation step. Preparation,
+authorization, revision binding, and transport remain canonical service
+boundaries but are not ordinary operator controls. Progress, pause, recovery,
+and cancellation appear only while a send is active. A separate test email is
+sent to one entered recipient through the selected account and does not alter
+the main audience.
+
 Avoid glossy gradients, oversized hero art, decorative charts, and competitor
 branding. Density should support scanning tables and status cards without
 feeling like a spreadsheet.

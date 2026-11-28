@@ -46,7 +46,7 @@ const utilityViews = [
 const titles: Record<string, { label: string; description: string }> = {
   dashboard: {
     label: "Files & lists",
-    description: "Open a file or choose a direct operation.",
+    description: "Open a file or choose what you want to do.",
   },
   sort: {
     label: "Addresses",
@@ -59,7 +59,7 @@ const titles: Record<string, { label: string; description: string }> = {
   send: {
     label: "Compose",
     description:
-      "Build a message, inspect its audience, then review the operation.",
+      "Build a message, inspect its audience, then review the send.",
   },
   history: {
     label: "Activity",
@@ -147,7 +147,7 @@ function App() {
         setError(
           caught instanceof Error
             ? caught.message
-            : "The local operation failed",
+          : "The local task failed",
         ),
       )
       .finally(() => setBusy(false));
@@ -378,7 +378,7 @@ function Home({
           <span>Local files and durable records stay here.</span>
         </div>
       </section>
-      <section className="operation-grid" aria-label="Independent operations">
+      <section className="operation-grid" aria-label="Independent tools">
         <OperationCard
           label="Addresses"
           title="Sort and group a file"
@@ -396,8 +396,8 @@ function Home({
         />
         <OperationCard
           label="Compose"
-          title="Prepare a message"
-          text="Paste recipients or import a file, bring HTML, add files, preview, and review the scope."
+          title="Compose an email"
+          text="Choose recipients, write or import content, preview it, and send when it is ready."
           action="Open Compose"
           onClick={() => onNavigate("send")}
         />
@@ -417,7 +417,7 @@ function Home({
             <Metric label="Saved addresses" value={counts.contacts ?? 0} />
             <Metric label="Saved lists" value={counts.lists ?? 0} />
             <Metric
-              label="Recent operations"
+              label="Recent activity"
               value={data.campaigns?.length ?? 0}
             />
           </div>
@@ -948,7 +948,7 @@ function Sorter({
                   )}
                 </strong>
                 <span>
-                  Mailforge keeps the operation resumable; this table appears
+                  Mailforge keeps the sort resumable; this table appears
                   when the result is complete.
                 </span>
               </div>
@@ -1310,6 +1310,13 @@ function CompareLists({
     });
   }, []);
   const rows: ApiRecord[] = result?.results || [];
+  const resultLabel: Record<string, string> = {
+    subtract: "Only in main",
+    intersection: "In both selections",
+    union: "Combined unique",
+    unique_main: "Unique to main",
+    duplicates: "Duplicates in main",
+  };
   const sourceChanged = () => {
     setResult(null);
     setSelected(new Set());
@@ -1365,11 +1372,11 @@ function CompareLists({
           <p className="eyebrow teal">LIST COMPARISON</p>
           <h2>Put sources side by side.</h2>
           <p className="lede">
-            The operation and sources are visible before you calculate. Changing
-            either clears the previous result.
+            Choose the sources and comparison you want. Changing either clears
+            the previous result.
           </p>
         </div>
-        <span className="context-badge">Read-only operation</span>
+        <span className="context-badge">Read-only comparison</span>
       </div>
       <Panel className="compare-input-panel">
         <PanelHeading
@@ -1390,6 +1397,9 @@ function CompareLists({
                 }}
               >
                 <option value="">Import a file instead…</option>
+                {mainList && !lists.some((item) => item.id === mainList) && (
+                  <option value={mainList}>Loading transferred list…</option>
+                )}
                 {lists.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.name} · {item.contact_count ?? 0}
@@ -1482,7 +1492,7 @@ function CompareLists({
           </div>
         </div>
         <div className="compare-action-row">
-          <Field label="Operation">
+          <Field label="Show">
             <select
               value={operation}
               onChange={(event) => {
@@ -1501,7 +1511,7 @@ function CompareLists({
             <button className="primary-button" onClick={calculate}>
               Calculate result
             </button>
-            <small>Changing the operation clears the previous result.</small>
+            <small>Changing the comparison clears the previous result.</small>
           </div>
         </div>
       </Panel>
@@ -1511,9 +1521,7 @@ function CompareLists({
             <div>
               <p className="eyebrow teal">2 / RESULT</p>
               <h3>
-                {result.operation === "subtract"
-                  ? "Only in main"
-                  : result.operation}
+                {resultLabel[result.operation] || "Comparison result"}
               </h3>
               <p className="panel-detail">
                 {selected.size} of {rows.length} result rows selected ·{" "}
@@ -1605,7 +1613,7 @@ function CompareLists({
         <Panel className="empty-result">
           <Empty
             title="No result is active"
-            text="Choose sources and calculate. A changed source or operation cannot leave a stale result actionable."
+            text="Choose sources and calculate. A changed source or comparison cannot leave a stale result actionable."
           />
         </Panel>
       )}
@@ -1636,7 +1644,6 @@ function Sender({
   const [assetZip, setAssetZip] = useState<File | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [embeddedAssets, setEmbeddedAssets] = useState<File[]>([]);
-  const [label, setLabel] = useState("");
   const [campaign, setCampaign] = useState<ApiRecord | null>(null);
   const [revisionId, setRevisionId] = useState("");
   const [draftMeta, setDraftMeta] = useState({
@@ -1697,7 +1704,7 @@ function Sender({
         const created = await api<ApiRecord>("/lists", {
           method: "POST",
           body: JSON.stringify({
-            name: label.trim() || `Recipients ${Date.now()}`,
+            name: `Recipients ${Date.now()}`,
             description: "Recipient list prepared from Compose",
           }),
         });
@@ -1803,7 +1810,7 @@ function Sender({
       const created = await api<ApiRecord>("/campaigns", {
         method: "POST",
         body: JSON.stringify({
-          name: label.trim() || `Send · ${subject}`,
+          name: `Send · ${subject}`,
           list_id: resolvedListId,
           message_revision_id: publishedRevisionId,
           provider_account_ref: account || null,
@@ -1812,18 +1819,36 @@ function Sender({
           text,
         }),
       });
+      await api<ApiRecord>(`/campaigns/${created.id}/prepare`, {
+        method: "POST",
+      });
       const workspace = await api<ApiRecord>(
         `/campaigns/${created.id}/workspace`,
       );
       setDraftMeta({ subject, text, sender });
+      setPreview({
+        intents: workspace.preview || [],
+        messages: workspace.message_previews || [],
+      });
       setCampaign(workspace);
       return workspace;
-    }, "Draft ready; review the exact audience before any send");
+    }, "Ready to review; no message has been sent");
   const action = (path: string, message: string) =>
     campaign?.campaign?.id &&
     onRun(async () => {
       let result: ApiRecord;
-      if (path === "preview")
+      if (path === "send") {
+        await api<ApiRecord>(`/campaigns/${campaign.campaign.id}/authorize`, {
+          method: "POST",
+        });
+        result = await api<ApiRecord>(
+          `/campaigns/${campaign.campaign.id}/execute`,
+          {
+            method: "POST",
+            body: JSON.stringify({ mode: "loopback_smtp" }),
+          },
+        );
+      } else if (path === "preview")
         result = await api<ApiRecord>(
           `/campaigns/${campaign.campaign.id}/preview`,
         );
@@ -1863,19 +1888,10 @@ function Sender({
         await api<ApiRecord>(`/campaigns/${campaign.campaign.id}/workspace`),
       );
       return result;
-    }, "Operation scheduled locally");
+    }, "Send scheduled locally");
   const localTest = () => {
     const selected = accounts.find((item) => item.ref === account);
     if (!selected || !revisionId || !testRecipient.trim()) return;
-    const host = String(selected.host || "").toLowerCase();
-    if (!(host === "localhost" || host === "127.0.0.1" || host === "::1")) {
-      onRun(async () => {
-        throw new Error(
-          "External provider test is disabled here; select a loopback capture account for a controlled local test.",
-        );
-      }, "External provider test not started");
-      return;
-    }
     onRun(async () => {
       const proof = await api<ApiRecord>(
         `/providers/${encodeURIComponent(account)}/test-proof`,
@@ -1938,6 +1954,8 @@ function Sender({
         testRecipient={testRecipient}
         setTestRecipient={setTestRecipient}
         testPrepared={testPrepared}
+        setTestPrepared={setTestPrepared}
+        setTestResult={setTestResult}
         preview={preview}
         onAction={action}
         onSchedule={schedule}
@@ -2114,7 +2132,7 @@ function Sender({
           <PanelHeading
             eyebrow="3 / OPTIONS"
             title="Delivery details"
-            detail="Account selection and optional files live here without interrupting composition."
+            detail="Choose the account and any files that belong with this message."
           />
           <Field
             label="Email account"
@@ -2132,13 +2150,6 @@ function Sender({
                 </option>
               ))}
             </select>
-          </Field>
-          <Field label="Operation label">
-            <input
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-              placeholder="Optional note for Activity"
-            />
           </Field>
           <label className="file-picker">
             <span>
@@ -2175,8 +2186,7 @@ function Sender({
             <summary>Optional personalization and scheduling</summary>
             <p>
               Use <code>{"{{ email }}"}</code> and structured fields in the
-              message. Scheduling remains available after the exact scope is
-              prepared.
+              message. Scheduling is available after this review is ready.
             </p>
           </details>
           <button
@@ -2199,6 +2209,8 @@ function SendReview({
   testRecipient,
   setTestRecipient,
   testPrepared,
+  setTestPrepared,
+  setTestResult,
   testResult,
   htmlFeedback,
   preview,
@@ -2214,6 +2226,8 @@ function SendReview({
   testRecipient: string;
   setTestRecipient: (value: string) => void;
   testPrepared: string;
+  setTestPrepared: (value: string) => void;
+  setTestResult: (value: ApiRecord | null) => void;
   testResult: ApiRecord | null;
   htmlFeedback: ApiRecord[];
   preview: ApiRecord | null;
@@ -2225,14 +2239,44 @@ function SendReview({
 }) {
   const status = campaign.campaign?.status || "draft";
   const [scheduleAt, setScheduleAt] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const report = campaign.report || {};
   const recipients: ApiRecord[] =
-    campaign.recipients || campaign.audience?.items || [];
+    campaign.preview || campaign.recipients || campaign.audience?.items || [];
   const total =
     campaign.preflight?.audience_summary?.matched ??
+    campaign.progress?.counts?.total ??
     recipients.length ??
     report.total ??
     0;
+  const messagePreview: ApiRecord =
+    campaign.message_previews?.[0] || preview?.messages?.[0] || {};
+  const attachments: ApiRecord[] = messagePreview.attachments || [];
+  const findings: ApiRecord[] = campaign.preflight?.findings || [];
+  const blockers = findings.filter((item) => item.severity === "blocker");
+  const warnings = findings.filter(
+    (item) =>
+      item.severity === "warning" &&
+      !["schedule_immediate", "external_policy_not_verified"].includes(
+        item.code,
+      ),
+  );
+  const accountName = campaign.provider?.display_name ||
+    (account ? "Selected sending account" : "No sending account selected");
+  const sendLabel = `Send ${total.toLocaleString()} email${total === 1 ? "" : "s"}`;
+  const canSend = Boolean(account && status === "ready" && !blockers.length);
+  const progressCounts = campaign.progress?.counts || {};
+  const sentCount =
+    progressCounts.accepted ?? progressCounts.submitted ?? progressCounts.attempted ?? 0;
+  const normalizationNotes = htmlFeedback.filter(
+    (item) => item.severity !== "ERROR",
+  );
+  const normalizationMessages = new Set(
+    normalizationNotes.map((item) => item.message),
+  );
+  const messageWarnings: string[] = (messagePreview.warnings || []).filter(
+    (item: string) => !normalizationMessages.has(item),
+  );
   const messageSubject =
     campaign.campaign?.configuration?.subject ||
     draftMeta.subject ||
@@ -2240,20 +2284,24 @@ function SendReview({
   const messageText =
     campaign.campaign?.configuration?.text ||
     draftMeta.text ||
-    "HTML message attached to this revision.";
+    "Rendered message preview is not available yet.";
   const sender =
     campaign.campaign?.configuration?.sender_email ||
     draftMeta.sender ||
     "Sender selected in message";
+  const confirmSend = () => {
+    setConfirmOpen(false);
+    onAction("send", `${sendLabel} started`);
+  };
   return (
     <div className="workspace">
       <div className="workspace-head">
         <div>
           <p className="eyebrow teal">COMPOSE / REVIEW</p>
-          <h2>{campaign.campaign?.name || "Review this send"}</h2>
+          <h2>Review and send</h2>
           <p className="lede">
-            The operation is not sent from this screen until you explicitly
-            authorize and start it.
+            Check the audience, account and rendered message. Sending starts
+            only after you confirm this exact review.
           </p>
         </div>
         <StatusTag value={status === "draft" ? "Draft" : status} />
@@ -2261,162 +2309,141 @@ function SendReview({
       <Panel className="review-panel">
         <div className="scope-strip review-scope">
           <div>
-            <span className="eyebrow">EXACT RECIPIENT SCOPE</span>
-            <strong>{total.toLocaleString()} recipients</strong>
-            <small>{sender}</small>
+            <span className="eyebrow">YOUR SEND</span>
+            <strong>{total.toLocaleString()} recipient{total === 1 ? "" : "s"}</strong>
+            <small>{accountName} · {sender}</small>
           </div>
           <div className="button-group">
-            <button onClick={() => onNavigate("saved")}>
-              Inspect saved list
-            </button>
-            <button onClick={() => onNew()}>Start another</button>
+            <button onClick={onNew}>Edit message</button>
           </div>
         </div>
         <div className="review-grid">
           <div>
-            <h3>Message preview</h3>
+            <h3>Rendered message</h3>
             <div className="message-card">
               <strong>{messageSubject}</strong>
-              <p>{messageText}</p>
+              <small>From {sender}</small>
+              {messagePreview.html ? (
+                <iframe
+                  title="Rendered email preview"
+                  srcDoc={messagePreview.html}
+                  sandbox="allow-same-origin"
+                />
+              ) : (
+                <p>{messageText}</p>
+              )}
             </div>
-          {htmlFeedback.length > 0 && (
-            <div className="html-feedback" role="status">
-              <strong>HTML prepared safely</strong>
-              {htmlFeedback.map((item, index) => (
-                <span key={`${item.code}-${index}`}>{item.message}</span>
-              ))}
-            </div>
-          )}
-            {preview?.intents?.length ? (
-              <div className="preview-box">
-                <strong>Prepared recipients</strong>
-                <span>
-                  {preview.intents.length} intents · scope hash retained by the
-                  service
-                </span>
-              </div>
-            ) : (
-              <button
-                onClick={() =>
-                  onAction("preview", "Prepared recipient preview loaded")
-                }
-              >
-                Inspect prepared recipients
-              </button>
+            {normalizationNotes.length > 0 && (
+              <details className="review-note" open={false}>
+                <summary>Message adjusted for email compatibility</summary>
+                <ul>
+                  {normalizationNotes.map((item, index) => (
+                    <li key={`${item.code}-${index}`}>{item.message}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {messageWarnings.length > 0 && (
+              <details className="review-note">
+                <summary>Review message notes</summary>
+                <ul>
+                  {messageWarnings.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </details>
             )}
           </div>
-          <div>
-            <h3>Operation controls</h3>
-            <ol className="review-steps">
-              <li
-                className={
-                  ["ready", "authorized", "running", "completed"].includes(
-                    status,
-                  )
-                    ? "done"
-                    : ""
-                }
-              >
-                <strong>Prepare</strong>
-                <span>
-                  Evaluate the saved audience and preserve the exact revision.
-                </span>
-              </li>
-              <li
-                className={
-                  ["authorized", "running", "completed"].includes(status)
-                    ? "done"
-                    : ""
-                }
-              >
-                <strong>Authorize local simulation</strong>
-                <span>
-                  Name the mode before any controlled local execution.
-                </span>
-              </li>
-              <li className={status === "completed" ? "done" : ""}>
-                <strong>Run</strong>
-                <span>
-                  Provider acceptance is recorded separately from inbox
-                  delivery.
-                </span>
-              </li>
-            </ol>
-            <div className="button-group wrap-controls">
-              {status === "draft" && (
-                <button
-                  className="primary-button"
-                  onClick={() =>
-                    onAction(
-                      "prepare",
-                      "Audience prepared; review the exact count",
-                    )
-                  }
-                >
-                  Prepare exact scope
-                </button>
-              )}
-              {["ready", "prepared", "paused"].includes(status) && (
-                <button
-                  className="primary-button"
-                  onClick={() =>
-                    onAction("authorize", "Local simulation authorized")
-                  }
-                >
-                  Authorize simulation
-                </button>
-              )}
-              {["authorized", "ready"].includes(status) && (
-                <button
-                  onClick={() =>
-                    onAction("execute", "Controlled local operation started")
-                  }
-                >
-                  Start local simulation
-                </button>
-              )}
-              {status === "running" && (
-                <button onClick={() => onAction("pause", "Operation paused")}>
-                  Pause
-                </button>
-              )}
-              {status === "paused" && (
-                <button onClick={() => onAction("resume", "Operation resumed")}>
-                  Resume
-                </button>
-              )}
-              {["running", "paused", "ready"].includes(status) && (
-                <button
-                  className="danger-button"
-                  onClick={() => onAction("cancel", "Operation canceled")}
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-            {["ready", "authorized"].includes(status) && (
-              <div className="schedule-control">
-                <Field
-                  label="Schedule (optional)"
-                  hint="Uses your local timezone."
-                >
-                  <input
-                    type="datetime-local"
-                    value={scheduleAt}
-                    onChange={(event) => setScheduleAt(event.target.value)}
-                  />
-                </Field>
-                <button
-                  onClick={() => onSchedule(scheduleAt)}
-                  disabled={!scheduleAt}
-                >
-                  Schedule exact send
-                </button>
+          <div className="review-details">
+            <section>
+              <h3>Recipients</h3>
+              <div className="recipient-summary">
+                {recipients.slice(0, 6).map((item) => (
+                  <span key={item.email || item.normalized_email}>
+                    {item.email || item.normalized_email}
+                  </span>
+                ))}
+                {recipients.length > 6 && (
+                  <span>+{(total - 6).toLocaleString()} more recipients</span>
+                )}
               </div>
+            </section>
+            <section>
+              <h3>Sending details</h3>
+              <dl className="review-facts">
+                <div><dt>Account</dt><dd>{accountName}</dd></div>
+                <div><dt>Sender</dt><dd>{sender}</dd></div>
+                <div><dt>Timing</dt><dd>{campaign.schedule ? "Scheduled" : "Send now"}</dd></div>
+                <div><dt>Attachments</dt><dd>{attachments.length ? attachments.map((item) => item.filename).join(", ") : "None"}</dd></div>
+              </dl>
+            </section>
+            {warnings.length > 0 && (
+              <details className="review-note">
+                <summary>Important restrictions</summary>
+                <ul>
+                  {warnings.slice(0, 3).map((item) => (
+                    <li key={item.code}>{item.message}</li>
+                  ))}
+                </ul>
+              </details>
             )}
           </div>
         </div>
+        <div className="review-actions">
+          {blockers.length > 0 && (
+            <div className="review-error" role="alert">
+              {blockers[0].message}
+            </div>
+          )}
+          {!account && !blockers.length && (
+            <p className="panel-detail">Choose a sending account to enable sending.</p>
+          )}
+          <button
+            className="primary-button"
+            disabled={!canSend}
+            onClick={() => setConfirmOpen(true)}
+          >
+            {sendLabel}
+          </button>
+          {status === "ready" && (
+            <div className="schedule-control">
+              <Field label="Send later (optional)" hint="Uses your local timezone.">
+                <input
+                  type="datetime-local"
+                  value={scheduleAt}
+                  onChange={(event) => setScheduleAt(event.target.value)}
+                />
+              </Field>
+              <button onClick={() => onSchedule(scheduleAt)} disabled={!scheduleAt}>
+                Schedule send
+              </button>
+            </div>
+          )}
+        </div>
       </Panel>
+      {(status === "running" || status === "paused") && (
+        <Panel className="progress-panel">
+          <strong>{status === "paused" ? "Sending paused" : "Sending…"}</strong>
+          <span>{sentCount.toLocaleString()} of {total.toLocaleString()} accepted by the provider</span>
+          <div className="button-group">
+            {status === "running" ? (
+              <button onClick={() => onAction("pause", "Sending paused")}>Pause sending</button>
+            ) : (
+              <button onClick={() => onAction("resume", "Sending resumed")}>Resume sending</button>
+            )}
+            <button className="danger-button" onClick={() => onAction("cancel", "Sending canceled")}>
+              Cancel sending
+            </button>
+          </div>
+        </Panel>
+      )}
+      {status === "completed" && (
+        <Panel className="result-panel send-result">
+          <strong>Send complete</strong>
+          <span>{sentCount.toLocaleString()} emails were accepted by the provider.</span>
+          <button onClick={() => onNavigate("history")}>View activity</button>
+        </Panel>
+      )}
       <Panel className="test-panel">
         <PanelHeading
           eyebrow="SEPARATE TEST"
@@ -2427,7 +2454,11 @@ function SendReview({
           <Field label="Test recipient">
             <input
               value={testRecipient}
-              onChange={(event) => setTestRecipient(event.target.value)}
+              onChange={(event) => {
+                setTestRecipient(event.target.value);
+                setTestPrepared("");
+                setTestResult(null);
+              }}
               placeholder="you@example.com"
             />
           </Field>
@@ -2455,10 +2486,27 @@ function SendReview({
           </div>
         )}
         <p className="panel-detail">
-          Test sending is separate from the final audience and uses the
-          selected account. Review the message above before sending it.
+          Test sending is separate from the final audience and uses the selected
+          account. Review the rendered message above before sending it.
         </p>
       </Panel>
+      {confirmOpen && (
+        <div className="dialog-backdrop" role="presentation">
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">
+            <h2 id="send-confirm-title">Confirm send</h2>
+            <p>
+              Send {total.toLocaleString()} email{total === 1 ? "" : "s"} using {accountName}?
+            </p>
+            <p className="panel-detail">
+              The reviewed recipients, sender and message will be bound to this send. Provider acceptance is recorded; inbox delivery is not guaranteed.
+            </p>
+            <div className="button-group dialog-actions">
+              <button onClick={() => setConfirmOpen(false)}>Keep reviewing</button>
+              <button className="primary-button" onClick={confirmSend}>Confirm send</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2533,7 +2581,7 @@ function Activity({
                 <tr key={`${item.activityType}-${item.id}`}>
                   <td>
                     <strong>
-                      {item.name || item.source_filename || "Unnamed operation"}
+                      {item.name || item.source_filename || "Unnamed activity"}
                     </strong>
                     <small>
                       {item.configuration?.sender_email ||
@@ -2558,7 +2606,7 @@ function Activity({
         ) : (
           <Empty
             title="Nothing recorded yet"
-            text="Prepared and controlled sending operations will appear here."
+            text="Sends and list work will appear here when they help with review or recovery."
             action="Open Compose"
             onAction={() => onNavigate("send")}
           />

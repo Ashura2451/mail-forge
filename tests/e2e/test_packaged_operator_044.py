@@ -138,15 +138,14 @@ def test_packaged_send_uses_controlled_smtp_and_does_not_duplicate_after_restart
                 page.get_by_label("HTML asset bundle").set_input_files(str(asset_zip))
                 page.get_by_label("Email account").select_option("capture")
                 page.get_by_role("button", name="Review exact send").click()
-                page.get_by_text("1 recipients").wait_for()
-                page.get_by_text("HTML prepared safely").wait_for()
+                page.get_by_text("1 recipient").wait_for()
                 page.get_by_label("Test recipient").fill("test@sandbox.example.com")
                 page.get_by_role("button", name="Send test email").click()
                 page.get_by_text("Result: provider_accepted").wait_for(timeout=15_000)
                 assert len(smtp.received_messages) == 1
-                page.get_by_role("button", name="Prepare exact scope").click()
-                page.get_by_role("button", name="Authorize simulation").click()
-                page.get_by_role("button", name="Start local simulation").click()
+                page.get_by_role("button", name="Send 1 email").click()
+                dialog = page.get_by_role("dialog", name="Confirm send")
+                dialog.get_by_role("button", name="Confirm send").click()
                 page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
                 assert len(smtp.received_messages) == 2
                 record = page.evaluate(

@@ -107,7 +107,7 @@ def test_compare_clears_stale_results_when_operation_changes(local_page) -> None
     page.get_by_role("button", name="Calculate result", exact=True).click()
     page.get_by_role("heading", name="Only in main", exact=True).wait_for()
     assert page.get_by_text("alice@example.com", exact=True).is_visible()
-    page.get_by_role("combobox", name="Operation").select_option("intersection")
+    page.get_by_role("combobox", name="Show").select_option("intersection")
     assert page.get_by_text("No result is active", exact=True).is_visible()
     assert not page.get_by_role("heading", name="Only in main", exact=True).is_visible()
 
@@ -121,8 +121,9 @@ def test_compose_is_independent_and_shows_exact_pasted_scope(local_page) -> None
     page.get_by_role("button", name="Review exact send", exact=True).click()
     page.get_by_text("2 recipients", exact=True).wait_for()
     assert page.get_by_text("Direct HTML test", exact=True).is_visible()
-    page.get_by_role("button", name="Prepare exact scope", exact=True).click()
-    page.get_by_role("button", name="Authorize simulation", exact=True).wait_for()
+    assert page.get_by_role("button", name="Send 2 emails", exact=True).is_disabled()
+    assert not page.get_by_text("Operation controls", exact=True).is_visible()
+    assert page.get_by_title("Rendered email preview").is_visible()
 
 
 def test_compose_accepts_complete_html_document_metadata_and_assets(local_page) -> None:
@@ -155,9 +156,10 @@ def test_compose_accepts_complete_html_document_metadata_and_assets(local_page) 
         }
     )
     page.get_by_role("button", name="Review exact send", exact=True).click()
-    page.get_by_text("1 recipients", exact=True).wait_for()
-    page.get_by_text("HTML prepared safely", exact=True).wait_for()
+    page.get_by_text("1 recipient", exact=True).wait_for()
+    page.get_by_text("Message adjusted for email compatibility", exact=True).click()
     assert page.get_by_text(re.compile("UTF-8 document metadata was normalized")).is_visible()
+    assert page.get_by_title("Rendered email preview").is_visible()
 
 
 def test_sorted_result_handoff_selects_the_transferred_list_in_compare(local_page) -> None:
