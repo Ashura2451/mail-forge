@@ -538,12 +538,58 @@ def analyze_html(
                 candidates.append(" ".join([safe, *pieces[1:]]))
         return ", ".join(candidates)
 
+    def normalize_meta(match: re.Match[str]) -> str:
+        attrs = {
+            item.group("name").lower(): item.group("quoted") or item.group("bare") or ""
+            for item in _ATTR.finditer(match.group("attrs"))
+        }
+        charset = attrs.get("charset", "").strip().lower().replace("_", "-")
+        http_equiv = attrs.get("http-equiv", "").strip().lower()
+        name = attrs.get("name", "").strip().lower()
+        content = attrs.get("content", "").strip()
+        if charset in {"utf-8", "utf8"} or (
+            http_equiv == "content-type" and "charset=utf-8" in content.lower().replace(" ", "")
+        ):
+            diagnostics.append(
+                HTMLDiagnostic(
+                    "INFO",
+                    "metadata_normalized",
+                    "UTF-8 document metadata was normalized for email rendering",
+                )
+            )
+            return '<meta charset="utf-8">'
+        if name in {
+            "viewport",
+            "color-scheme",
+            "supported-color-schemes",
+            "format-detection",
+            "x-apple-disable-message-reformatting",
+        } and content and not any(char in content for char in '<>"\x00\r\n'):
+            diagnostics.append(
+                HTMLDiagnostic(
+                    "INFO",
+                    "metadata_preserved",
+                    f"Email metadata <meta name=\"{name}\"> was preserved",
+                )
+            )
+            return f'<meta name="{html.escape(name, quote=True)}" content="{html.escape(content, quote=True)}">'
+        diagnostics.append(
+            HTMLDiagnostic(
+                "INFO",
+                "metadata_removed",
+                "Non-rendering document metadata was removed from the prepared email",
+            )
+        )
+        return ""
+
     def replace_tag(match: re.Match[str]) -> str:
         name = match.group("name").lower()
         if match.group("closing"):
             if name in {"script", "iframe", "object", "embed", "form", "svg", "link", "meta"}:
                 return ""
             return match.group(0)
+        if name == "meta":
+            return normalize_meta(match)
         if name in {
             "script",
             "iframe",
@@ -552,7 +598,6 @@ def analyze_html(
             "form",
             "svg",
             "link",
-            "meta",
             "base",
             "audio",
             "video",

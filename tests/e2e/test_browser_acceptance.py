@@ -10,7 +10,9 @@ import subprocess
 import sys
 import time
 import urllib.request
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
@@ -121,6 +123,41 @@ def test_compose_is_independent_and_shows_exact_pasted_scope(local_page) -> None
     assert page.get_by_text("Direct HTML test", exact=True).is_visible()
     page.get_by_role("button", name="Prepare exact scope", exact=True).click()
     page.get_by_role("button", name="Authorize simulation", exact=True).wait_for()
+
+
+def test_compose_accepts_complete_html_document_metadata_and_assets(local_page) -> None:
+    page, base = local_page
+    asset_zip = BytesIO()
+    with ZipFile(asset_zip, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("logo.png", b"\x89PNG\r\n\x1a\nfixture")
+    page.goto(f"{base}/send", wait_until="networkidle")
+    page.get_by_label(re.compile("Paste addresses")).fill("alice@example.com")
+    page.get_by_label("Subject").fill("Complete HTML document")
+    page.get_by_label("HTML file").set_input_files(
+        {
+            "name": "newsletter.html",
+            "mimeType": "text/html",
+            "buffer": (
+                b"<!doctype html><html><head><meta charset='utf-8'>"
+                b"<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                b"<meta http-equiv='refresh' content='0;url=https://unsafe.invalid'>"
+                b"<style>.hero{color:#123456}</style></head><body>"
+                b"<div class='hero'><h1>Hello {{ name }}</h1>"
+                b"<img src='logo.png' alt='Logo'></div></body></html>"
+            ),
+        }
+    )
+    page.get_by_label("HTML asset bundle").set_input_files(
+        {
+            "name": "assets.zip",
+            "mimeType": "application/zip",
+            "buffer": asset_zip.getvalue(),
+        }
+    )
+    page.get_by_role("button", name="Review exact send", exact=True).click()
+    page.get_by_text("1 recipients", exact=True).wait_for()
+    page.get_by_text("HTML prepared safely", exact=True).wait_for()
+    assert page.get_by_text(re.compile("UTF-8 document metadata was normalized")).is_visible()
 
 
 def test_sorted_result_handoff_selects_the_transferred_list_in_compare(local_page) -> None:

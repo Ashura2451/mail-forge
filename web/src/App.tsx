@@ -7,6 +7,7 @@ import {
   upload,
   uploadAsset,
   uploadComparison,
+  uploadFiles,
   type ApiRecord,
 } from "./api/client";
 import "./App.css";
@@ -1299,7 +1300,14 @@ function CompareLists({
   const [result, setResult] = useState<ApiRecord | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   useEffect(() => {
-    void api<ApiRecord>("/lists").then((value) => setLists(value.items || []));
+    const requestedListId =
+      new URLSearchParams(window.location.search).get("list_id") || "";
+    void api<ApiRecord>("/lists").then((value) => {
+      const nextLists: ApiRecord[] = value.items || [];
+      setLists(nextLists);
+      if (requestedListId && nextLists.some((item) => item.id === requestedListId))
+        setMainList(requestedListId);
+    });
   }, []);
   const rows: ApiRecord[] = result?.results || [];
   const sourceChanged = () => {
@@ -1625,10 +1633,12 @@ function Sender({
   const [text, setText] = useState("");
   const [html, setHtml] = useState("");
   const [htmlFile, setHtmlFile] = useState<File | null>(null);
+  const [assetZip, setAssetZip] = useState<File | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [embeddedAssets, setEmbeddedAssets] = useState<File[]>([]);
   const [label, setLabel] = useState("");
   const [campaign, setCampaign] = useState<ApiRecord | null>(null);
+  const [revisionId, setRevisionId] = useState("");
   const [draftMeta, setDraftMeta] = useState({
     subject: "",
     text: "",
@@ -1637,6 +1647,8 @@ function Sender({
   const [preview, setPreview] = useState<ApiRecord | null>(null);
   const [testRecipient, setTestRecipient] = useState("");
   const [testPrepared, setTestPrepared] = useState("");
+  const [testResult, setTestResult] = useState<ApiRecord | null>(null);
+  const [htmlFeedback, setHtmlFeedback] = useState<ApiRecord[]>([]);
   useEffect(() => {
     void api<ApiRecord>("/lists").then((value) => setLists(value.items || []));
     void api<ApiRecord>("/providers").then((value) =>
@@ -1706,47 +1718,94 @@ function Sender({
       const assetManifest: ApiRecord[] = [];
       for (const item of embeddedAssets) {
         const asset = await uploadAsset(item, "image");
-        assetManifest.push({ asset_id: asset.id, filename: item.name });
+        assetManifest.push({ asset_id: asset.id, reference: item.name });
       }
-      const document = {
-        version: 1,
-        name: subject,
-        subject,
-        preheader: "",
-        fallbacks: {},
-        attachments: attachmentRefs,
-        ...(html.trim()
-          ? {
-              composition_mode: "custom_html",
-              custom_html: {
-                original_source: html.trim(),
-                asset_manifest: assetManifest,
-              },
-              blocks: [{ type: "text", text: text || "Message" }],
-            }
-          : { blocks: [{ type: "text", text }] }),
-      };
-      const createdDoc = await api<ApiRecord>("/message-studio/documents", {
-        method: "POST",
-        body: JSON.stringify({
-          name: subject || "Mailforge message",
-          kind: "message",
-          document,
-        }),
-      });
+      let createdDoc: ApiRecord;
+      let importedHtmlDiagnostics: ApiRecord[] = [];
+      if (htmlFile) {
+        const imported = await uploadFiles(
+          "/message-studio/custom-html/import",
+          {
+            html_file: htmlFile,
+            ...(assetZip ? { assets_zip: assetZip } : {}),
+          },
+          { name: subject || "Mailforge HTML message", kind: "message" },
+        );
+        importedHtmlDiagnostics =
+          imported.draft?.document?.custom_html?.diagnostics || [];
+        const importedDocument = {
+          ...(imported.draft?.document || {}),
+          name:
+            subject || imported.draft?.document?.name || "Mailforge message",
+          subject,
+          attachments: attachmentRefs,
+          custom_html: {
+            ...(imported.draft?.document?.custom_html || {}),
+            asset_manifest: [
+              ...(imported.draft?.document?.custom_html?.asset_manifest || []),
+              ...assetManifest,
+            ],
+          },
+        };
+        createdDoc = await api<ApiRecord>(
+          `/message-studio/documents/${imported.id}/save`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              document: importedDocument,
+              expected_revision_id: imported.draft?.id,
+            }),
+          },
+        );
+      } else {
+        const document = {
+          version: 1,
+          name: subject,
+          subject,
+          preheader: "",
+          fallbacks: {},
+          attachments: attachmentRefs,
+          ...(html.trim()
+            ? {
+                composition_mode: "custom_html",
+                custom_html: {
+                  original_source: html.trim(),
+                  asset_manifest: assetManifest,
+                },
+                blocks: [{ type: "text", text: text || "Message" }],
+              }
+            : { blocks: [{ type: "text", text }] }),
+        };
+        createdDoc = await api<ApiRecord>("/message-studio/documents", {
+          method: "POST",
+          body: JSON.stringify({
+            name: subject || "Mailforge message",
+            kind: "message",
+            document,
+          }),
+        });
+      }
+      setHtmlFeedback(
+        importedHtmlDiagnostics.length
+          ? importedHtmlDiagnostics
+          : createdDoc.draft?.document?.custom_html?.diagnostics ||
+            createdDoc.document?.custom_html?.diagnostics ||
+            [],
+      );
       const published = await api<ApiRecord>(
         `/message-studio/documents/${createdDoc.id}/publish`,
         { method: "POST", body: JSON.stringify({}) },
       );
-      const revisionId =
+      const publishedRevisionId =
         published.current_published_revision_id ||
         createdDoc.current_published_revision_id;
+      setRevisionId(publishedRevisionId);
       const created = await api<ApiRecord>("/campaigns", {
         method: "POST",
         body: JSON.stringify({
           name: label.trim() || `Send · ${subject}`,
           list_id: resolvedListId,
-          message_revision_id: revisionId,
+          message_revision_id: publishedRevisionId,
           provider_account_ref: account || null,
           sender_email: sender,
           subject,
@@ -1806,7 +1865,69 @@ function Sender({
       return result;
     }, "Operation scheduled locally");
   const localTest = () => {
-    if (testRecipient.trim()) setTestPrepared(testRecipient.trim());
+    const selected = accounts.find((item) => item.ref === account);
+    if (!selected || !revisionId || !testRecipient.trim()) return;
+    const host = String(selected.host || "").toLowerCase();
+    if (!(host === "localhost" || host === "127.0.0.1" || host === "::1")) {
+      onRun(async () => {
+        throw new Error(
+          "External provider test is disabled here; select a loopback capture account for a controlled local test.",
+        );
+      }, "External provider test not started");
+      return;
+    }
+    onRun(async () => {
+      const proof = await api<ApiRecord>(
+        `/providers/${encodeURIComponent(account)}/test-proof`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            sender,
+            recipient: testRecipient.trim(),
+            message_revision_id: revisionId,
+          }),
+        },
+      );
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      const purpose =
+        selected.sandbox_state === "active"
+          ? "sandbox_qualification"
+          : "controlled_test_send";
+      const grant = await api<ApiRecord>(
+        `/providers/${encodeURIComponent(account)}/grants`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            purpose,
+            sender,
+            recipient: testRecipient.trim(),
+            expires_at: expiresAt,
+            proof_hash: proof.proof_hash,
+          }),
+        },
+      );
+      const result = await api<ApiRecord>(
+        `/providers/${encodeURIComponent(account)}/test-send`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            sender,
+            recipient: testRecipient.trim(),
+            message: null,
+            idempotency_key: `ui-test-${Date.now()}`,
+            authorization_ref: grant.authorization_ref,
+            purpose: grant.purpose,
+            expires_at: expiresAt,
+            message_revision_id: revisionId,
+            proof_id: proof.proof_id,
+            proof_hash: proof.proof_hash,
+          }),
+        },
+      );
+      setTestPrepared(testRecipient.trim());
+      setTestResult(result);
+      return result;
+    }, "Controlled one-recipient test completed");
   };
   if (campaign)
     return (
@@ -1824,9 +1945,13 @@ function Sender({
           setCampaign(null);
           setPreview(null);
           setTestPrepared("");
+          setTestResult(null);
+          setHtmlFeedback([]);
         }}
         onNavigate={onNavigate}
         onLocalTest={localTest}
+        testResult={testResult}
+        htmlFeedback={htmlFeedback}
       />
     );
   return (
@@ -1951,6 +2076,21 @@ function Sender({
               onChange={(event) => setHtmlFile(event.target.files?.[0] || null)}
             />
           </label>
+          {htmlFile && (
+            <label className="file-picker">
+              <span>
+                {assetZip ? assetZip.name : "Add HTML asset bundle (.zip)"}
+              </span>
+              <input
+                aria-label="HTML asset bundle"
+                type="file"
+                accept=".zip"
+                onChange={(event) =>
+                  setAssetZip(event.target.files?.[0] || null)
+                }
+              />
+            </label>
+          )}
           {html && (
             <div className="html-preview">
               <span>HTML preview</span>
@@ -1959,6 +2099,14 @@ function Sender({
                 srcDoc={html}
                 sandbox="allow-same-origin"
               />
+            </div>
+          )}
+          {htmlFeedback.length > 0 && (
+            <div className="html-feedback" role="status">
+              <strong>HTML prepared safely</strong>
+              {htmlFeedback.map((item, index) => (
+                <span key={`${item.code}-${index}`}>{item.message}</span>
+              ))}
             </div>
           )}
         </Panel>
@@ -2051,6 +2199,8 @@ function SendReview({
   testRecipient,
   setTestRecipient,
   testPrepared,
+  testResult,
+  htmlFeedback,
   preview,
   onAction,
   onSchedule,
@@ -2064,6 +2214,8 @@ function SendReview({
   testRecipient: string;
   setTestRecipient: (value: string) => void;
   testPrepared: string;
+  testResult: ApiRecord | null;
+  htmlFeedback: ApiRecord[];
   preview: ApiRecord | null;
   onAction: (path: string, message: string) => void;
   onSchedule: (scheduledAt: string) => void;
@@ -2127,6 +2279,14 @@ function SendReview({
               <strong>{messageSubject}</strong>
               <p>{messageText}</p>
             </div>
+          {htmlFeedback.length > 0 && (
+            <div className="html-feedback" role="status">
+              <strong>HTML prepared safely</strong>
+              {htmlFeedback.map((item, index) => (
+                <span key={`${item.code}-${index}`}>{item.message}</span>
+              ))}
+            </div>
+          )}
             {preview?.intents?.length ? (
               <div className="preview-box">
                 <strong>Prepared recipients</strong>
@@ -2275,23 +2435,28 @@ function SendReview({
             onClick={onLocalTest}
             disabled={!testRecipient.trim() || !account}
           >
-            Prepare test operation
+            Send test email
           </button>
         </div>
         {testPrepared && (
           <div className="preview-box">
-            <strong>One-recipient test prepared</strong>
+            <strong>One-recipient test sent</strong>
             <span>{testPrepared} · account selected · audience unchanged</span>
+            {testResult && (
+              <span>
+                Result: {testResult.status || testResult.outcome || "recorded"}
+              </span>
+            )}
             <small>
-              Provider execution remains behind the canonical authorization
-              boundary and was not started here.
+              The provider accepted this test message through the same
+              authorization boundary as the selected account. It did not
+              change the final audience.
             </small>
           </div>
         )}
         <p className="panel-detail">
-          A provider test remains behind the canonical authorization and
-          credential boundaries. No external operation is started by this
-          review.
+          Test sending is separate from the final audience and uses the
+          selected account. Review the message above before sending it.
         </p>
       </Panel>
     </div>

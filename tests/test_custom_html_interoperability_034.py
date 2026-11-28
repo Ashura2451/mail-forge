@@ -144,6 +144,41 @@ def test_custom_html_rejects_non_html_file_content(tmp_path: Path) -> None:
     assert error.value.code == "html_signature"
 
 
+def test_custom_html_accepts_standard_document_metadata_and_normalizes_safely(
+    tmp_path: Path,
+) -> None:
+    studio = _studio(tmp_path)
+    source = b"""<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="refresh" content="0;url=https://unsafe.invalid">
+<title>Newsletter</title>
+<style>body { color: #123456; } .hero { padding: 8px; }</style>
+</head><body><div class="hero"><h1>Hello {{ name }}</h1><p>Welcome.</p></div></body></html>"""
+
+    imported = studio.import_custom_html(
+        "Standard document", source, filename="newsletter.html"
+    )
+    document = imported["draft"]["document"]
+    diagnostics = document["custom_html"]["diagnostics"]
+    prepared = document["custom_html"]["prepared_source"]
+
+    assert "Unsupported active element" not in " ".join(
+        item["message"] for item in diagnostics
+    )
+    assert "<meta charset=\"utf-8\">" in prepared
+    assert "name=\"viewport\"" in prepared
+    assert "http-equiv=\"refresh\"" not in prepared
+    assert "Newsletter" in prepared
+    assert ".hero" in prepared
+    assert 'style="padding: 8px;' in prepared
+    assert "padding: 8px" in prepared
+    assert any(item["code"] == "metadata_normalized" for item in diagnostics)
+    assert any(item["code"] == "metadata_preserved" for item in diagnostics)
+    assert all(item["severity"] != "ERROR" for item in diagnostics)
+
+
 def test_custom_html_removes_remote_srcset_and_poster_resources(tmp_path: Path) -> None:
     studio = _studio(tmp_path)
     document = studio.import_custom_html(

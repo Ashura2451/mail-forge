@@ -38,7 +38,10 @@ checked for path traversal, symlinks, nesting, duplicates, unsupported active
 content, file/count/size/depth limits, and compression abuse. Scripts, event
 handlers, forms, frames, active SVG, unsafe schemes, CSS imports, and unsafe
 resource URLs are rejected or removed with `ERROR`, `WARNING`, or `INFO`
-diagnostics. Simple CSS selectors are inlined while media queries and Outlook
+diagnostics. Standard document metadata is handled separately: UTF-8 and
+email-relevant display hints are normalized or preserved, while non-rendering
+metadata such as refresh directives is removed without blocking the import.
+Simple CSS selectors are inlined while media queries and Outlook
 conditional/VML source are retained with compatibility warnings.
 
 Preview is generated from a resource-free snapshot in an opaque sandboxed
